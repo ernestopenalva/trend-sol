@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+*.txt
+!requirements.txt
+*.log
+*.zip
+.env
+
+venv/
+.venv/
+
+.vscode/
+src/.vscode/
+_incoming_files_*/
+
+# Runtime gerado pelo trend-sol
+logs/
+data/

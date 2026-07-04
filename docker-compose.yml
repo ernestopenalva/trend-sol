@@ -1,0 +1,7 @@
+services:
+  trend-sol-app:
+    build: .
+    container_name: trend-sol-app
+    volumes:
+      - .:/app
+    command: python main.py

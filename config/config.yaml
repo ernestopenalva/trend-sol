@@ -1,0 +1,69 @@
+symbol: SOLUSDT
+
+market_data:
+  ws_url: "wss://stream.binance.com:9443"
+  trade_stream: "solusdt@aggTrade"
+  kline_streams:
+    - "solusdt@kline_4h"
+    - "solusdt@kline_1d"
+
+execution:
+  testnet_url: "https://testnet.binance.vision"
+  recv_window_ms: 5000
+  use_server_time_sync: true
+
+trend:
+  timeframe: "1d"
+  ema_period: 50
+  ema_slope_lookback: 3
+
+entry:
+  timeframe: "4h"
+  lookback_candles: 30
+  atr_period: 14
+  pullback_atr_multiplier: 1.5
+  rsi_period: 14
+  rsi_threshold: 45
+  rsi_lookback_candles: 2
+  volume_ma_candles: 5
+  require_reversal_candle_closed: true
+  near_miss:
+    trend_slope_ratio: 0.002
+    pullback_required_ratio: 0.85
+    rsi_margin: 3
+    reversal_min_position: 0.58
+
+capital:
+  operational_balance_usdt: 1000
+  trade_size_pct: 5
+  max_open_pairs: 5
+
+exit_server_simple_trail:
+  preferred_order_type: "STOP_LOSS"
+  fallback_order_type: "STOP_LOSS_LIMIT"
+  trailing_delta_bips: 400
+  use_stop_price: false
+
+exit_bot_full_engine:
+  stop_loss_pct: 30
+  breakeven:
+    - trigger_pct: 5
+      stop_to_pct: 1
+    - trigger_pct: 6
+      stop_to_pct: 3
+    - trigger_pct: 10
+      stop_to_pct: 5
+  trailing:
+    activation_pct: 10
+    gap_pct: 4
+
+cycle:
+  pairs_per_cycle: 10
+  prolabore_pct: 5
+  stats_min_pairs: 50
+
+logging:
+  level: INFO
+  trade_log: "logs/trades.jsonl"
+  decision_log: "logs/decisions.jsonl"
+  system_log: "logs/system.log"
