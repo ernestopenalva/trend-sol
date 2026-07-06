@@ -29,6 +29,7 @@ class WSManager:
         self.status = "starting"
         self.ping_interval_seconds = int(ping_interval_seconds)
         self.ping_timeout_seconds = int(ping_timeout_seconds)
+        self._app: WebSocketApp | None = None
 
     def run_forever(self) -> None:
         backoff_sequence = [1, 2, 5, 10, 30, 60]
@@ -43,12 +44,14 @@ class WSManager:
                 on_close=self._on_close,
                 on_open=self._on_open,
             )
+            self._app = app
             watchdog = threading.Thread(target=self._watchdog, args=(app,), daemon=True)
             watchdog.start()
             app.run_forever(
                 ping_interval=self.ping_interval_seconds,
                 ping_timeout=self.ping_timeout_seconds,
             )
+            self._app = None
             if self.stop_requested:
                 break
             self.status = "reconnecting"
@@ -59,6 +62,8 @@ class WSManager:
 
     def stop(self) -> None:
         self.stop_requested = True
+        if self._app:
+            self._app.close()
 
     def _watchdog(self, app: WebSocketApp) -> None:
         while not self.stop_requested:

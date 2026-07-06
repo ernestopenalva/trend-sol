@@ -1,6 +1,10 @@
 symbol: SOLUSDT
 active_profile: debug_intraday
 
+run_control:
+  mode: single_cycle
+  stop_after_cycle_complete: true
+
 market_data:
   rest_url: "https://api.binance.com"
   ws_url: "wss://stream.binance.com:9443"
@@ -70,7 +74,7 @@ profiles:
 capital:
   operational_balance_usdt: 1000
   trade_size_pct: 5
-  max_open_pairs: 5
+  max_open_pairs: 1
 
 exit_server_simple_trail:
   preferred_order_type: "STOP_LOSS"
@@ -92,7 +96,8 @@ exit_bot_full_engine:
     gap_pct: 4
 
 cycle:
-  pairs_per_cycle: 10
+  pairs_per_cycle: 1
+  trades_per_cycle: 1
   prolabore_pct: 5
   stats_min_pairs: 50
 

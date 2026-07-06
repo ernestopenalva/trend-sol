@@ -24,6 +24,7 @@ class CycleManager:
         self.closed_pairs: List[Dict[str, Any]] = []
         self.closed_pair_ids: set[str] = set()
         self.closed_positions: set[tuple[str, str]] = set()
+        self.completed_cycles = int(self.config.get("cycle", {}).get("completed_cycles", 0))
         self.load_state()
 
     def load_state(self) -> None:
@@ -31,6 +32,7 @@ class CycleManager:
         self.closed_pairs = list(state.get("closed_pairs", []))
         self.closed_pair_ids = set(state.get("closed_pair_ids", []))
         self.closed_positions = {tuple(item) for item in state.get("closed_positions", [])}
+        self.completed_cycles = int(state.get("completed_cycles", 0))
 
     def save_state(self) -> None:
         self.state_manager.save_cycle_state(
@@ -38,6 +40,7 @@ class CycleManager:
                 "closed_pairs": self.closed_pairs,
                 "closed_pair_ids": sorted(self.closed_pair_ids),
                 "closed_positions": [list(item) for item in sorted(self.closed_positions)],
+                "completed_cycles": self.completed_cycles,
             }
         )
 
@@ -77,7 +80,7 @@ class CycleManager:
 
     def _maybe_close_cycle(self) -> None:
         cycle_cfg = self.config["cycle"]
-        pairs_per_cycle = int(cycle_cfg["pairs_per_cycle"])
+        pairs_per_cycle = self.pairs_per_cycle
         if len(self.closed_pairs) < pairs_per_cycle:
             return
 
@@ -98,6 +101,7 @@ class CycleManager:
             "stats_min_pairs": int(cycle_cfg["stats_min_pairs"]),
             "stats_ready": len(self.closed_pair_ids) >= int(cycle_cfg["stats_min_pairs"]),
         }
+        self.completed_cycles += 1
         self.logger.system("cycle_closed", **report)
         self.save_state()
 
@@ -106,6 +110,22 @@ class CycleManager:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(report, ensure_ascii=False) + "\n")
+
+    @property
+    def pairs_per_cycle(self) -> int:
+        cycle_cfg = self.config["cycle"]
+        return int(cycle_cfg.get("trades_per_cycle", cycle_cfg["pairs_per_cycle"]))
+
+    @property
+    def closed_pairs_in_current_cycle(self) -> int:
+        if self.pairs_per_cycle <= 0:
+            return 0
+        return len(self.closed_pair_ids) % self.pairs_per_cycle
+
+    @property
+    def single_cycle_complete(self) -> bool:
+        run_cfg = self.config.get("run_control", {})
+        return str(run_cfg.get("mode", "continuous")).lower() == "single_cycle" and self.completed_cycles >= 1
 
 
 def _duration_text(start: str, end: str | None) -> str | None:

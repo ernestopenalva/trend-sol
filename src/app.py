@@ -39,6 +39,7 @@ class Monitor:
         self.ws_manager: WSManager | None = None
         self.status_reporter: HumanConsoleReporter | None = None
         self.state_manager = StateManager(self.project_root)
+        self._cycle_stop_announced = False
         self.logger.system(
             "trend_sol_boot",
             config=str(config_path),
@@ -130,6 +131,7 @@ class Monitor:
             self.last_price = price
             self.last_tick_monotonic = time.monotonic()
             self.registry.on_tick(price)
+            self._stop_after_cycle_if_needed()
             return
 
         if "@kline_" in stream:
@@ -162,6 +164,9 @@ class Monitor:
         kline = payload.get("k") or {}
         if not bool(kline.get("x")):
             return True
+        if self.cycle_manager.single_cycle_complete:
+            self.entry_engine.set_paused("PAUSED_CYCLE_COMPLETE")
+            return True
         if self.registry.review_required:
             self.entry_engine.set_paused("PAUSED_NEEDS_REVIEW")
             return True
@@ -179,13 +184,31 @@ class Monitor:
         return False
 
     def _entry_console_context(self) -> Dict[str, Any]:
-        cycle_total = int(self.config["cycle"].get("trades_per_cycle", self.config["cycle"]["pairs_per_cycle"]))
-        cycle_done = len(self.cycle_manager.closed_pair_ids) % cycle_total
+        cycle_total = self.cycle_manager.pairs_per_cycle
+        cycle_done = cycle_total if self.cycle_manager.single_cycle_complete else self.cycle_manager.closed_pairs_in_current_cycle
         return {
             "gates": _gate_status(self.entry_engine.last_diagnostic.get("gates", {})),
             "open_pairs": self.registry.open_pair_count,
             "cycle": f"{cycle_done}/{cycle_total}",
         }
+
+    def _stop_after_cycle_if_needed(self) -> None:
+        run_cfg = self.config.get("run_control", {})
+        should_stop = bool(run_cfg.get("stop_after_cycle_complete", False))
+        if not should_stop or not self.cycle_manager.single_cycle_complete:
+            return
+        if self._cycle_stop_announced:
+            return
+        self._cycle_stop_announced = True
+        self.entry_engine.set_paused("PAUSED_CYCLE_COMPLETE")
+        self.logger.system(
+            "single_cycle_complete",
+            completed_cycles=self.cycle_manager.completed_cycles,
+            closed_pairs=len(self.cycle_manager.closed_pair_ids),
+        )
+        print(console_line("[SYSTEM] single_cycle concluido; monitor encerrando."), flush=True)
+        if self.ws_manager:
+            self.ws_manager.stop()
 
 
 def monitor() -> None:

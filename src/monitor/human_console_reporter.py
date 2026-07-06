@@ -55,8 +55,10 @@ class HumanConsoleReporter:
         return [self._entry_line(), self._positions_line(), self._system_line()]
 
     def _entry_line(self) -> str:
-        cycle_done = len(self.cycle_manager.closed_pair_ids) % int(self.cycle_manager.config["cycle"]["pairs_per_cycle"])
-        cycle_total = int(self.cycle_manager.config["cycle"].get("trades_per_cycle", self.cycle_manager.config["cycle"]["pairs_per_cycle"]))
+        cycle_total = self.cycle_manager.pairs_per_cycle
+        cycle_done = cycle_total if self.cycle_manager.single_cycle_complete else self.cycle_manager.closed_pairs_in_current_cycle
+        if self.cycle_manager.single_cycle_complete:
+            return f"[ENTRY] PAUSED cycle_complete | cycle={cycle_done}/{cycle_total}"
         if self.registry.review_required:
             return f"[ENTRY] PAUSED needs_review | cycle={cycle_done}/{cycle_total}"
         if self.registry.capacity_full:
