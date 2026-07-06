@@ -75,10 +75,22 @@ class HumanConsoleReporter:
         pnl = "n/a"
         if summary["bot_pnl_min"] is not None and summary["bot_pnl_max"] is not None:
             pnl = f"{summary['bot_pnl_min']:.2f}%..{summary['bot_pnl_max']:.2f}%"
+            if summary.get("bot_pnl_atr") is not None:
+                pnl = f"{summary['bot_pnl_min']:+.2f}% ({summary['bot_pnl_atr']:+.1f} ATR)"
+        stop = "n/a"
+        if summary.get("bot_effective_stop") is not None:
+            stop = f"{summary['bot_effective_stop']:.4f}"
+        price = "n/a"
+        if summary.get("current_price") is not None:
+            price = f"{summary['current_price']:.4f}"
+        entry = "n/a"
+        if summary.get("bot_entry") is not None:
+            entry = f"{summary['bot_entry']:.4f}"
         return (
             f"[POSITIONS] pairs={summary['pairs']} "
             f"A_open={summary['server_open']} B_open={summary['bot_open']} "
-            f"B_pnl={pnl} needs_review={summary['needs_review']}"
+            f"price={price} entry={entry} B_pnl={pnl} stop={stop} type={summary.get('bot_stop_type', 'n/a')} "
+            f"trail={summary.get('bot_trail_status', 'inactive')} needs_review={summary['needs_review']}"
         )
 
     def _system_line(self) -> str:

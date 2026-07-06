@@ -21,6 +21,9 @@ class BotFullExitPosition(PositionBase):
         config: Dict[str, Any],
         client: "BinanceClient",
         logger: JsonlLogger,
+        entry_atr: Optional[float] = None,
+        atr_timeframe: Optional[str] = None,
+        atr_period: Optional[int] = None,
     ) -> None:
         super().__init__(
             pair_id=pair_id,
@@ -36,13 +39,30 @@ class BotFullExitPosition(PositionBase):
         self.config = config
         self.client = client
         self.logger = logger
-        self.stop_price = entry_price * (1 - float(config["stop_loss_pct"]) / 100)
-        self.breakeven_steps = sorted(config.get("breakeven", []), key=lambda item: item["trigger_pct"])
-        self.applied_steps: set[float] = set()
+        self.entry_atr = _optional_float(entry_atr)
+        self.atr_timeframe = atr_timeframe
+        self.atr_period = int(atr_period) if atr_period is not None else None
+        self.review_stop_pct = float(config.get("review_stop_pct", config.get("stop_loss_pct", 30)))
+        self.review_stop = entry_price * (1 - self.review_stop_pct / 100)
+        self.profit_lock_mode = str(config.get("profit_lock_mode", "pct")).lower()
+        self.profit_lock_pct_steps = sorted(
+            config.get("profit_lock_pct", config.get("breakeven", [])),
+            key=lambda item: item["trigger_pct"],
+        )
+        self.profit_lock_atr_steps = sorted(config.get("profit_lock_atr", []), key=lambda item: item["trigger_atr"])
+        self.applied_steps: set[str] = set()
+        self.profit_lock_stop: Optional[float] = None
         trailing_cfg = config.get("trailing", {})
+        self.trailing_mode = str(trailing_cfg.get("mode", "pct")).lower()
         self.trailing_activation_pct = float(trailing_cfg.get("activation_pct", 10))
         self.trailing_gap_pct = float(trailing_cfg.get("gap_pct", 4))
+        self.trailing_activation_atr = float(trailing_cfg.get("activation_atr", 5))
+        self.trailing_gap_atr = float(trailing_cfg.get("gap_atr", 3))
         self.trailing_active = False
+        self.trailing_stop: Optional[float] = None
+        self.effective_stop = self.review_stop
+        self.stop_price = self.effective_stop
+        self.stop_type = "review"
 
     @classmethod
     def from_state(
@@ -70,8 +90,18 @@ class BotFullExitPosition(PositionBase):
         position.close_ts = state.get("close_ts")
         position.exit_order = state.get("exit_order")
         position.highest_price = float(state.get("highest_price", position.entry_price))
-        position.stop_price = float(state.get("stop_price", position.stop_price))
-        position.applied_steps = {float(item) for item in state.get("applied_steps", [])}
+        position.entry_atr = _optional_float(state.get("entry_atr", position.entry_atr))
+        position.atr_timeframe = state.get("atr_timeframe", position.atr_timeframe)
+        position.atr_period = int(state["atr_period"]) if state.get("atr_period") is not None else position.atr_period
+        position.profit_lock_mode = str(state.get("profit_lock_mode", position.profit_lock_mode)).lower()
+        position.trailing_mode = str(state.get("trailing_mode", position.trailing_mode)).lower()
+        position.review_stop = float(state.get("review_stop", state.get("review_stop_price", position.review_stop)))
+        position.profit_lock_stop = _optional_float(state.get("profit_lock_stop", position.profit_lock_stop))
+        position.trailing_stop = _optional_float(state.get("trailing_stop", position.trailing_stop))
+        position.effective_stop = float(state.get("effective_stop", state.get("stop_price", position.effective_stop)))
+        position.stop_price = position.effective_stop
+        position.stop_type = str(state.get("stop_type", position.stop_type))
+        position.applied_steps = {str(item) for item in state.get("applied_steps", [])}
         position.trailing_active = bool(state.get("trailing_active", False))
         return position
 
@@ -83,25 +113,36 @@ class BotFullExitPosition(PositionBase):
         if price > self.highest_price:
             self.highest_price = price
 
+        if self._atr_required() and not self._valid_entry_atr():
+            self.status = "NEEDS_REVIEW"
+            self.logger.system(
+                "position_needs_review",
+                pair_id=self.pair_id,
+                position=self.label,
+                reason="missing_entry_atr_for_atr_exit",
+                profit_lock_mode=self.profit_lock_mode,
+                trailing_mode=self.trailing_mode,
+            )
+            return None
+
         pnl_pct = self.pnl_pct(price)
-        for index, step in enumerate(self.breakeven_steps, start=1):
-            trigger = float(step["trigger_pct"])
-            stop_to = float(step["stop_to_pct"])
-            if pnl_pct >= trigger and trigger not in self.applied_steps:
-                new_stop = self.entry_price * (1 + stop_to / 100)
-                if new_stop > self.stop_price:
-                    self.stop_price = new_stop
-                self.applied_steps.add(trigger)
+        pnl_atr = self.pnl_atr(price)
+        for index, new_stop in self._profit_lock_candidates(pnl_pct, pnl_atr):
+            step_key = f"{self.profit_lock_mode}:{index}"
+            if step_key not in self.applied_steps:
+                if self.profit_lock_stop is None or new_stop > self.profit_lock_stop:
+                    self.profit_lock_stop = new_stop
+                self.applied_steps.add(step_key)
                 self.logger.trade(
                     self._trade_event(
-                        event=f"BREAKEVEN_{index}",
+                        event=f"PROFIT_LOCK_{self.profit_lock_mode.upper()}_{index}",
                         price=price,
                         pnl_pct=pnl_pct,
                         exit_reason=None,
                     )
                 )
 
-        if pnl_pct >= self.trailing_activation_pct and not self.trailing_active:
+        if self._should_activate_trailing(pnl_pct, pnl_atr) and not self.trailing_active:
             self.trailing_active = True
             self.logger.trade(
                 self._trade_event(
@@ -112,15 +153,17 @@ class BotFullExitPosition(PositionBase):
                 )
             )
 
-        trailing_stop = None
         if self.trailing_active:
-            trailing_stop = self.highest_price * (1 - self.trailing_gap_pct / 100)
+            self.trailing_stop = self._current_trailing_stop()
+
+        self._refresh_effective_stop()
 
         reason = None
-        if price <= self.stop_price:
-            reason = "BREAKEVEN_FLOOR" if self.applied_steps else "STOP_LOSS"
-        elif trailing_stop is not None and price <= trailing_stop:
-            reason = "TRAILING"
+        if price <= self.effective_stop:
+            reason = {"review": "REVIEW_STOP", "profit_lock": "PROFIT_LOCK", "trailing": "TRAILING"}.get(
+                self.stop_type,
+                "REVIEW_STOP",
+            )
 
         if reason is None:
             return None
@@ -151,6 +194,14 @@ class BotFullExitPosition(PositionBase):
             "event": event,
             "price": price,
             "pnl_pct": pnl_pct,
+            "pnl_atr": self.pnl_atr(price),
+            "entry_atr": self.entry_atr,
+            "profit_lock_mode": self.profit_lock_mode,
+            "trailing_mode": self.trailing_mode,
+            "profit_lock_stop": self.profit_lock_stop,
+            "trailing_stop": self.trailing_stop,
+            "effective_stop": self.effective_stop,
+            "stop_type": self.stop_type,
             "exit_reason": exit_reason,
             "order_id": order.get("orderId"),
             "client_order_id": order.get("clientOrderId"),
@@ -159,15 +210,82 @@ class BotFullExitPosition(PositionBase):
             "commission": _commission(order),
         }
 
+    def pnl_atr(self, price: float) -> Optional[float]:
+        if not self._valid_entry_atr():
+            return None
+        return (price - self.entry_price) / float(self.entry_atr)
+
+    def peak_atr(self) -> Optional[float]:
+        if not self._valid_entry_atr():
+            return None
+        return (self.highest_price - self.entry_price) / float(self.entry_atr)
+
+    def _profit_lock_candidates(self, pnl_pct: float, pnl_atr: Optional[float]) -> list[tuple[int, float]]:
+        candidates: list[tuple[int, float]] = []
+        if self.profit_lock_mode == "atr":
+            if pnl_atr is None:
+                return candidates
+            for index, step in enumerate(self.profit_lock_atr_steps, start=1):
+                if _gte(pnl_atr, float(step["trigger_atr"])):
+                    candidates.append((index, self.entry_price + float(step["lock_atr"]) * float(self.entry_atr)))
+            return candidates
+
+        for index, step in enumerate(self.profit_lock_pct_steps, start=1):
+            if _gte(pnl_pct, float(step["trigger_pct"])):
+                candidates.append((index, self.entry_price * (1 + float(step["stop_to_pct"]) / 100)))
+        return candidates
+
+    def _should_activate_trailing(self, pnl_pct: float, pnl_atr: Optional[float]) -> bool:
+        if self.trailing_mode == "atr":
+            return pnl_atr is not None and _gte(pnl_atr, self.trailing_activation_atr)
+        return _gte(pnl_pct, self.trailing_activation_pct)
+
+    def _current_trailing_stop(self) -> Optional[float]:
+        if self.trailing_mode == "atr":
+            if not self._valid_entry_atr():
+                return None
+            return self.highest_price - self.trailing_gap_atr * float(self.entry_atr)
+        return self.highest_price * (1 - self.trailing_gap_pct / 100)
+
+    def _refresh_effective_stop(self) -> None:
+        stops = [
+            ("review", self.review_stop),
+            ("profit_lock", self.profit_lock_stop),
+            ("trailing", self.trailing_stop),
+        ]
+        self.stop_type, self.effective_stop = max(
+            ((name, value) for name, value in stops if value is not None),
+            key=lambda item: float(item[1]),
+        )
+        self.stop_price = self.effective_stop
+
+    def _atr_required(self) -> bool:
+        return self.profit_lock_mode == "atr" or self.trailing_mode == "atr"
+
+    def _valid_entry_atr(self) -> bool:
+        return self.entry_atr is not None and self.entry_atr > 0
+
     def to_state(self) -> Dict[str, Any]:
         state = super().to_state()
         state.update(
             {
                 "stop_price": self.stop_price,
+                "entry_atr": self.entry_atr,
+                "atr_timeframe": self.atr_timeframe,
+                "atr_period": self.atr_period,
+                "profit_lock_mode": self.profit_lock_mode,
+                "trailing_mode": self.trailing_mode,
+                "review_stop": self.review_stop,
+                "profit_lock_stop": self.profit_lock_stop,
+                "trailing_stop": self.trailing_stop,
+                "effective_stop": self.effective_stop,
+                "stop_type": self.stop_type,
                 "applied_steps": sorted(self.applied_steps),
                 "trailing_active": self.trailing_active,
                 "trailing_activation_pct": self.trailing_activation_pct,
                 "trailing_gap_pct": self.trailing_gap_pct,
+                "trailing_activation_atr": self.trailing_activation_atr,
+                "trailing_gap_atr": self.trailing_gap_atr,
             }
         )
         return state
@@ -192,6 +310,19 @@ def _float_or_zero(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _gte(left: float, right: float) -> bool:
+    return left >= right or abs(left - right) <= 1e-9
 
 
 def _commission(order: Dict[str, Any]) -> float:

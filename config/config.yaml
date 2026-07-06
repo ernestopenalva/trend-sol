@@ -95,6 +95,21 @@ exit_bot_full_engine:
     activation_pct: 10
     gap_pct: 4
 
+risk:
+  review_stop_pct: 30
+  profit_lock_mode: atr
+  profit_lock_atr:
+    - trigger_atr: 3
+      lock_atr: 0.5
+    - trigger_atr: 5
+      lock_atr: 1.5
+    - trigger_atr: 8
+      lock_atr: 3
+  trailing:
+    mode: atr
+    activation_atr: 5
+    gap_atr: 3
+
 cycle:
   pairs_per_cycle: 1
   trades_per_cycle: 1

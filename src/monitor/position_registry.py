@@ -82,9 +82,12 @@ class PositionRegistry:
                     quantity,
                     order,
                     open_ts,
-                    self.config["exit_bot_full_engine"],
+                    self._bot_exit_config(),
                     self.client,
                     self.logger,
+                    entry_atr=signal.entry_atr,
+                    atr_timeframe=signal.atr_timeframe,
+                    atr_period=signal.atr_period,
                 )
                 self.logger.trade(position._trade_event("OPEN", entry_price, 0.0, None, order))
 
@@ -113,6 +116,8 @@ class PositionRegistry:
             if event:
                 self.cycle_manager.on_position_closed(position)
                 self.save_state()
+            if position.status == "NEEDS_REVIEW":
+                self.review_required = True
         self._purge_closed_pairs()
         self.save_state()
 
@@ -133,7 +138,7 @@ class PositionRegistry:
                     restored.append(
                         BotFullExitPosition.from_state(
                             item,
-                            self.config["exit_bot_full_engine"],
+                            self._bot_exit_config(),
                             self.client,
                             self.logger,
                         )
@@ -225,6 +230,7 @@ class PositionRegistry:
             "needs_review": sum(1 for position in self.positions if position.status == "NEEDS_REVIEW"),
             "bot_pnl_min": min(pnl_values) if pnl_values else None,
             "bot_pnl_max": max(pnl_values) if pnl_values else None,
+            **(_bot_position_details(bot_positions[0], current_price) if bot_positions else {}),
         }
 
     def reserved_qty(self, pair_id: Optional[str] = None) -> float:
@@ -250,6 +256,9 @@ class PositionRegistry:
                 seen.add(key)
                 self.positions.append(position)
 
+    def _bot_exit_config(self) -> Dict[str, Any]:
+        return self.config.get("risk") or self.config["exit_bot_full_engine"]
+
 
 def _average_fill_price(order: Dict[str, Any]) -> float:
     quote = _float_or_zero(order.get("cummulativeQuoteQty"))
@@ -267,3 +276,17 @@ def _float_or_zero(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _bot_position_details(position: PositionBase, current_price: Optional[float]) -> Dict[str, Any]:
+    pnl_atr = None
+    if current_price is not None and hasattr(position, "pnl_atr"):
+        pnl_atr = position.pnl_atr(current_price)  # type: ignore[attr-defined]
+    return {
+        "bot_entry": position.entry_price,
+        "current_price": current_price,
+        "bot_pnl_atr": pnl_atr,
+        "bot_effective_stop": getattr(position, "effective_stop", None),
+        "bot_stop_type": getattr(position, "stop_type", None),
+        "bot_trail_status": "active" if bool(getattr(position, "trailing_active", False)) else "inactive",
+    }

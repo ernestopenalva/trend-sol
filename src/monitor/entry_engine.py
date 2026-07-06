@@ -53,6 +53,9 @@ class EntrySignal:
     price: float
     ts: str
     source_candle_open_time: int
+    entry_atr: Optional[float]
+    atr_timeframe: str
+    atr_period: int
 
 
 class EntryEngine:
@@ -107,6 +110,8 @@ class EntryEngine:
             return None
 
         latest = self.entry_candles[-1]
+        entry_atr = self._current_entry_atr()
+        atr_period = int(self.config["entry"]["atr_period"])
         self.last_diagnostic["last_reason"] = "buy_signal"
         self.logger.decision(
             {
@@ -116,9 +121,20 @@ class EntryEngine:
                 "near_miss": False,
                 "reason": "buy_signal",
                 "price": latest.close,
+                "entry_atr": entry_atr,
+                "atr_timeframe": self.entry_timeframe,
+                "atr_period": atr_period,
             }
         )
-        return EntrySignal(self.symbol, latest.close, now_iso(), latest.open_time)
+        return EntrySignal(
+            self.symbol,
+            latest.close,
+            now_iso(),
+            latest.open_time,
+            entry_atr,
+            self.entry_timeframe,
+            atr_period,
+        )
 
     def set_paused(self, reason: str) -> None:
         self.last_diagnostic = self._empty_diagnostic()
@@ -288,6 +304,18 @@ class EntryEngine:
                 **fields,
             }
         )
+
+    def _current_entry_atr(self) -> Optional[float]:
+        period = int(self.config["entry"]["atr_period"])
+        values = atr(
+            [candle.high for candle in self.entry_candles],
+            [candle.low for candle in self.entry_candles],
+            [candle.close for candle in self.entry_candles],
+            period,
+        )
+        if not values or values[-1] is None:
+            return None
+        return float(values[-1])
 
     def _empty_diagnostic(self) -> Dict[str, Any]:
         return {

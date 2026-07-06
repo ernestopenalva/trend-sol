@@ -24,6 +24,12 @@ class FakeClient:
 
 
 class BotFullEngineTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = TemporaryDirectory()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
     def test_breakeven_and_trailing_close(self) -> None:
         with TemporaryDirectory() as tmp:
             logger = JsonlLogger(
@@ -60,13 +66,88 @@ class BotFullEngineTests(unittest.TestCase):
 
             self.assertIsNone(position.on_tick(110.0))
             self.assertTrue(position.trailing_active)
-            self.assertAlmostEqual(position.stop_price, 105.0)
+            self.assertAlmostEqual(position.profit_lock_stop, 105.0)
+            self.assertAlmostEqual(position.effective_stop, 105.6)
 
             event = position.on_tick(105.0)
             self.assertIsNotNone(event)
             self.assertEqual(position.status, "CLOSED")
             self.assertEqual(position.reserved_qty, 0.0)
             self.assertEqual(client.sells[0][1], 1.0)
+
+    def test_atr_profit_lock_activates_at_trigger(self) -> None:
+        position = self._atr_position()
+
+        self.assertIsNone(position.on_tick(100.59))
+        self.assertIsNone(position.profit_lock_stop)
+
+        self.assertIsNone(position.on_tick(100.60))
+        self.assertAlmostEqual(position.profit_lock_stop, 100.10)
+        self.assertEqual(position.stop_type, "profit_lock")
+        self.assertAlmostEqual(position.effective_stop, 100.10)
+
+    def test_atr_trailing_activates_at_trigger(self) -> None:
+        position = self._atr_position()
+
+        self.assertIsNone(position.on_tick(101.00))
+
+        self.assertTrue(position.trailing_active)
+        self.assertAlmostEqual(position.trailing_stop, 100.40)
+        self.assertEqual(position.stop_type, "trailing")
+        self.assertAlmostEqual(position.effective_stop, 100.40)
+
+    def test_effective_stop_chooses_highest_stop(self) -> None:
+        position = self._atr_position()
+
+        self.assertIsNone(position.on_tick(101.60))
+
+        self.assertAlmostEqual(position.profit_lock_stop, 100.60)
+        self.assertAlmostEqual(position.trailing_stop, 101.00)
+        self.assertEqual(position.stop_type, "trailing")
+        self.assertAlmostEqual(position.effective_stop, 101.00)
+
+    def test_missing_entry_atr_marks_position_needs_review(self) -> None:
+        position = self._atr_position(entry_atr=None)
+
+        self.assertIsNone(position.on_tick(101.00))
+
+        self.assertEqual(position.status, "NEEDS_REVIEW")
+        self.assertEqual(position.reserved_qty, 1.0)
+
+    def _atr_position(self, entry_atr=0.20) -> BotFullExitPosition:
+        return BotFullExitPosition(
+            pair_id="pair",
+            symbol="SOLUSDT",
+            entry_price=100.0,
+            quantity=1.0,
+            entry_order={},
+            open_ts="2026-07-04T00:00:00+00:00",
+            config={
+                "review_stop_pct": 30,
+                "profit_lock_mode": "atr",
+                "profit_lock_atr": [
+                    {"trigger_atr": 3, "lock_atr": 0.5},
+                    {"trigger_atr": 5, "lock_atr": 1.5},
+                    {"trigger_atr": 8, "lock_atr": 3},
+                ],
+                "trailing": {"mode": "atr", "activation_atr": 5, "gap_atr": 3},
+            },
+            client=FakeClient(),  # type: ignore[arg-type]
+            logger=JsonlLogger(
+                Path(self.tmp.name),
+                {
+                    "logging": {
+                        "console": False,
+                        "trade_log": "logs/trades.jsonl",
+                        "decision_log": "logs/decisions.jsonl",
+                        "system_log": "logs/system.log",
+                    }
+                },
+            ),
+            entry_atr=entry_atr,
+            atr_timeframe="1m",
+            atr_period=14,
+        )
 
 
 if __name__ == "__main__":
