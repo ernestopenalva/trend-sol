@@ -17,6 +17,8 @@ class WSManager:
         streams: Iterable[str],
         logger: JsonlLogger,
         on_event: Callable[[str, Dict[str, Any]], None],
+        ping_interval_seconds: int = 180,
+        ping_timeout_seconds: int = 30,
     ) -> None:
         self.ws_url = ws_url.rstrip("/")
         self.streams = list(streams)
@@ -24,9 +26,13 @@ class WSManager:
         self.on_event = on_event
         self.stop_requested = False
         self.connection_started_at = 0.0
+        self.status = "starting"
+        self.ping_interval_seconds = int(ping_interval_seconds)
+        self.ping_timeout_seconds = int(ping_timeout_seconds)
 
     def run_forever(self) -> None:
-        backoff = 1
+        backoff_sequence = [1, 2, 5, 10, 30, 60]
+        backoff_index = 0
         while not self.stop_requested:
             url = f"{self.ws_url}/stream?streams={'/'.join(self.streams)}"
             self.connection_started_at = time.time()
@@ -39,12 +45,17 @@ class WSManager:
             )
             watchdog = threading.Thread(target=self._watchdog, args=(app,), daemon=True)
             watchdog.start()
-            app.run_forever(ping_interval=180, ping_timeout=30)
+            app.run_forever(
+                ping_interval=self.ping_interval_seconds,
+                ping_timeout=self.ping_timeout_seconds,
+            )
             if self.stop_requested:
                 break
-            self.logger.system("websocket reconnect scheduled", backoff_seconds=backoff)
+            self.status = "reconnecting"
+            backoff = backoff_sequence[min(backoff_index, len(backoff_sequence) - 1)]
+            self.logger.system("websocket_reconnect_scheduled", backoff_seconds=backoff)
             time.sleep(backoff)
-            backoff = min(backoff * 2, 60)
+            backoff_index += 1
 
     def stop(self) -> None:
         self.stop_requested = True
@@ -53,7 +64,7 @@ class WSManager:
         while not self.stop_requested:
             time.sleep(60)
             if time.time() - self.connection_started_at > 23 * 60 * 60:
-                self.logger.system("websocket proactive reconnect before 24h expiry")
+                self.logger.system("websocket_proactive_reconnect")
                 app.close()
                 return
 
@@ -64,10 +75,13 @@ class WSManager:
         self.on_event(stream, data)
 
     def _on_error(self, _app: WebSocketApp, error: Exception) -> None:
-        self.logger.system("websocket error", error=str(error))
+        self.status = "error"
+        self.logger.system("websocket_error", error=str(error))
 
     def _on_close(self, _app: WebSocketApp, status_code: int, message: str) -> None:
-        self.logger.system("websocket closed", status_code=status_code, message=message)
+        self.status = "closed"
+        self.logger.system("websocket_closed", status_code=status_code, close_message=message)
 
     def _on_open(self, _app: WebSocketApp) -> None:
-        self.logger.system("websocket connected", streams=self.streams)
+        self.status = "connected"
+        self.logger.system("websocket_connected", streams=self.streams)

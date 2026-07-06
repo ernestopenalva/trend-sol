@@ -39,6 +39,35 @@ class ServerSimpleTrailPosition(PositionBase):
         self.logger = logger
         self.trailing_order: Optional[Dict[str, Any]] = None
 
+    @classmethod
+    def from_state(
+        cls,
+        state: Dict[str, Any],
+        config: Dict[str, Any],
+        client: "BinanceClient",
+        logger: JsonlLogger,
+    ) -> "ServerSimpleTrailPosition":
+        position = cls(
+            pair_id=str(state["pair_id"]),
+            symbol=str(state["symbol"]),
+            entry_price=float(state["entry_price"]),
+            quantity=float(state["quantity"]),
+            entry_order=state.get("entry_order") or {},
+            open_ts=str(state["open_ts"]),
+            config=config,
+            client=client,
+            logger=logger,
+        )
+        position.reserved_qty = float(state.get("reserved_qty", position.quantity))
+        position.status = str(state.get("status", "OPEN"))
+        position.exit_price = state.get("exit_price")
+        position.exit_reason = state.get("exit_reason")
+        position.close_ts = state.get("close_ts")
+        position.exit_order = state.get("exit_order")
+        position.highest_price = float(state.get("highest_price", position.entry_price))
+        position.trailing_order = state.get("trailing_order")
+        return position
+
     def post_trailing_order(self) -> Dict[str, Any]:
         if bool(self.config.get("use_stop_price", False)):
             raise BinanceClientError("exit_server_simple_trail.use_stop_price must stay false")
@@ -59,7 +88,7 @@ class ServerSimpleTrailPosition(PositionBase):
             )
         except BinanceClientError as exc:
             self.logger.system(
-                "preferred trailing order rejected; trying fallback",
+                "preferred_trailing_order_rejected",
                 pair_id=self.pair_id,
                 position="A",
                 preferred_order_type=preferred_type,
@@ -120,6 +149,11 @@ class ServerSimpleTrailPosition(PositionBase):
             "cummulative_quote_qty": _float_or_zero(order.get("cummulativeQuoteQty")),
             "commission": _commission(order),
         }
+
+    def to_state(self) -> Dict[str, Any]:
+        state = super().to_state()
+        state["trailing_order"] = self.trailing_order
+        return state
 
 
 def _average_fill_price(order: Dict[str, Any]) -> Optional[float]:

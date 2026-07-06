@@ -29,9 +29,16 @@ class SymbolFilters:
 
 
 class BinanceClient:
-    def __init__(self, base_url: str, recv_window_ms: int, use_server_time_sync: bool = True) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        recv_window_ms: int,
+        use_server_time_sync: bool = True,
+        http_timeout_seconds: int = 8,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.recv_window_ms = int(recv_window_ms)
+        self.http_timeout_seconds = int(http_timeout_seconds)
         self.api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
         self.api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "")
         self.time_offset_ms = 0
@@ -173,6 +180,35 @@ class BinanceClient:
             params["origClientOrderId"] = client_order_id
         return self._request("GET", "/api/v3/order", signed=True, params=params)
 
+    def open_orders(self, symbol: str) -> list[Dict[str, Any]]:
+        self.require_credentials()
+        data = self._request("GET", "/api/v3/openOrders", signed=True, params={"symbol": symbol})
+        return data if isinstance(data, list) else []
+
+    def all_orders(self, symbol: str, limit: int = 100) -> list[Dict[str, Any]]:
+        self.require_credentials()
+        data = self._request(
+            "GET",
+            "/api/v3/allOrders",
+            signed=True,
+            params={"symbol": symbol, "limit": int(limit)},
+        )
+        return data if isinstance(data, list) else []
+
+    def cancel_order(
+        self,
+        symbol: str,
+        order_id: Optional[str] = None,
+        client_order_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        self.require_credentials()
+        params: Dict[str, Any] = {"symbol": symbol}
+        if order_id is not None:
+            params["orderId"] = order_id
+        if client_order_id is not None:
+            params["origClientOrderId"] = client_order_id
+        return self._request("DELETE", "/api/v3/order", signed=True, params=params)
+
     def _request(
         self,
         method: str,
@@ -188,7 +224,12 @@ class BinanceClient:
             signature = hmac.new(self.api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
             request_params["signature"] = signature
 
-        response = self.session.request(method, f"{self.base_url}{path}", params=request_params, timeout=20)
+        response = self.session.request(
+            method,
+            f"{self.base_url}{path}",
+            params=request_params,
+            timeout=self.http_timeout_seconds,
+        )
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After")
             if retry_after:

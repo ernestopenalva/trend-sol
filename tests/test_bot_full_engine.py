@@ -30,6 +30,7 @@ class BotFullEngineTests(unittest.TestCase):
                 Path(tmp),
                 {
                     "logging": {
+                        "console": False,
                         "trade_log": "logs/trades.jsonl",
                         "decision_log": "logs/decisions.jsonl",
                         "system_log": "logs/system.log",

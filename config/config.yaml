@@ -1,16 +1,27 @@
 symbol: SOLUSDT
+active_profile: debug_intraday
 
 market_data:
+  rest_url: "https://api.binance.com"
   ws_url: "wss://stream.binance.com:9443"
+  ws_ping_interval_seconds: 180
+  ws_ping_timeout_seconds: 30
   trade_stream: "solusdt@aggTrade"
+  max_market_data_age_seconds: 60
   kline_streams:
     - "solusdt@kline_4h"
     - "solusdt@kline_1d"
+  historical_klines_limit:
+    "1m": 300
+    "15m": 300
+    "4h": 120
+    "1d": 80
 
 execution:
   testnet_url: "https://testnet.binance.vision"
   recv_window_ms: 5000
   use_server_time_sync: true
+  http_timeout_seconds: 8
 
 trend:
   timeframe: "1d"
@@ -26,12 +37,35 @@ entry:
   rsi_threshold: 45
   rsi_lookback_candles: 2
   volume_ma_candles: 5
+  require_volume_drying: true
   require_reversal_candle_closed: true
   near_miss:
     trend_slope_ratio: 0.002
     pullback_required_ratio: 0.85
     rsi_margin: 3
     reversal_min_position: 0.58
+
+profiles:
+  production:
+    trend:
+      timeframe: "1d"
+    entry:
+      timeframe: "4h"
+      pullback_atr_multiplier: 1.5
+      rsi_threshold: 45
+      rsi_lookback_candles: 2
+      require_volume_drying: true
+      require_reversal_candle_closed: true
+  debug_intraday:
+    trend:
+      timeframe: "15m"
+    entry:
+      timeframe: "1m"
+      pullback_atr_multiplier: 0.8
+      rsi_threshold: 55
+      rsi_lookback_candles: 1
+      require_volume_drying: false
+      require_reversal_candle_closed: true
 
 capital:
   operational_balance_usdt: 1000
@@ -64,6 +98,13 @@ cycle:
 
 logging:
   level: INFO
+  console: true
   trade_log: "logs/trades.jsonl"
   decision_log: "logs/decisions.jsonl"
   system_log: "logs/system.log"
+
+console:
+  mode: human
+  interval_seconds: 60
+  show_price_status: false
+  show_raw_status: false

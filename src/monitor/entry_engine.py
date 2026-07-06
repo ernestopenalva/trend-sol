@@ -10,6 +10,7 @@ from src.logging_utils import JsonlLogger, now_iso
 @dataclass(frozen=True)
 class Candle:
     open_time: int
+    close_time: int
     open: float
     high: float
     low: float
@@ -22,12 +23,27 @@ class Candle:
         kline = payload["k"]
         return cls(
             open_time=int(kline["t"]),
+            close_time=int(kline["T"]),
             open=float(kline["o"]),
             high=float(kline["h"]),
             low=float(kline["l"]),
             close=float(kline["c"]),
             volume=float(kline["v"]),
             closed=bool(kline["x"]),
+        )
+
+    @classmethod
+    def from_rest_kline(cls, kline: List[Any], now_ms: int) -> "Candle":
+        close_time = int(kline[6])
+        return cls(
+            open_time=int(kline[0]),
+            close_time=close_time,
+            open=float(kline[1]),
+            high=float(kline[2]),
+            low=float(kline[3]),
+            close=float(kline[4]),
+            volume=float(kline[5]),
+            closed=close_time <= now_ms,
         )
 
 
@@ -44,28 +60,43 @@ class EntryEngine:
         self.symbol = symbol
         self.config = config
         self.logger = logger
-        self.daily_candles: List[Candle] = []
-        self.four_hour_candles: List[Candle] = []
-        self.last_evaluated_4h_open_time: Optional[int] = None
+        self.trend_timeframe = str(config["trend"]["timeframe"])
+        self.entry_timeframe = str(config["entry"]["timeframe"])
+        self.trend_candles: List[Candle] = []
+        self.entry_candles: List[Candle] = []
+        self.last_evaluated_entry_open_time: Optional[int] = None
+        self.last_diagnostic: Dict[str, Any] = self._empty_diagnostic()
+
+    def load_history(self, timeframe: str, klines: List[List[Any]], now_ms: int) -> None:
+        candles = [Candle.from_rest_kline(kline, now_ms) for kline in klines]
+        closed_candles = [candle for candle in candles if candle.closed]
+        if timeframe == self.trend_timeframe:
+            self.trend_candles = closed_candles[-300:]
+        elif timeframe == self.entry_timeframe:
+            self.entry_candles = closed_candles[-300:]
+        else:
+            raise ValueError(f"unsupported timeframe for history: {timeframe}")
+        self.logger.system("historical_candles_loaded", timeframe=timeframe, candles=len(closed_candles))
 
     def on_kline(self, stream: str, payload: Dict[str, Any]) -> Optional[EntrySignal]:
         candle = Candle.from_binance_kline(payload)
         if not candle.closed:
             return None
 
-        if stream.endswith("@kline_1d"):
-            self._upsert(self.daily_candles, candle)
+        if stream.endswith(f"@kline_{self.trend_timeframe}"):
+            self._upsert(self.trend_candles, candle)
             return None
-        if not stream.endswith("@kline_4h"):
+        if not stream.endswith(f"@kline_{self.entry_timeframe}"):
             return None
 
-        self._upsert(self.four_hour_candles, candle)
-        if self.last_evaluated_4h_open_time == candle.open_time:
+        self._upsert(self.entry_candles, candle)
+        if self.last_evaluated_entry_open_time == candle.open_time:
             return None
-        self.last_evaluated_4h_open_time = candle.open_time
+        self.last_evaluated_entry_open_time = candle.open_time
         return self.evaluate()
 
     def evaluate(self) -> Optional[EntrySignal]:
+        self.last_diagnostic = self._empty_diagnostic()
         if not self._gate_trend():
             return None
         if not self._gate_pullback():
@@ -75,7 +106,8 @@ class EntryEngine:
         if not self._gate_reversal():
             return None
 
-        latest = self.four_hour_candles[-1]
+        latest = self.entry_candles[-1]
+        self.last_diagnostic["last_reason"] = "buy_signal"
         self.logger.decision(
             {
                 "ts": now_iso(),
@@ -88,15 +120,28 @@ class EntryEngine:
         )
         return EntrySignal(self.symbol, latest.close, now_iso(), latest.open_time)
 
+    def set_paused(self, reason: str) -> None:
+        self.last_diagnostic = self._empty_diagnostic()
+        self.last_diagnostic["final_decision"] = reason
+        self.last_diagnostic["last_reason"] = reason
+
     def _gate_trend(self) -> bool:
         trend_cfg = self.config["trend"]
         near_cfg = self.config["entry"].get("near_miss", {})
         period = int(trend_cfg["ema_period"])
         lookback = int(trend_cfg["ema_slope_lookback"])
-        closes = [candle.close for candle in self.daily_candles]
+        closes = [candle.close for candle in self.trend_candles]
         values = ema(closes, period)
         if len(values) <= period + lookback or values[-1] is None or values[-1 - lookback] is None:
-            self._log_gate(1, False, False, "insufficient_daily_candles", ema_period=period, candles=len(closes))
+            self._log_gate(
+                1,
+                False,
+                False,
+                "insufficient_trend_candles",
+                timeframe=self.trend_timeframe,
+                ema_period=period,
+                candles=len(closes),
+            )
             return False
 
         current = float(values[-1])
@@ -117,17 +162,17 @@ class EntryEngine:
         lookback = int(entry_cfg["lookback_candles"])
         atr_period = int(entry_cfg["atr_period"])
         multiplier = float(entry_cfg["pullback_atr_multiplier"])
-        if len(self.four_hour_candles) < max(lookback, atr_period) + 1:
-            self._log_gate(2, False, False, "insufficient_4h_candles", candles=len(self.four_hour_candles))
+        if len(self.entry_candles) < max(lookback, atr_period) + 1:
+            self._log_gate(2, False, False, "insufficient_entry_candles", candles=len(self.entry_candles))
             return False
 
-        window = self.four_hour_candles[-lookback:]
+        window = self.entry_candles[-lookback:]
         recent_high = max(candle.high for candle in window)
-        latest = self.four_hour_candles[-1]
+        latest = self.entry_candles[-1]
         atr_values = atr(
-            [candle.high for candle in self.four_hour_candles],
-            [candle.low for candle in self.four_hour_candles],
-            [candle.close for candle in self.four_hour_candles],
+            [candle.high for candle in self.entry_candles],
+            [candle.low for candle in self.entry_candles],
+            [candle.close for candle in self.entry_candles],
             atr_period,
         )
         current_atr = atr_values[-1]
@@ -159,11 +204,11 @@ class EntryEngine:
         threshold = float(entry_cfg["rsi_threshold"])
         lookback = int(entry_cfg["rsi_lookback_candles"])
         volume_period = int(entry_cfg["volume_ma_candles"])
-        if len(self.four_hour_candles) < max(period + lookback + 1, volume_period + 1):
-            self._log_gate(3, False, False, "insufficient_4h_candles", candles=len(self.four_hour_candles))
+        if len(self.entry_candles) < max(period + lookback + 1, volume_period + 1):
+            self._log_gate(3, False, False, "insufficient_entry_candles", candles=len(self.entry_candles))
             return False
 
-        closes = [candle.close for candle in self.four_hour_candles]
+        closes = [candle.close for candle in self.entry_candles]
         rsi_values = rsi(closes, period)
         current = rsi_values[-1]
         previous = rsi_values[-1 - lookback]
@@ -171,11 +216,12 @@ class EntryEngine:
             self._log_gate(3, False, False, "rsi_unavailable")
             return False
 
-        volumes = [candle.volume for candle in self.four_hour_candles]
+        volumes = [candle.volume for candle in self.entry_candles]
         volume_values = volume_ma(volumes[:-1], volume_period)
         prior_average = volume_values[-1]
-        latest = self.four_hour_candles[-1]
-        volume_ok = prior_average is not None and latest.volume < prior_average
+        latest = self.entry_candles[-1]
+        require_volume = bool(entry_cfg.get("require_volume_drying", True))
+        volume_ok = (prior_average is not None and latest.volume < prior_average) if require_volume else True
         passed = current < threshold and current > previous and volume_ok
         near = not passed and current < threshold + float(near_cfg.get("rsi_margin", 3)) and current >= previous
         self._log_gate(
@@ -188,16 +234,17 @@ class EntryEngine:
             rsi_threshold=threshold,
             volume=latest.volume,
             volume_average=prior_average,
+            require_volume_drying=require_volume,
             volume_ok=volume_ok,
         )
         return passed
 
     def _gate_reversal(self) -> bool:
-        if len(self.four_hour_candles) < 2:
-            self._log_gate(4, False, False, "insufficient_4h_candles")
+        if len(self.entry_candles) < 2:
+            self._log_gate(4, False, False, "insufficient_entry_candles")
             return False
-        previous = self.four_hour_candles[-2]
-        latest = self.four_hour_candles[-1]
+        previous = self.entry_candles[-2]
+        latest = self.entry_candles[-1]
         near_cfg = self.config["entry"].get("near_miss", {})
         candle_range = latest.high - latest.low
         close_position = (latest.close - latest.low) / candle_range if candle_range > 0 else 0.0
@@ -220,6 +267,17 @@ class EntryEngine:
         return passed
 
     def _log_gate(self, gate: int, passed: bool, near_miss: bool, reason: str, **fields: Any) -> None:
+        gate_name = {1: "trend", 2: "pullback", 3: "exhaustion", 4: "recovery", 5: "buy"}.get(gate)
+        if gate_name:
+            self.last_diagnostic["gates"][gate_name] = {
+                "passed": passed,
+                "near_miss": near_miss,
+                "reason": reason,
+                **fields,
+            }
+            if not passed:
+                self.last_diagnostic["last_reason"] = reason
+                self.last_diagnostic["last_rejected_gate"] = gate_name
         self.logger.decision(
             {
                 "ts": now_iso(),
@@ -230,6 +288,21 @@ class EntryEngine:
                 **fields,
             }
         )
+
+    def _empty_diagnostic(self) -> Dict[str, Any]:
+        return {
+            "profile": self.config.get("active_profile", "production"),
+            "trend_timeframe": self.trend_timeframe,
+            "entry_timeframe": self.entry_timeframe,
+            "last_reason": "waiting_for_entry_candle",
+            "last_rejected_gate": None,
+            "gates": {
+                "trend": {"passed": None, "reason": "not_evaluated"},
+                "pullback": {"passed": None, "reason": "not_evaluated"},
+                "exhaustion": {"passed": None, "reason": "not_evaluated"},
+                "recovery": {"passed": None, "reason": "not_evaluated"},
+            },
+        }
 
     @staticmethod
     def _upsert(candles: List[Candle], candle: Candle) -> None:

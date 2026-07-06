@@ -44,3 +44,22 @@ class PositionBase:
         self.close_ts = ts
         self.exit_order = order
         self.reserved_qty = 0.0
+
+    def to_state(self) -> Dict[str, Any]:
+        return {
+            "pair_id": self.pair_id,
+            "label": self.label,
+            "engine": self.engine,
+            "symbol": self.symbol,
+            "entry_price": self.entry_price,
+            "quantity": self.quantity,
+            "entry_order": self.entry_order,
+            "reserved_qty": self.reserved_qty,
+            "open_ts": self.open_ts,
+            "status": self.status,
+            "exit_price": self.exit_price,
+            "exit_reason": self.exit_reason,
+            "close_ts": self.close_ts,
+            "exit_order": self.exit_order,
+            "highest_price": self.highest_price,
+        }

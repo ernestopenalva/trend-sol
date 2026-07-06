@@ -44,6 +44,37 @@ class BotFullExitPosition(PositionBase):
         self.trailing_gap_pct = float(trailing_cfg.get("gap_pct", 4))
         self.trailing_active = False
 
+    @classmethod
+    def from_state(
+        cls,
+        state: Dict[str, Any],
+        config: Dict[str, Any],
+        client: "BinanceClient",
+        logger: JsonlLogger,
+    ) -> "BotFullExitPosition":
+        position = cls(
+            pair_id=str(state["pair_id"]),
+            symbol=str(state["symbol"]),
+            entry_price=float(state["entry_price"]),
+            quantity=float(state["quantity"]),
+            entry_order=state.get("entry_order") or {},
+            open_ts=str(state["open_ts"]),
+            config=config,
+            client=client,
+            logger=logger,
+        )
+        position.reserved_qty = float(state.get("reserved_qty", position.quantity))
+        position.status = str(state.get("status", "OPEN"))
+        position.exit_price = state.get("exit_price")
+        position.exit_reason = state.get("exit_reason")
+        position.close_ts = state.get("close_ts")
+        position.exit_order = state.get("exit_order")
+        position.highest_price = float(state.get("highest_price", position.entry_price))
+        position.stop_price = float(state.get("stop_price", position.stop_price))
+        position.applied_steps = {float(item) for item in state.get("applied_steps", [])}
+        position.trailing_active = bool(state.get("trailing_active", False))
+        return position
+
     def on_tick(self, price: float) -> Optional[Dict[str, Any]]:
         if self.status != "OPEN":
             return None
@@ -127,6 +158,19 @@ class BotFullExitPosition(PositionBase):
             "cummulative_quote_qty": _float_or_zero(order.get("cummulativeQuoteQty")),
             "commission": _commission(order),
         }
+
+    def to_state(self) -> Dict[str, Any]:
+        state = super().to_state()
+        state.update(
+            {
+                "stop_price": self.stop_price,
+                "applied_steps": sorted(self.applied_steps),
+                "trailing_active": self.trailing_active,
+                "trailing_activation_pct": self.trailing_activation_pct,
+                "trailing_gap_pct": self.trailing_gap_pct,
+            }
+        )
+        return state
 
 
 def _average_fill_price(order: Dict[str, Any]) -> Optional[float]:
