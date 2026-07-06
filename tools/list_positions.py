@@ -9,31 +9,32 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.console_utils import BRASILIA_TZ
 from src.state_manager import StateManager
-from src.console_utils import console_line
 
 
 def main() -> None:
     state = StateManager(PROJECT_ROOT).load_open_positions()
     if not state:
-        print(console_line("No local open positions in data/state/open_positions.json"))
+        print(_line_now("No local open positions in data/state/open_positions.json"))
         return
-    price = _optional_float(sys.argv[1]) if len(sys.argv) > 1 else None
-    print(console_line("pair_id      pos type           status        entry     qty       pnl_pct  peak      stop      age"))
+    price = _optional_float(sys.argv[1]) if len(sys.argv) > 1 else _fetch_current_price()
+    print(_line_now("opened_at           pair_id      pos type           status        entry     qty       pnl_pct   peak      stop_review age"))
     for item in sorted(state, key=lambda row: (row.get("pair_id", ""), row.get("label", ""))):
         pnl = _pnl(item, price)
-        print(console_line(
+        print(
+            f"{_opened_at(item.get('open_ts')):19} "
             f"{str(item.get('pair_id', ''))[:12]:12} "
             f"{item.get('label', ''):3} "
             f"{_friendly_engine(item):14} "
             f"{item.get('status', ''):12} "
             f"{_fmt(item.get('entry_price')):8} "
             f"{_fmt(item.get('quantity')):8} "
-            f"{_fmt(pnl):8} "
+            f"{_fmt_pct(pnl):9} "
             f"{_fmt(item.get('highest_price')):8} "
             f"{_fmt(item.get('stop_price')):8} "
             f"{_age(item.get('open_ts'))}"
-        ))
+        )
 
 
 def _friendly_engine(item: Dict[str, Any]) -> str:
@@ -45,6 +46,8 @@ def _friendly_engine(item: Dict[str, Any]) -> str:
 
 
 def _pnl(item: Dict[str, Any], price: Optional[float]) -> Optional[float]:
+    if item.get("status") != "OPEN":
+        return None
     entry = _optional_float(item.get("entry_price"))
     if price is None or entry in (None, 0.0):
         return None
@@ -58,6 +61,13 @@ def _fmt(value: Any) -> str:
     return f"{number:.4f}"
 
 
+def _fmt_pct(value: Any) -> str:
+    number = _optional_float(value)
+    if number is None:
+        return "n/a"
+    return f"{number:.2f}%"
+
+
 def _optional_float(value: Any) -> Optional[float]:
     try:
         if value is None:
@@ -65,6 +75,48 @@ def _optional_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _fetch_current_price() -> Optional[float]:
+    try:
+        from tool_common import load_config
+        import requests
+
+        config = load_config()
+        market_cfg = config.get("market_data", {})
+        execution_cfg = config.get("execution", {})
+        base_url = str(market_cfg.get("rest_url", "https://api.binance.com")).rstrip("/")
+        timeout_seconds = int(execution_cfg.get("http_timeout_seconds", 8))
+        response = requests.get(
+            f"{base_url}/api/v3/ticker/price",
+            params={"symbol": str(config["symbol"])},
+            timeout=timeout_seconds,
+        )
+        if response.status_code >= 400:
+            return None
+        return _optional_float((response.json() or {}).get("price"))
+    except Exception:
+        return None
+
+
+def _line_now(message: str) -> str:
+    return f"{_format_brasilia(datetime.now(timezone.utc))} {message}"
+
+
+def _opened_at(value: Any) -> str:
+    if not value:
+        return "n/a"
+    try:
+        opened = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return "n/a"
+    return _format_brasilia(opened)
+
+
+def _format_brasilia(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(BRASILIA_TZ).strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def _age(value: Any) -> str:
