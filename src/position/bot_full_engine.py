@@ -44,12 +44,25 @@ class BotFullExitPosition(PositionBase):
         self.atr_period = int(atr_period) if atr_period is not None else None
         self.review_stop_pct = float(config.get("review_stop_pct", config.get("stop_loss_pct", 30)))
         self.review_stop = entry_price * (1 - self.review_stop_pct / 100)
-        self.profit_lock_mode = str(config.get("profit_lock_mode", "pct")).lower()
+        breakeven_cfg = config.get("breakeven", [])
+        self.breakeven_mode = str(_section_value(breakeven_cfg, "mode", "pct")).lower()
+        self.breakeven_trigger_pct = _optional_float(_section_value(breakeven_cfg, "trigger_pct"))
+        self.breakeven_stop_to_pct = _optional_float(_section_value(breakeven_cfg, "stop_to_pct"))
+        self.breakeven_trigger_atr = _optional_float(_section_value(breakeven_cfg, "trigger_atr"))
+        self.breakeven_offset_atr = _optional_float(_section_value(breakeven_cfg, "offset_atr"))
+        self.breakeven_stop: Optional[float] = None
+        profit_lock_cfg = config.get("profit_lock", {})
+        self.profit_lock_mode = str(
+            profit_lock_cfg.get("mode", config.get("profit_lock_mode", "pct"))
+        ).lower()
         self.profit_lock_pct_steps = sorted(
-            config.get("profit_lock_pct", config.get("breakeven", [])),
+            profit_lock_cfg.get("steps_pct", config.get("profit_lock_pct", _legacy_breakeven_steps(breakeven_cfg))),
             key=lambda item: item["trigger_pct"],
         )
-        self.profit_lock_atr_steps = sorted(config.get("profit_lock_atr", []), key=lambda item: item["trigger_atr"])
+        self.profit_lock_atr_steps = sorted(
+            profit_lock_cfg.get("steps", config.get("profit_lock_atr", [])),
+            key=lambda item: item["trigger_atr"],
+        )
         self.applied_steps: set[str] = set()
         self.profit_lock_stop: Optional[float] = None
         trailing_cfg = config.get("trailing", {})
@@ -94,8 +107,10 @@ class BotFullExitPosition(PositionBase):
         position.atr_timeframe = state.get("atr_timeframe", position.atr_timeframe)
         position.atr_period = int(state["atr_period"]) if state.get("atr_period") is not None else position.atr_period
         position.profit_lock_mode = str(state.get("profit_lock_mode", position.profit_lock_mode)).lower()
+        position.breakeven_mode = str(state.get("breakeven_mode", position.breakeven_mode)).lower()
         position.trailing_mode = str(state.get("trailing_mode", position.trailing_mode)).lower()
         position.review_stop = float(state.get("review_stop", state.get("review_stop_price", position.review_stop)))
+        position.breakeven_stop = _optional_float(state.get("breakeven_stop", position.breakeven_stop))
         position.profit_lock_stop = _optional_float(state.get("profit_lock_stop", position.profit_lock_stop))
         position.trailing_stop = _optional_float(state.get("trailing_stop", position.trailing_stop))
         position.effective_stop = float(state.get("effective_stop", state.get("stop_price", position.effective_stop)))
@@ -127,12 +142,14 @@ class BotFullExitPosition(PositionBase):
 
         pnl_pct = self.pnl_pct(price)
         pnl_atr = self.pnl_atr(price)
+        self._apply_breakeven(pnl_pct, pnl_atr, price)
         for index, new_stop in self._profit_lock_candidates(pnl_pct, pnl_atr):
             step_key = f"{self.profit_lock_mode}:{index}"
             if step_key not in self.applied_steps:
                 if self.profit_lock_stop is None or new_stop > self.profit_lock_stop:
                     self.profit_lock_stop = new_stop
                 self.applied_steps.add(step_key)
+                self._refresh_effective_stop()
                 self.logger.trade(
                     self._trade_event(
                         event=f"PROFIT_LOCK_{self.profit_lock_mode.upper()}_{index}",
@@ -144,6 +161,8 @@ class BotFullExitPosition(PositionBase):
 
         if self._should_activate_trailing(pnl_pct, pnl_atr) and not self.trailing_active:
             self.trailing_active = True
+            self._update_trailing_stop()
+            self._refresh_effective_stop()
             self.logger.trade(
                 self._trade_event(
                     event="TRAILING_ACTIVATED",
@@ -154,7 +173,7 @@ class BotFullExitPosition(PositionBase):
             )
 
         if self.trailing_active:
-            self.trailing_stop = self._current_trailing_stop()
+            self._update_trailing_stop()
 
         self._refresh_effective_stop()
 
@@ -196,8 +215,10 @@ class BotFullExitPosition(PositionBase):
             "pnl_pct": pnl_pct,
             "pnl_atr": self.pnl_atr(price),
             "entry_atr": self.entry_atr,
+            "breakeven_mode": self.breakeven_mode,
             "profit_lock_mode": self.profit_lock_mode,
             "trailing_mode": self.trailing_mode,
+            "breakeven_stop": self.breakeven_stop,
             "profit_lock_stop": self.profit_lock_stop,
             "trailing_stop": self.trailing_stop,
             "effective_stop": self.effective_stop,
@@ -235,6 +256,33 @@ class BotFullExitPosition(PositionBase):
                 candidates.append((index, self.entry_price * (1 + float(step["stop_to_pct"]) / 100)))
         return candidates
 
+    def _apply_breakeven(self, pnl_pct: float, pnl_atr: Optional[float], price: float) -> None:
+        trigger_hit = False
+        new_stop = None
+        if self.breakeven_mode == "atr":
+            if pnl_atr is None or self.breakeven_trigger_atr is None or self.breakeven_offset_atr is None:
+                return
+            trigger_hit = _gte(pnl_atr, self.breakeven_trigger_atr)
+            new_stop = self.entry_price + self.breakeven_offset_atr * float(self.entry_atr)
+        elif self.breakeven_trigger_pct is not None and self.breakeven_stop_to_pct is not None:
+            trigger_hit = _gte(pnl_pct, self.breakeven_trigger_pct)
+            new_stop = self.entry_price * (1 + self.breakeven_stop_to_pct / 100)
+
+        if not trigger_hit or new_stop is None:
+            return
+        if self.breakeven_stop is None or new_stop > self.breakeven_stop:
+            self.breakeven_stop = new_stop
+            self.applied_steps.add(f"breakeven:{self.breakeven_mode}")
+            self._refresh_effective_stop()
+            self.logger.trade(
+                self._trade_event(
+                    event=f"BREAKEVEN_{self.breakeven_mode.upper()}",
+                    price=price,
+                    pnl_pct=pnl_pct,
+                    exit_reason=None,
+                )
+            )
+
     def _should_activate_trailing(self, pnl_pct: float, pnl_atr: Optional[float]) -> bool:
         if self.trailing_mode == "atr":
             return pnl_atr is not None and _gte(pnl_atr, self.trailing_activation_atr)
@@ -247,20 +295,31 @@ class BotFullExitPosition(PositionBase):
             return self.highest_price - self.trailing_gap_atr * float(self.entry_atr)
         return self.highest_price * (1 - self.trailing_gap_pct / 100)
 
+    def _update_trailing_stop(self) -> None:
+        trailing_stop = self._current_trailing_stop()
+        if trailing_stop is None:
+            return
+        if self.trailing_stop is None or trailing_stop > self.trailing_stop:
+            self.trailing_stop = trailing_stop
+
     def _refresh_effective_stop(self) -> None:
         stops = [
+            ("current", self.effective_stop),
             ("review", self.review_stop),
+            ("breakeven", self.breakeven_stop),
             ("profit_lock", self.profit_lock_stop),
             ("trailing", self.trailing_stop),
         ]
-        self.stop_type, self.effective_stop = max(
+        stop_type, self.effective_stop = max(
             ((name, value) for name, value in stops if value is not None),
             key=lambda item: float(item[1]),
         )
+        if stop_type != "current":
+            self.stop_type = stop_type
         self.stop_price = self.effective_stop
 
     def _atr_required(self) -> bool:
-        return self.profit_lock_mode == "atr" or self.trailing_mode == "atr"
+        return self.breakeven_mode == "atr" or self.profit_lock_mode == "atr" or self.trailing_mode == "atr"
 
     def _valid_entry_atr(self) -> bool:
         return self.entry_atr is not None and self.entry_atr > 0
@@ -273,9 +332,11 @@ class BotFullExitPosition(PositionBase):
                 "entry_atr": self.entry_atr,
                 "atr_timeframe": self.atr_timeframe,
                 "atr_period": self.atr_period,
+                "breakeven_mode": self.breakeven_mode,
                 "profit_lock_mode": self.profit_lock_mode,
                 "trailing_mode": self.trailing_mode,
                 "review_stop": self.review_stop,
+                "breakeven_stop": self.breakeven_stop,
                 "profit_lock_stop": self.profit_lock_stop,
                 "trailing_stop": self.trailing_stop,
                 "effective_stop": self.effective_stop,
@@ -319,6 +380,18 @@ def _optional_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _section_value(section: Any, key: str, default: Any = None) -> Any:
+    if isinstance(section, dict):
+        return section.get(key, default)
+    return default
+
+
+def _legacy_breakeven_steps(section: Any) -> list[Dict[str, Any]]:
+    if isinstance(section, list):
+        return section
+    return []
 
 
 def _gte(left: float, right: float) -> bool:

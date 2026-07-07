@@ -79,7 +79,7 @@ capital:
 exit_server_simple_trail:
   preferred_order_type: "STOP_LOSS"
   fallback_order_type: "STOP_LOSS_LIMIT"
-  trailing_delta_bips: 400
+  trailing_delta_bips: 100
   use_stop_price: false
 
 exit_bot_full_engine:
@@ -97,18 +97,23 @@ exit_bot_full_engine:
 
 risk:
   review_stop_pct: 30
-  profit_lock_mode: atr
-  profit_lock_atr:
-    - trigger_atr: 3
-      lock_atr: 0.5
-    - trigger_atr: 5
-      lock_atr: 1.5
-    - trigger_atr: 8
-      lock_atr: 3
+  breakeven:
+    mode: atr
+    trigger_atr: 3
+    offset_atr: 0.1
+  profit_lock:
+    mode: atr
+    steps:
+      - trigger_atr: 5
+        lock_atr: 1.5
+      - trigger_atr: 8
+        lock_atr: 3
+      - trigger_atr: 12
+        lock_atr: 6
   trailing:
     mode: atr
-    activation_atr: 5
-    gap_atr: 3
+    activation_atr: 10
+    gap_atr: 5
 
 cycle:
   pairs_per_cycle: 1

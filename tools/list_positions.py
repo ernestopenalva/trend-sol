@@ -21,7 +21,8 @@ def main() -> None:
     price = _optional_float(sys.argv[1]) if len(sys.argv) > 1 else _fetch_current_price()
     print(
         "opened_at           pair_id      pos type           status        entry     current   qty      "
-        "entry_atr pnl_pct   pnl_atr  peak     peak_atr effective_stop stop_type   trail    age"
+        "entry_atr pnl_pct   pnl_atr  peak     peak_atr effective_stop stop_type   trail    age    "
+        "exit     realized exit_reason closed_at"
     )
     for item in sorted(state, key=lambda row: (row.get("pair_id", ""), row.get("label", ""))):
         pnl = _pnl(item, price)
@@ -39,12 +40,16 @@ def main() -> None:
             f"{_fmt(item.get('entry_atr')):9} "
             f"{_fmt_pct(pnl):9} "
             f"{_fmt_atr(pnl_atr):8} "
-            f"{_fmt(item.get('highest_price')):8} "
+            f"{_fmt(_peak(item)):8} "
             f"{_fmt_atr(peak_atr):8} "
             f"{_fmt(_effective_stop(item)):14} "
             f"{str(item.get('stop_type') or 'n/a'):11} "
             f"{_trail_status(item):8} "
-            f"{_age(item.get('open_ts'))}"
+            f"{_age(item.get('open_ts')):6} "
+            f"{_fmt(item.get('exit_price')):8} "
+            f"{_fmt_pct(_realized_pnl(item)):8} "
+            f"{str(item.get('exit_reason') or 'n/a'):11} "
+            f"{_closed_at(item.get('close_ts'))}"
         )
 
 
@@ -76,12 +81,28 @@ def _pnl_atr(item: Dict[str, Any], price: Optional[float]) -> Optional[float]:
 
 
 def _peak_atr(item: Dict[str, Any]) -> Optional[float]:
+    if item.get("label") == "A":
+        return None
     entry = _optional_float(item.get("entry_price"))
     peak = _optional_float(item.get("highest_price"))
     entry_atr = _optional_float(item.get("entry_atr"))
     if entry is None or peak is None or entry_atr in (None, 0.0):
         return None
     return (peak - entry) / entry_atr
+
+
+def _peak(item: Dict[str, Any]) -> Any:
+    if item.get("label") == "A":
+        return None
+    return item.get("highest_price")
+
+
+def _realized_pnl(item: Dict[str, Any]) -> Optional[float]:
+    entry = _optional_float(item.get("entry_price"))
+    exit_price = _optional_float(item.get("exit_price"))
+    if item.get("status") != "CLOSED" or entry in (None, 0.0) or exit_price is None:
+        return None
+    return ((exit_price / entry) - 1) * 100
 
 
 def _effective_stop(item: Dict[str, Any]) -> Any:
@@ -158,6 +179,16 @@ def _opened_at(value: Any) -> str:
     except ValueError:
         return "n/a"
     return _format_brasilia(opened)
+
+
+def _closed_at(value: Any) -> str:
+    if not value:
+        return "n/a"
+    try:
+        closed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return "n/a"
+    return _format_brasilia(closed)
 
 
 def _format_brasilia(value: datetime) -> str:
