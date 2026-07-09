@@ -11,6 +11,7 @@ from src.position.bot_full_engine import BotFullExitPosition
 from src.position.position_base import PositionBase
 from src.position.server_simple_trail import ServerSimpleTrailPosition
 from src.state_manager import StateManager
+from src.trade_ledger import TradeLedger
 
 
 class PositionRegistry:
@@ -21,6 +22,7 @@ class PositionRegistry:
         logger: JsonlLogger,
         cycle_manager: CycleManager,
         state_manager: StateManager,
+        trade_ledger: TradeLedger | None = None,
     ) -> None:
         self.config = config
         self.symbol = str(config["symbol"])
@@ -28,6 +30,7 @@ class PositionRegistry:
         self.logger = logger
         self.cycle_manager = cycle_manager
         self.state_manager = state_manager
+        self.trade_ledger = trade_ledger
         self.positions: List[PositionBase] = []
         self.entries_paused = False
         self.review_required = False
@@ -51,7 +54,7 @@ class PositionRegistry:
         pair_id = uuid.uuid4().hex[:12]
         opened: List[PositionBase] = []
 
-        for label in ("A", "B"):
+        for label in self._position_labels():
             client_order_id = f"ts-{pair_id}-{label}-buy"
             order = self.client.market_buy_quote(self.symbol, quote_per_position, client_order_id)
             entry_price = _average_fill_price(order)
@@ -95,14 +98,17 @@ class PositionRegistry:
             self.positions.append(position)
             self.save_state()
 
-        slippage_pp = abs(opened[0].entry_price - opened[1].entry_price) / opened[0].entry_price * 100
-        self.logger.system(
-            "pair_opened",
-            pair_id=pair_id,
-            entry_A=opened[0].entry_price,
-            entry_B=opened[1].entry_price,
-            fill_divergence_pct=slippage_pp,
-        )
+        if len(opened) == 2:
+            slippage_pp = abs(opened[0].entry_price - opened[1].entry_price) / opened[0].entry_price * 100
+            self.logger.system(
+                "pair_opened",
+                pair_id=pair_id,
+                entry_A=opened[0].entry_price,
+                entry_B=opened[1].entry_price,
+                fill_divergence_pct=slippage_pp,
+            )
+        else:
+            self.logger.system("bot_position_opened", pair_id=pair_id, entry=opened[0].entry_price)
         self.save_state()
 
     def on_tick(self, price: float) -> None:
@@ -114,17 +120,28 @@ class PositionRegistry:
             else:
                 event = None
             if event:
+                if self._bot_exit_only and isinstance(position, BotFullExitPosition):
+                    if self.trade_ledger:
+                        self.trade_ledger.append_closed_bot_trade(position, self.config)
+                    self.cycle_manager.on_position_closed(position)
+                    self.save_state()
+                    continue
                 self.cycle_manager.on_position_closed(position)
                 self.save_state()
             if position.status == "NEEDS_REVIEW":
                 self.review_required = True
-        self._purge_closed_pairs()
+        if self._bot_exit_only:
+            self._purge_closed_bot_positions()
+        else:
+            self._purge_closed_pairs()
         self.save_state()
 
     def load_state(self) -> None:
         restored: List[PositionBase] = []
         for item in self.state_manager.load_open_positions():
             try:
+                if self._bot_exit_only and item.get("label") == "A":
+                    continue
                 if item.get("label") == "A":
                     restored.append(
                         ServerSimpleTrailPosition.from_state(
@@ -168,7 +185,11 @@ class PositionRegistry:
         open_client_ids = {str(order.get("clientOrderId")) for order in open_orders}
         all_client_ids = {str(order.get("clientOrderId")) for order in all_orders}
         if not self.positions:
-            stale_bot_orders = sorted(client_id for client_id in open_client_ids if client_id.startswith("ts-"))
+            stale_bot_orders = sorted(
+                client_id
+                for client_id in open_client_ids
+                if client_id.startswith("ts-") and not (self._bot_exit_only and "-A-" in client_id)
+            )
             if stale_bot_orders:
                 self.review_required = True
                 self.logger.system(
@@ -256,8 +277,22 @@ class PositionRegistry:
                 seen.add(key)
                 self.positions.append(position)
 
+    def _purge_closed_bot_positions(self) -> None:
+        self.positions = [
+            position
+            for position in self.positions
+            if not (isinstance(position, BotFullExitPosition) and position.status == "CLOSED")
+        ]
+
     def _bot_exit_config(self) -> Dict[str, Any]:
         return self.config.get("risk") or self.config["exit_bot_full_engine"]
+
+    def _position_labels(self) -> tuple[str, ...]:
+        return ("B",) if self._bot_exit_only else ("A", "B")
+
+    @property
+    def _bot_exit_only(self) -> bool:
+        return str(self.config.get("position_mode", "paired_ab")) == "bot_exit_only"
 
 
 def _average_fill_price(order: Dict[str, Any]) -> float:

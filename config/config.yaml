@@ -1,9 +1,11 @@
 symbol: SOLUSDT
 active_profile: debug_intraday
+position_mode: bot_exit_only
+strategy_version: "b_atr_v1.2"
 
 run_control:
-  mode: single_cycle
-  stop_after_cycle_complete: true
+  mode: continuous
+  stop_after_cycle_complete: false
 
 market_data:
   rest_url: "https://api.binance.com"

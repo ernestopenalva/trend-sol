@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config_profiles import effective_config
-from src.console_utils import console_line
+from src.console_utils import BRASILIA_TZ, console_line
 from src.exchange.binance_client import BinanceClient, BinanceClientError
 from src.exchange.binance_market_data import BinanceMarketDataClient
 from src.logging_utils import JsonlLogger
@@ -25,6 +25,7 @@ from src.monitor.position_registry import PositionRegistry
 from src.monitor.ws_manager import WSManager
 from src.project_env import load_project_env
 from src.state_manager import StateManager
+from src.trade_ledger import TradeLedger
 
 
 class Monitor:
@@ -32,6 +33,7 @@ class Monitor:
         load_project_env()
         self.project_root = PROJECT_ROOT
         self.config = effective_config(self._load_yaml(config_path))
+        self.config["run_id"] = _run_id(self.config)
         self.logger = JsonlLogger(self.project_root, self.config)
         self.last_price: float | None = None
         self.last_tick_monotonic: float | None = None
@@ -60,7 +62,15 @@ class Monitor:
             timeout_seconds=int(execution_cfg.get("http_timeout_seconds", 8)),
         )
         self.cycle_manager = CycleManager(self.project_root, self.config, self.logger, self.state_manager)
-        self.registry = PositionRegistry(self.config, self.client, self.logger, self.cycle_manager, self.state_manager)
+        self.trade_ledger = TradeLedger(self.project_root)
+        self.registry = PositionRegistry(
+            self.config,
+            self.client,
+            self.logger,
+            self.cycle_manager,
+            self.state_manager,
+            self.trade_ledger,
+        )
         self.entry_engine = EntryEngine(str(self.config["symbol"]), self.config, self.logger)
         self.logger.set_entry_console_context(self._entry_console_context)
 
@@ -99,10 +109,11 @@ class Monitor:
 
     def _validate_startup(self) -> None:
         self.client.require_credentials()
-        self.client.validate_trailing_delta(
-            str(self.config["symbol"]),
-            int(self.config["exit_server_simple_trail"]["trailing_delta_bips"]),
-        )
+        if self.config.get("position_mode") != "bot_exit_only":
+            self.client.validate_trailing_delta(
+                str(self.config["symbol"]),
+                int(self.config["exit_server_simple_trail"]["trailing_delta_bips"]),
+            )
         self.logger.system("startup_validation_ok", symbol=self.config["symbol"])
 
     def _load_historical_candles(self) -> None:
@@ -241,6 +252,13 @@ def _gate_mark(value: Any) -> str:
     if value is False:
         return "-"
     return "."
+
+
+def _run_id(config: Dict[str, Any]) -> str:
+    strategy = str(config.get("strategy_version", "strategy")).replace(".", "_")
+    from datetime import datetime
+
+    return f"{datetime.now(BRASILIA_TZ).strftime('%Y%m%d_%H%M')}_{strategy}"
 
 
 if __name__ == "__main__":
