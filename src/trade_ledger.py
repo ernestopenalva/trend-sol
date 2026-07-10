@@ -50,9 +50,12 @@ class TradeLedger:
         return {
             "run_id": config.get("run_id"),
             "strategy_version": config.get("strategy_version"),
+            "profile": config.get("active_profile"),
             "pair_id": position.pair_id,
+            "position_id": position.position_id,
             "symbol": position.symbol,
             "position_type": "BOT_EXIT",
+            "position_notional_usdt": _float_or_none(position.position_notional_usdt),
             "opened_at": position.open_ts,
             "closed_at": position.close_ts,
             "age_seconds": _age_seconds(position.open_ts, position.close_ts),

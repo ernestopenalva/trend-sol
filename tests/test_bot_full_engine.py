@@ -131,6 +131,46 @@ class BotFullEngineTests(unittest.TestCase):
         self.assertEqual(position.stop_type, "breakeven")
         self.assertAlmostEqual(position.effective_stop, 100.02)
 
+    def test_breakeven_atr_uses_net_fee_floor_when_enabled(self) -> None:
+        position = self._atr_position(
+            config_overrides={
+                "fees": {"enabled": True, "taker_fee_pct": 0.10, "use_bnb_discount": False},
+                "ladder": {"be_net_margin_pct": 0.05},
+            }
+        )
+
+        self.assertIsNone(position.on_tick(100.60))
+
+        self.assertAlmostEqual(position.breakeven_stop, 100.25)
+        self.assertEqual(position.stop_type, "breakeven")
+
+    def test_breakeven_net_fee_floor_applies_bnb_discount(self) -> None:
+        position = self._atr_position(
+            config_overrides={
+                "fees": {"enabled": True, "taker_fee_pct": 0.10, "use_bnb_discount": True},
+                "ladder": {"be_net_margin_pct": 0.05},
+            }
+        )
+
+        self.assertIsNone(position.on_tick(100.60))
+
+        self.assertAlmostEqual(position.breakeven_stop, 100.20)
+
+    def test_breakeven_waits_until_price_covers_net_floor(self) -> None:
+        position = self._atr_position(
+            entry_atr=0.05,
+            config_overrides={
+                "fees": {"enabled": True, "taker_fee_pct": 0.10, "use_bnb_discount": False},
+                "ladder": {"be_net_margin_pct": 0.05},
+            },
+        )
+
+        self.assertIsNone(position.on_tick(100.15))
+        self.assertIsNone(position.breakeven_stop)
+
+        self.assertIsNone(position.on_tick(100.251))
+        self.assertAlmostEqual(position.breakeven_stop, 100.25)
+
     def test_breakeven_atr_close_uses_breakeven_reason(self) -> None:
         client = FakeClient()
         position = self._atr_position(client=client)
@@ -152,7 +192,22 @@ class BotFullEngineTests(unittest.TestCase):
         self.assertEqual(position.status, "NEEDS_REVIEW")
         self.assertEqual(position.reserved_qty, 1.0)
 
-    def _atr_position(self, entry_atr=0.20, client=None) -> BotFullExitPosition:
+    def _atr_position(self, entry_atr=0.20, client=None, config_overrides=None) -> BotFullExitPosition:
+        config = {
+            "review_stop_pct": 30,
+            "breakeven": {"mode": "atr", "trigger_atr": 3, "offset_atr": 0.1},
+            "profit_lock": {
+                "mode": "atr",
+                "steps": [
+                    {"trigger_atr": 5, "lock_atr": 1.5},
+                    {"trigger_atr": 8, "lock_atr": 3},
+                    {"trigger_atr": 12, "lock_atr": 6},
+                ],
+            },
+            "trailing": {"mode": "atr", "activation_atr": 10, "gap_atr": 5},
+        }
+        if config_overrides:
+            config.update(config_overrides)
         return BotFullExitPosition(
             pair_id="pair",
             symbol="SOLUSDT",
@@ -160,19 +215,7 @@ class BotFullEngineTests(unittest.TestCase):
             quantity=1.0,
             entry_order={},
             open_ts="2026-07-04T00:00:00+00:00",
-            config={
-                "review_stop_pct": 30,
-                "breakeven": {"mode": "atr", "trigger_atr": 3, "offset_atr": 0.1},
-                "profit_lock": {
-                    "mode": "atr",
-                    "steps": [
-                        {"trigger_atr": 5, "lock_atr": 1.5},
-                        {"trigger_atr": 8, "lock_atr": 3},
-                        {"trigger_atr": 12, "lock_atr": 6},
-                    ],
-                },
-                "trailing": {"mode": "atr", "activation_atr": 10, "gap_atr": 5},
-            },
+            config=config,
             client=client or FakeClient(),  # type: ignore[arg-type]
             logger=JsonlLogger(
                 Path(self.tmp.name),

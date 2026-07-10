@@ -21,7 +21,7 @@ class ConfigProfileTests(unittest.TestCase):
                     "trend": {"timeframe": "1d"},
                     "entry": {"timeframe": "4h", "rsi_threshold": 45},
                 },
-                "debug_intraday": {
+                "intraday": {
                     "trend": {"timeframe": "15m"},
                     "entry": {"timeframe": "1m", "rsi_threshold": 55},
                 },
@@ -39,9 +39,9 @@ class ConfigProfileTests(unittest.TestCase):
             ["solusdt@kline_4h", "solusdt@kline_1d"],
         )
 
-    def test_debug_intraday_uses_short_timeframes(self) -> None:
+    def test_intraday_uses_short_timeframes(self) -> None:
         config = self.base_config()
-        config["active_profile"] = "debug_intraday"
+        config["active_profile"] = "intraday"
         effective = effective_config(config)
         self.assertEqual(effective["trend"]["timeframe"], "15m")
         self.assertEqual(effective["entry"]["timeframe"], "1m")

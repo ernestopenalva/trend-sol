@@ -34,12 +34,18 @@ class PositionRegistry:
         self.positions: List[PositionBase] = []
         self.entries_paused = False
         self.review_required = False
+        self._blocked_candles: set[int] = set()
+        self._last_entry_candle_open_time: Optional[int] = None
+        self._entries_by_candle: dict[int, int] = {}
+        self._last_admission_details: Dict[str, Any] = {}
+        self._next_position_id = 1
         self.load_state()
         self.reconcile_with_binance()
 
     def open_pair(self, signal: EntrySignal) -> None:
-        if self.open_pair_count >= int(self.config["capital"]["max_open_pairs"]):
-            self.logger.system("max_open_pairs_reached", price=signal.price)
+        blocked_reason = self._admission_block_reason(signal)
+        if blocked_reason:
+            self._log_blocked_signal(signal, blocked_reason)
             return
         if self.review_required:
             self.logger.system("entry_paused_needs_review", price=signal.price)
@@ -55,6 +61,7 @@ class PositionRegistry:
         opened: List[PositionBase] = []
 
         for label in self._position_labels():
+            position_id = self._allocate_position_id()
             client_order_id = f"ts-{pair_id}-{label}-buy"
             order = self.client.market_buy_quote(self.symbol, quote_per_position, client_order_id)
             entry_price = _average_fill_price(order)
@@ -75,6 +82,9 @@ class PositionRegistry:
                     self.config["exit_server_simple_trail"],
                     self.client,
                     self.logger,
+                    position_id=position_id,
+                    source_candle_open_time=signal.source_candle_open_time,
+                    position_notional_usdt=quote_per_position,
                 )
                 position.post_trailing_order()
             else:
@@ -91,13 +101,20 @@ class PositionRegistry:
                     entry_atr=signal.entry_atr,
                     atr_timeframe=signal.atr_timeframe,
                     atr_period=signal.atr_period,
+                    position_id=position_id,
+                    source_candle_open_time=signal.source_candle_open_time,
+                    position_notional_usdt=quote_per_position,
                 )
                 self.logger.trade(position._trade_event("OPEN", entry_price, 0.0, None, order))
 
             opened.append(position)
             self.positions.append(position)
+            self._last_entry_candle_open_time = signal.source_candle_open_time
             self.save_state()
 
+        self._entries_by_candle[signal.source_candle_open_time] = (
+            self._entries_by_candle.get(signal.source_candle_open_time, 0) + 1
+        )
         if len(opened) == 2:
             slippage_pp = abs(opened[0].entry_price - opened[1].entry_price) / opened[0].entry_price * 100
             self.logger.system(
@@ -165,6 +182,9 @@ class PositionRegistry:
                 self.review_required = True
                 self.logger.system("position_restore_failed", pair_id=item.get("pair_id"), error=str(exc))
         self.positions = restored
+        self._last_entry_candle_open_time = _latest_candle_open_time(restored)
+        self._entries_by_candle = _entries_by_candle(restored)
+        self._next_position_id = _next_position_id(restored)
         if restored:
             self.logger.system("positions_restored", positions=len(restored), open_pairs=self.open_pair_count)
 
@@ -229,11 +249,16 @@ class PositionRegistry:
 
     @property
     def max_open_pairs(self) -> int:
-        return int(self.config["capital"]["max_open_pairs"])
+        return self.max_open_positions
+
+    @property
+    def max_open_positions(self) -> int:
+        capital = self.config.get("capital", {})
+        return int(capital.get("max_open_positions", capital.get("max_open_pairs", 1)))
 
     @property
     def capacity_full(self) -> bool:
-        return self.open_pair_count >= self.max_open_pairs
+        return self.open_pair_count >= self.max_open_positions
 
     def position_summary(self, current_price: Optional[float] = None) -> Dict[str, Any]:
         open_positions = [position for position in self.positions if position.status == "OPEN"]
@@ -285,7 +310,10 @@ class PositionRegistry:
         ]
 
     def _bot_exit_config(self) -> Dict[str, Any]:
-        return self.config.get("risk") or self.config["exit_bot_full_engine"]
+        config = dict(self.config.get("risk") or self.config["exit_bot_full_engine"])
+        config["fees"] = self.config.get("fees", {})
+        config["ladder"] = self.config.get("ladder", {})
+        return config
 
     def _position_labels(self) -> tuple[str, ...]:
         return ("B",) if self._bot_exit_only else ("A", "B")
@@ -293,6 +321,66 @@ class PositionRegistry:
     @property
     def _bot_exit_only(self) -> bool:
         return str(self.config.get("position_mode", "paired_ab")) == "bot_exit_only"
+
+    def _admission_block_reason(self, signal: EntrySignal) -> Optional[str]:
+        self._last_admission_details = {}
+        if self.open_pair_count >= self.max_open_positions:
+            return "BLOCKED_MAX_POSITIONS"
+        max_entries = int(self.config.get("entry", {}).get("max_entries_per_candle", 1))
+        if max_entries <= 0:
+            return "BLOCKED_CANDLE_LIMIT"
+        entries_this_candle = self._entries_by_candle.get(signal.source_candle_open_time, 0)
+        if entries_this_candle >= max_entries:
+            return "BLOCKED_CANDLE_LIMIT"
+        spacing_atr = float(self.config.get("entry", {}).get("entry_spacing_atr", 0))
+        if spacing_atr <= 0:
+            return None
+        if signal.entry_atr is None or signal.entry_atr <= 0:
+            return "BLOCKED_SPACING"
+        minimum_distance = spacing_atr * float(signal.entry_atr)
+        for position in self.positions:
+            if position.status != "OPEN":
+                continue
+            actual_distance = abs(float(signal.price) - float(position.entry_price))
+            if actual_distance < minimum_distance:
+                self._last_admission_details = {
+                    "current_price": signal.price,
+                    "blocked_against_position_id": position.position_id,
+                    "blocked_against_pair_id": position.pair_id,
+                    "existing_entry_price": position.entry_price,
+                    "new_signal_atr": signal.entry_atr,
+                    "required_distance": minimum_distance,
+                    "actual_distance": actual_distance,
+                }
+                return "BLOCKED_SPACING"
+        return None
+
+    def _log_blocked_signal(self, signal: EntrySignal, reason: str) -> None:
+        if signal.source_candle_open_time in self._blocked_candles:
+            return
+        self._blocked_candles.add(signal.source_candle_open_time)
+        self.logger.decision(
+            {
+                "ts": now_iso(),
+                "gate": 6,
+                "passed": False,
+                "near_miss": False,
+                "reason": reason,
+                "price": signal.price,
+                "entry_atr": signal.entry_atr,
+                "atr_timeframe": signal.atr_timeframe,
+                "atr_period": signal.atr_period,
+                "source_candle_open_time": signal.source_candle_open_time,
+                "open_positions": self.open_pair_count,
+                "max_open_positions": self.max_open_positions,
+                **self._last_admission_details,
+            }
+        )
+
+    def _allocate_position_id(self) -> int:
+        position_id = self._next_position_id
+        self._next_position_id += 1
+        return position_id
 
 
 def _average_fill_price(order: Dict[str, Any]) -> float:
@@ -311,6 +399,29 @@ def _float_or_zero(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _next_position_id(positions: List[PositionBase]) -> int:
+    ids = [position.position_id for position in positions if position.position_id is not None]
+    return (max(ids) + 1) if ids else 1
+
+
+def _latest_candle_open_time(positions: List[PositionBase]) -> Optional[int]:
+    values = [
+        position.source_candle_open_time
+        for position in positions
+        if position.source_candle_open_time is not None
+    ]
+    return max(values) if values else None
+
+
+def _entries_by_candle(positions: List[PositionBase]) -> dict[int, int]:
+    counts: dict[int, set[str]] = {}
+    for position in positions:
+        if position.source_candle_open_time is None:
+            continue
+        counts.setdefault(position.source_candle_open_time, set()).add(position.pair_id)
+    return {candle: len(pair_ids) for candle, pair_ids in counts.items()}
 
 
 def _bot_position_details(position: PositionBase, current_price: Optional[float]) -> Dict[str, Any]:

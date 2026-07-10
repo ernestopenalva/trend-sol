@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import types
 import unittest
@@ -21,16 +22,18 @@ from src.position.bot_full_engine import BotFullExitPosition
 from src.state_manager import StateManager
 from src.trade_ledger import TradeLedger
 from tools.list_positions import _normalize_state, _print_human
-from tools.trades_report import _exit_reason, _filter, _parse_args
+from tools.trades_report import _estimated_fees_pct, _exit_reason, _filter, _parse_args, _slots_full_pct
 
 
 class FakeClient:
     def __init__(self) -> None:
         self.buys = []
+        self.buy_quotes = []
         self.trailing_orders = []
 
     def market_buy_quote(self, symbol: str, quote_qty: float, client_order_id: str):
         self.buys.append(client_order_id)
+        self.buy_quotes.append(quote_qty)
         return {
             "orderId": 1,
             "clientOrderId": client_order_id,
@@ -76,6 +79,106 @@ class BotExitOnlyTests(unittest.TestCase):
             self.assertEqual(client.trailing_orders, [])
             self.assertEqual([position.label for position in registry.positions], ["B"])
 
+    def test_multi_trade_uses_fixed_configured_size_and_sequential_position_ids(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config = _config()
+            config["capital"] = {"operational_balance_usdt": 100, "trade_size_pct": 20, "max_open_positions": 5}
+            config["entry"] = {"entry_spacing_atr": 0, "max_entries_per_candle": 1}
+            root = Path(tmp)
+            logger = JsonlLogger(root, config)
+            state = StateManager(root)
+            client = FakeClient()
+            registry = PositionRegistry(
+                config,
+                client,  # type: ignore[arg-type]
+                logger,
+                CycleManager(root, config, logger, state),
+                state,
+                TradeLedger(root),
+            )
+
+            registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", 1, 0.2, "1m", 14))
+            registry.open_pair(EntrySignal("SOLUSDT", 101, "ts", 2, 0.2, "1m", 14))
+
+            self.assertEqual(client.buy_quotes, [20.0, 20.0])
+            self.assertEqual([position.position_id for position in registry.positions], [1, 2])
+            self.assertEqual([position.position_notional_usdt for position in registry.positions], [20.0, 20.0])
+
+    def test_admission_blocks_second_entry_in_same_candle(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config = _config()
+            config["capital"] = {"operational_balance_usdt": 100, "trade_size_pct": 20, "max_open_positions": 5}
+            config["entry"] = {"entry_spacing_atr": 0, "max_entries_per_candle": 1}
+            root = Path(tmp)
+            logger = JsonlLogger(root, config)
+            state = StateManager(root)
+            registry = PositionRegistry(
+                config,
+                FakeClient(),  # type: ignore[arg-type]
+                logger,
+                CycleManager(root, config, logger, state),
+                state,
+                TradeLedger(root),
+            )
+
+            registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", 1, 0.2, "1m", 14))
+            registry.open_pair(EntrySignal("SOLUSDT", 101, "ts", 1, 0.2, "1m", 14))
+
+            self.assertEqual(len(registry.positions), 1)
+            self.assertEqual(_last_decision_reason(root), "BLOCKED_CANDLE_LIMIT")
+
+    def test_admission_spacing_uses_new_signal_atr(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config = _config()
+            config["capital"] = {"operational_balance_usdt": 100, "trade_size_pct": 20, "max_open_positions": 5}
+            config["entry"] = {"entry_spacing_atr": 1.0, "max_entries_per_candle": 1}
+            root = Path(tmp)
+            logger = JsonlLogger(root, config)
+            state = StateManager(root)
+            registry = PositionRegistry(
+                config,
+                FakeClient(),  # type: ignore[arg-type]
+                logger,
+                CycleManager(root, config, logger, state),
+                state,
+                TradeLedger(root),
+            )
+
+            registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", 1, 0.2, "1m", 14))
+            registry.open_pair(EntrySignal("SOLUSDT", 100.90, "ts", 2, 1.0, "1m", 14))
+
+            self.assertEqual(len(registry.positions), 1)
+            self.assertEqual(_last_decision_reason(root), "BLOCKED_SPACING")
+            decision = _last_decision(root)
+            self.assertEqual(decision["blocked_against_position_id"], 1)
+            self.assertAlmostEqual(decision["existing_entry_price"], 100.0)
+            self.assertAlmostEqual(decision["new_signal_atr"], 1.0)
+            self.assertAlmostEqual(decision["required_distance"], 1.0)
+            self.assertAlmostEqual(decision["actual_distance"], 0.9)
+
+    def test_admission_blocks_when_max_positions_full(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config = _config()
+            config["capital"] = {"operational_balance_usdt": 100, "trade_size_pct": 20, "max_open_positions": 1}
+            config["entry"] = {"entry_spacing_atr": 0, "max_entries_per_candle": 1}
+            root = Path(tmp)
+            logger = JsonlLogger(root, config)
+            state = StateManager(root)
+            registry = PositionRegistry(
+                config,
+                FakeClient(),  # type: ignore[arg-type]
+                logger,
+                CycleManager(root, config, logger, state),
+                state,
+                TradeLedger(root),
+            )
+
+            registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", 1, 0.2, "1m", 14))
+            registry.open_pair(EntrySignal("SOLUSDT", 101, "ts", 2, 0.2, "1m", 14))
+
+            self.assertEqual(len(registry.positions), 1)
+            self.assertEqual(_last_decision_reason(root), "BLOCKED_MAX_POSITIONS")
+
     def test_closed_bot_trade_is_written_once(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -102,6 +205,20 @@ class BotExitOnlyTests(unittest.TestCase):
         record = {"exit_reason": "REVIEW_STOP", "final_step": "BE"}
 
         self.assertEqual(_exit_reason(record), "BREAKEVEN")
+
+    def test_trades_report_estimates_round_trip_taker_fees(self) -> None:
+        config = {"fees": {"enabled": True, "taker_fee_pct": 0.10, "use_bnb_discount": False}}
+
+        self.assertAlmostEqual(_estimated_fees_pct(4, config), 0.80)
+
+    def test_trades_report_calculates_slots_full_time(self) -> None:
+        records = [
+            {"opened_at": "2026-07-08T00:00:00+00:00", "closed_at": "2026-07-08T00:10:00+00:00"},
+            {"opened_at": "2026-07-08T00:05:00+00:00", "closed_at": "2026-07-08T00:15:00+00:00"},
+        ]
+        config = {"capital": {"max_open_positions": 2}}
+
+        self.assertAlmostEqual(_slots_full_pct(records, config), 100 / 3)
 
     def test_list_positions_omits_a_in_bot_exit_only(self) -> None:
         config = _config()
@@ -160,6 +277,16 @@ def _closed_position(root: Path) -> BotFullExitPosition:
     position.stop_type = "profit_lock"
     position.mark_closed(100.5, "PROFIT_LOCK", "2026-07-08T22:10:00+00:00", {})
     return position
+
+
+def _last_decision_reason(root: Path) -> str:
+    return str(_last_decision(root)["reason"])
+
+
+def _last_decision(root: Path) -> dict:
+    path = root / "logs" / "decisions.jsonl"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return json.loads(lines[-1])
 
 
 def _config():

@@ -181,9 +181,6 @@ class Monitor:
         if self.registry.review_required:
             self.entry_engine.set_paused("PAUSED_NEEDS_REVIEW")
             return True
-        if self.registry.capacity_full:
-            self.entry_engine.set_paused("PAUSED_CAPACITY")
-            return True
         if self.ws_manager and self.ws_manager.status != "connected":
             self.entry_engine.set_paused("PAUSED_WEBSOCKET")
             return True

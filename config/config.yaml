@@ -1,7 +1,13 @@
 symbol: SOLUSDT
-active_profile: debug_intraday
+active_profile: intraday
 position_mode: bot_exit_only
 strategy_version: "b_atr_v1.2"
+
+fees:
+  enabled: true
+  maker_fee_pct: 0.10
+  taker_fee_pct: 0.10
+  use_bnb_discount: false
 
 run_control:
   mode: continuous
@@ -50,6 +56,8 @@ entry:
     pullback_required_ratio: 0.85
     rsi_margin: 3
     reversal_min_position: 0.58
+  max_entries_per_candle: 1
+  entry_spacing_atr: 1.0
 
 profiles:
   production:
@@ -62,7 +70,7 @@ profiles:
       rsi_lookback_candles: 2
       require_volume_drying: true
       require_reversal_candle_closed: true
-  debug_intraday:
+  intraday:
     trend:
       timeframe: "15m"
     entry:
@@ -74,9 +82,9 @@ profiles:
       require_reversal_candle_closed: true
 
 capital:
-  operational_balance_usdt: 1000
-  trade_size_pct: 5
-  max_open_pairs: 1
+  operational_balance_usdt: 100
+  trade_size_pct: 20
+  max_open_positions: 5
 
 exit_server_simple_trail:
   preferred_order_type: "STOP_LOSS"
@@ -98,6 +106,8 @@ exit_bot_full_engine:
     gap_pct: 4
 
 risk:
+  # ATR da saida e congelado no momento da entrada.
+  # BE, profit lock e trailing usam entry_atr, nao ATR recalculado ao vivo.
   review_stop_pct: 30
   breakeven:
     mode: atr
@@ -116,6 +126,9 @@ risk:
     mode: atr
     activation_atr: 10
     gap_atr: 5
+
+ladder:
+  be_net_margin_pct: 0.05
 
 cycle:
   pairs_per_cycle: 1

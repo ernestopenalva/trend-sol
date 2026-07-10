@@ -15,6 +15,9 @@ class PositionBase:
     entry_order: Dict[str, Any]
     reserved_qty: float
     open_ts: str
+    position_id: Optional[int] = None
+    source_candle_open_time: Optional[int] = None
+    position_notional_usdt: Optional[float] = None
     status: str = "OPEN"
     exit_price: Optional[float] = None
     exit_reason: Optional[str] = None
@@ -56,6 +59,9 @@ class PositionBase:
             "entry_order": self.entry_order,
             "reserved_qty": self.reserved_qty,
             "open_ts": self.open_ts,
+            "position_id": self.position_id,
+            "source_candle_open_time": self.source_candle_open_time,
+            "position_notional_usdt": self.position_notional_usdt,
             "status": self.status,
             "exit_price": self.exit_price,
             "exit_reason": self.exit_reason,

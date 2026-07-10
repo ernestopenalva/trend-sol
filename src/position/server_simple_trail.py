@@ -22,6 +22,9 @@ class ServerSimpleTrailPosition(PositionBase):
         config: Dict[str, Any],
         client: "BinanceClient",
         logger: JsonlLogger,
+        position_id: Optional[int] = None,
+        source_candle_open_time: Optional[int] = None,
+        position_notional_usdt: Optional[float] = None,
     ) -> None:
         super().__init__(
             pair_id=pair_id,
@@ -33,6 +36,9 @@ class ServerSimpleTrailPosition(PositionBase):
             entry_order=entry_order,
             reserved_qty=quantity,
             open_ts=open_ts,
+            position_id=position_id,
+            source_candle_open_time=source_candle_open_time,
+            position_notional_usdt=position_notional_usdt,
         )
         self.config = config
         self.client = client
@@ -59,6 +65,13 @@ class ServerSimpleTrailPosition(PositionBase):
             logger=logger,
         )
         position.reserved_qty = float(state.get("reserved_qty", position.quantity))
+        position.position_id = _optional_int(state.get("position_id", position.position_id))
+        position.source_candle_open_time = _optional_int(
+            state.get("source_candle_open_time", position.source_candle_open_time)
+        )
+        position.position_notional_usdt = _optional_float(
+            state.get("position_notional_usdt", position.position_notional_usdt)
+        )
         position.status = str(state.get("status", "OPEN"))
         position.exit_price = state.get("exit_price")
         position.exit_reason = state.get("exit_reason")
@@ -137,7 +150,9 @@ class ServerSimpleTrailPosition(PositionBase):
         return {
             "ts": now_iso(),
             "pair_id": self.pair_id,
+            "position_id": self.position_id,
             "position": self.label,
+            "position_notional_usdt": self.position_notional_usdt,
             "engine": self.engine,
             "event": event,
             "price": price,
@@ -175,6 +190,24 @@ def _float_or_zero(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _commission(order: Dict[str, Any]) -> float:

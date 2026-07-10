@@ -24,6 +24,9 @@ class BotFullExitPosition(PositionBase):
         entry_atr: Optional[float] = None,
         atr_timeframe: Optional[str] = None,
         atr_period: Optional[int] = None,
+        position_id: Optional[int] = None,
+        source_candle_open_time: Optional[int] = None,
+        position_notional_usdt: Optional[float] = None,
     ) -> None:
         super().__init__(
             pair_id=pair_id,
@@ -35,6 +38,9 @@ class BotFullExitPosition(PositionBase):
             entry_order=entry_order,
             reserved_qty=quantity,
             open_ts=open_ts,
+            position_id=position_id,
+            source_candle_open_time=source_candle_open_time,
+            position_notional_usdt=position_notional_usdt,
         )
         self.config = config
         self.client = client
@@ -97,6 +103,13 @@ class BotFullExitPosition(PositionBase):
             logger=logger,
         )
         position.reserved_qty = float(state.get("reserved_qty", position.quantity))
+        position.position_id = _optional_int(state.get("position_id", position.position_id))
+        position.source_candle_open_time = _optional_int(
+            state.get("source_candle_open_time", position.source_candle_open_time)
+        )
+        position.position_notional_usdt = _optional_float(
+            state.get("position_notional_usdt", position.position_notional_usdt)
+        )
         position.status = str(state.get("status", "OPEN"))
         position.exit_price = state.get("exit_price")
         position.exit_reason = state.get("exit_reason")
@@ -213,7 +226,9 @@ class BotFullExitPosition(PositionBase):
         return {
             "ts": now_iso(),
             "pair_id": self.pair_id,
+            "position_id": self.position_id,
             "position": self.label,
+            "position_notional_usdt": self.position_notional_usdt,
             "engine": self.engine,
             "event": event,
             "price": price,
@@ -267,13 +282,17 @@ class BotFullExitPosition(PositionBase):
         if self.breakeven_mode == "atr":
             if pnl_atr is None or self.breakeven_trigger_atr is None or self.breakeven_offset_atr is None:
                 return
-            trigger_hit = _gte(pnl_atr, self.breakeven_trigger_atr)
             new_stop = self.entry_price + self.breakeven_offset_atr * float(self.entry_atr)
+            trigger_price = self.entry_price + self.breakeven_trigger_atr * float(self.entry_atr)
         elif self.breakeven_trigger_pct is not None and self.breakeven_stop_to_pct is not None:
-            trigger_hit = _gte(pnl_pct, self.breakeven_trigger_pct)
             new_stop = self.entry_price * (1 + self.breakeven_stop_to_pct / 100)
+            trigger_price = self.entry_price * (1 + self.breakeven_trigger_pct / 100)
+        else:
+            return
 
-        if not trigger_hit or new_stop is None:
+        new_stop = max(new_stop, self._net_breakeven_floor())
+        trigger_hit = _gte(price, max(trigger_price, new_stop))
+        if not trigger_hit:
             return
         if self.breakeven_stop is None or new_stop > self.breakeven_stop:
             self.breakeven_stop = new_stop
@@ -292,6 +311,17 @@ class BotFullExitPosition(PositionBase):
         if self.trailing_mode == "atr":
             return pnl_atr is not None and _gte(pnl_atr, self.trailing_activation_atr)
         return _gte(pnl_pct, self.trailing_activation_pct)
+
+    def _net_breakeven_floor(self) -> float:
+        fees = self.config.get("fees") if isinstance(self.config.get("fees"), dict) else {}
+        if not fees or not bool(fees.get("enabled", False)):
+            return self.entry_price
+        taker_fee_pct = _float_or_zero(fees.get("taker_fee_pct"))
+        if bool(fees.get("use_bnb_discount", False)):
+            taker_fee_pct *= 0.75
+        ladder = self.config.get("ladder") if isinstance(self.config.get("ladder"), dict) else {}
+        margin_pct = _float_or_zero(ladder.get("be_net_margin_pct"))
+        return self.entry_price * (1 + (2 * taker_fee_pct / 100) + (margin_pct / 100))
 
     def _current_trailing_stop(self) -> Optional[float]:
         if self.trailing_mode == "atr":
@@ -383,6 +413,15 @@ def _optional_float(value: Any) -> Optional[float]:
         if value is None:
             return None
         return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
     except (TypeError, ValueError):
         return None
 
