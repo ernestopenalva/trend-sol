@@ -179,7 +179,12 @@ class BotFullExitPosition(PositionBase):
 
         reason = None
         if price <= self.effective_stop:
-            reason = {"review": "REVIEW_STOP", "profit_lock": "PROFIT_LOCK", "trailing": "TRAILING"}.get(
+            reason = {
+                "review": "REVIEW_STOP",
+                "breakeven": "BREAKEVEN",
+                "profit_lock": "PROFIT_LOCK",
+                "trailing": "TRAILING",
+            }.get(
                 self.stop_type,
                 "REVIEW_STOP",
             )

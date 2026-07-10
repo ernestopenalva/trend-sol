@@ -65,7 +65,7 @@ def _print_report(records: list[Dict[str, Any]], args: argparse.Namespace) -> No
     print()
     _print_summary(records)
     print()
-    _print_counts("Exit reasons", Counter(str(record.get("exit_reason") or "UNKNOWN") for record in records))
+    _print_counts("Exit reasons", Counter(_exit_reason(record) for record in records))
     print()
     _print_counts("Ladder", Counter(str(record.get("final_step") or "UNKNOWN") for record in records))
     print()
@@ -113,7 +113,7 @@ def _print_trades(records: list[Dict[str, Any]]) -> None:
             f"{_fmt_signed_pct(record.get('realized_pnl_pct')):7} "
             f"{_fmt_number(record.get('peak_atr')):8} "
             f"{str(record.get('final_step') or 'n/a'):6} "
-            f"{record.get('exit_reason') or 'n/a'}"
+            f"{_exit_reason(record)}"
         )
 
 
@@ -136,6 +136,13 @@ def _write_csv(records: list[Dict[str, Any]], path: Path) -> None:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(records)
+
+
+def _exit_reason(record: Dict[str, Any]) -> str:
+    reason = str(record.get("exit_reason") or "UNKNOWN")
+    if reason == "REVIEW_STOP" and str(record.get("final_step") or "") == "BE":
+        return "BREAKEVEN"
+    return reason
 
 
 def _parse_since(value: Optional[str]) -> Optional[datetime]:

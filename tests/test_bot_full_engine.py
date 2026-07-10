@@ -131,6 +131,19 @@ class BotFullEngineTests(unittest.TestCase):
         self.assertEqual(position.stop_type, "breakeven")
         self.assertAlmostEqual(position.effective_stop, 100.02)
 
+    def test_breakeven_atr_close_uses_breakeven_reason(self) -> None:
+        client = FakeClient()
+        position = self._atr_position(client=client)
+
+        self.assertIsNone(position.on_tick(100.60))
+        event = position.on_tick(100.01)
+
+        self.assertIsNotNone(event)
+        self.assertEqual(position.status, "CLOSED")
+        self.assertEqual(position.exit_reason, "BREAKEVEN")
+        self.assertEqual(event["exit_reason"], "BREAKEVEN")
+        self.assertEqual(client.sells[0][1], 1.0)
+
     def test_missing_entry_atr_marks_position_needs_review(self) -> None:
         position = self._atr_position(entry_atr=None)
 
@@ -139,7 +152,7 @@ class BotFullEngineTests(unittest.TestCase):
         self.assertEqual(position.status, "NEEDS_REVIEW")
         self.assertEqual(position.reserved_qty, 1.0)
 
-    def _atr_position(self, entry_atr=0.20) -> BotFullExitPosition:
+    def _atr_position(self, entry_atr=0.20, client=None) -> BotFullExitPosition:
         return BotFullExitPosition(
             pair_id="pair",
             symbol="SOLUSDT",
@@ -160,7 +173,7 @@ class BotFullEngineTests(unittest.TestCase):
                 },
                 "trailing": {"mode": "atr", "activation_atr": 10, "gap_atr": 5},
             },
-            client=FakeClient(),  # type: ignore[arg-type]
+            client=client or FakeClient(),  # type: ignore[arg-type]
             logger=JsonlLogger(
                 Path(self.tmp.name),
                 {

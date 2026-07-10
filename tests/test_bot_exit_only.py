@@ -21,7 +21,7 @@ from src.position.bot_full_engine import BotFullExitPosition
 from src.state_manager import StateManager
 from src.trade_ledger import TradeLedger
 from tools.list_positions import _normalize_state, _print_human
-from tools.trades_report import _filter, _parse_args
+from tools.trades_report import _exit_reason, _filter, _parse_args
 
 
 class FakeClient:
@@ -97,6 +97,11 @@ class BotExitOnlyTests(unittest.TestCase):
 
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0]["run_id"], "r2")
+
+    def test_trades_report_labels_be_review_stop_as_breakeven(self) -> None:
+        record = {"exit_reason": "REVIEW_STOP", "final_step": "BE"}
+
+        self.assertEqual(_exit_reason(record), "BREAKEVEN")
 
     def test_list_positions_omits_a_in_bot_exit_only(self) -> None:
         config = _config()
