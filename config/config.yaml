@@ -84,7 +84,7 @@ profiles:
 capital:
   operational_balance_usdt: 100
   trade_size_pct: 20
-  max_open_positions: 5
+  max_open_positions: 2
 
 exit_server_simple_trail:
   preferred_order_type: "STOP_LOSS"
