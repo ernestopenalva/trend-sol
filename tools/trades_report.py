@@ -62,31 +62,21 @@ def _filter(records: list[Dict[str, Any]], args: argparse.Namespace) -> list[Dic
 
 def _print_report(records: list[Dict[str, Any]], args: argparse.Namespace, config: Dict[str, Any]) -> None:
     print("TREND-SOL | Bot B trades report")
-    print()
-    print("Filter:")
-    print(f"  since: {args.since or 'all'}")
-    print(f"  strategy: {args.strategy or 'all'}")
-    print(f"  mode: {config.get('active_profile') or 'unknown'}")
+    filter_text = f"since={args.since or 'all'} | strategy={args.strategy or 'all'} | mode={config.get('active_profile') or 'unknown'}"
     if args.run_id:
-        print(f"  run_id: {args.run_id}")
+        filter_text = f"{filter_text} | run_id={args.run_id}"
+    print(f"Filter: {filter_text}")
     print()
     _print_summary(records, config)
     print()
     _print_counts("Exit reasons", Counter(_exit_reason(record) for record in records))
     print()
-    _print_counts("Ladder", Counter(str(record.get("final_step") or "UNKNOWN") for record in records))
-    print()
-    _print_counts("BE floor source", Counter(_be_floor_source(record) for record in records if _be_floor_source(record)))
-    print()
-    _print_counts(
-        "BE floor absorbed ATR stop",
-        Counter(str(record.get("be_floor_absorbed_atr_stop")) for record in records if record.get("be_floor_absorbed_atr_stop") is not None),
-    )
-    print()
     if args.detail:
+        _print_detail_sections(records)
+        print()
         _print_detail(records)
     else:
-        _print_trades(records)
+        _print_trades(records, config)
 
 
 def _print_summary(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
@@ -94,8 +84,6 @@ def _print_summary(records: list[Dict[str, Any]], config: Dict[str, Any]) -> Non
     pnls = [value for value in pnls if value is not None]
     net_pnls = [_net_pnl(record, config) for record in records]
     net_pnls = [value for value in net_pnls if value is not None]
-    slippages = [_float(record.get("exit_slippage_pct")) for record in records]
-    slippages = [value for value in slippages if value is not None]
     ages = [_float(record.get("age_seconds")) for record in records]
     ages = [value for value in ages if value is not None]
     wins = [value for value in pnls if value > 0]
@@ -103,6 +91,7 @@ def _print_summary(records: list[Dict[str, Any]], config: Dict[str, Any]) -> Non
     estimated_fees = _estimated_fees_pct_for_records(records, config)
     net_total = sum(net_pnls) if net_pnls else gross_total - estimated_fees
     print("Summary:")
+    print(f"  fees: {_fee_summary(config)}")
     print(f"  trades: {len(records)}")
     print(f"  gross total: {_fmt_signed_pct(gross_total)}")
     print(f"  estimated fees: {_fmt_signed_pct(-estimated_fees)}")
@@ -113,10 +102,25 @@ def _print_summary(records: list[Dict[str, Any]], config: Dict[str, Any]) -> Non
     print(f"  worst: {_fmt_signed_pct(min(pnls) if pnls else 0)}")
     print(f"  winrate: {(len(wins) / len(pnls) * 100) if pnls else 0:.1f}%")
     print(f"  avg age: {_fmt_duration(sum(ages) / len(ages) if ages else 0)}")
+    print(f"  slots full time: {_slots_full_pct(records, config):.1f}%")
+
+
+def _print_detail_sections(records: list[Dict[str, Any]]) -> None:
+    slippages = [_float(record.get("exit_slippage_pct")) for record in records]
+    slippages = [value for value in slippages if value is not None]
+    print("Technical:")
     print(f"  avg exit slippage: {_fmt_signed_pct(sum(slippages) / len(slippages) if slippages else 0)}")
     print(f"  best exit slippage: {_fmt_signed_pct(max(slippages) if slippages else 0)}")
     print(f"  worst exit slippage: {_fmt_signed_pct(min(slippages) if slippages else 0)}")
-    print(f"  slots full time: {_slots_full_pct(records, config):.1f}%")
+    print()
+    _print_counts("Peak step", Counter(str(record.get("final_step") or "UNKNOWN") for record in records))
+    print()
+    _print_counts("BE floor source", Counter(_be_floor_source(record) for record in records if _be_floor_source(record)))
+    print()
+    _print_counts(
+        "BE floor absorbed ATR stop",
+        Counter(str(record.get("be_floor_absorbed_atr_stop")) for record in records if record.get("be_floor_absorbed_atr_stop") is not None),
+    )
 
 
 def _print_counts(title: str, counts: Counter[str]) -> None:
@@ -128,19 +132,19 @@ def _print_counts(title: str, counts: Counter[str]) -> None:
         print(f"  {key}: {value}")
 
 
-def _print_trades(records: list[Dict[str, Any]]) -> None:
+def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
     print("Trades:")
-    print("opened  closed  age   entry    exit     pnl     peak_atr  step   reason")
+    print("opened       closed       age    entry    peak     exit     gross   net     reason")
     for record in records:
         print(
-            f"{_short_time(record.get('opened_at')):7} "
-            f"{_short_time(record.get('closed_at')):7} "
-            f"{_fmt_duration(_float(record.get('age_seconds')) or 0):5} "
+            f"{_short_time(record.get('opened_at')):11} "
+            f"{_short_time(record.get('closed_at')):11} "
+            f"{_fmt_duration(_float(record.get('age_seconds')) or 0):6} "
             f"{_fmt_price(record.get('entry_price')):8} "
+            f"{_fmt_price(record.get('peak_price')):8} "
             f"{_fmt_price(record.get('exit_price')):8} "
-            f"{_fmt_signed_pct(record.get('realized_pnl_pct')):7} "
-            f"{_fmt_number(record.get('peak_atr')):8} "
-            f"{str(record.get('final_step') or 'n/a'):6} "
+            f"{_fmt_signed_pct(_gross_pnl(record)):7} "
+            f"{_fmt_signed_pct(_net_pnl(record, config)):7} "
             f"{_exit_reason(record)}"
         )
 
@@ -243,13 +247,43 @@ def _basic_value(value: str) -> Any:
 
 
 def _estimated_fees_pct(trade_count: int, config: Dict[str, Any]) -> float:
+    return trade_count * _round_trip_fee_pct(config)
+
+
+def _round_trip_fee_pct(config: Dict[str, Any]) -> float:
     fees = config.get("fees") if isinstance(config.get("fees"), dict) else {}
     if not fees or not bool(fees.get("enabled", False)):
         return 0.0
     taker_fee = _float(fees.get("taker_fee_pct")) or 0.0
     if bool(fees.get("use_bnb_discount", False)):
         taker_fee *= 0.75
-    return trade_count * taker_fee * 2
+    return taker_fee * 2
+
+
+def _effective_taker_fee_pct(config: Dict[str, Any]) -> float:
+    fees = config.get("fees") if isinstance(config.get("fees"), dict) else {}
+    if not fees or not bool(fees.get("enabled", False)):
+        return 0.0
+    taker_fee = _float(fees.get("taker_fee_pct")) or 0.0
+    if bool(fees.get("use_bnb_discount", False)):
+        taker_fee *= 0.75
+    return taker_fee
+
+
+def _fee_summary(config: Dict[str, Any]) -> str:
+    fees = config.get("fees") if isinstance(config.get("fees"), dict) else {}
+    if not fees or not bool(fees.get("enabled", False)):
+        return "disabled"
+    discount = "yes" if bool(fees.get("use_bnb_discount", False)) else "no"
+    configured_taker = _float(fees.get("taker_fee_pct")) or 0.0
+    effective_taker = _effective_taker_fee_pct(config)
+    round_trip = _round_trip_fee_pct(config)
+    return (
+        f"taker={configured_taker:.3f}% | "
+        f"effective taker={effective_taker:.3f}% | "
+        f"BNB discount={discount} | "
+        f"round-trip={round_trip:.3f}%/trade"
+    )
 
 
 def _estimated_fees_pct_for_records(records: list[Dict[str, Any]], config: Dict[str, Any]) -> float:
@@ -358,7 +392,7 @@ def _parse_ts(value: Any) -> Optional[datetime]:
 
 def _short_time(value: Any) -> str:
     parsed = _parse_ts(value)
-    return parsed.astimezone(BRASILIA_TZ).strftime("%H:%M") if parsed else "n/a"
+    return parsed.astimezone(BRASILIA_TZ).strftime("%d/%m %H:%M") if parsed else "n/a"
 
 
 def _fmt_duration(seconds: float) -> str:
