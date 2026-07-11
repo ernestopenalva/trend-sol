@@ -124,44 +124,52 @@ class BotFullEngineTests(unittest.TestCase):
     def test_breakeven_atr_activates_before_profit_lock(self) -> None:
         position = self._atr_position()
 
-        self.assertIsNone(position.on_tick(100.60))
+        self.assertIsNone(position.on_tick(100.70))
 
         self.assertAlmostEqual(position.breakeven_stop, 100.02)
         self.assertIsNone(position.profit_lock_stop)
         self.assertEqual(position.stop_type, "breakeven")
         self.assertAlmostEqual(position.effective_stop, 100.02)
+        self.assertAlmostEqual(position.be_atr_stop or 0, 100.02)
+        self.assertAlmostEqual(position.be_stop or 0, 100.02)
+        self.assertAlmostEqual(position.be_activation_price or 0, 100.60)
+        self.assertEqual(position.be_floor_source, "ATR")
+        self.assertFalse(position.be_floor_absorbed_atr_stop)
 
     def test_breakeven_atr_uses_net_fee_floor_when_enabled(self) -> None:
         position = self._atr_position(
             config_overrides={
                 "fees": {"enabled": True, "taker_fee_pct": 0.10, "use_bnb_discount": False},
-                "ladder": {"be_net_margin_pct": 0.05},
+                "ladder": {"be_net_margin_pct": 0.05, "be_activation_buffer_atr": 0.5},
             }
         )
 
-        self.assertIsNone(position.on_tick(100.60))
+        self.assertIsNone(position.on_tick(100.70))
 
         self.assertAlmostEqual(position.breakeven_stop, 100.25)
         self.assertEqual(position.stop_type, "breakeven")
+        self.assertAlmostEqual(position.be_activation_price or 0, 100.60)
+        self.assertEqual(position.be_floor_source, "NET_FLOOR")
+        self.assertTrue(position.be_floor_absorbed_atr_stop)
 
     def test_breakeven_net_fee_floor_applies_bnb_discount(self) -> None:
         position = self._atr_position(
             config_overrides={
                 "fees": {"enabled": True, "taker_fee_pct": 0.10, "use_bnb_discount": True},
-                "ladder": {"be_net_margin_pct": 0.05},
+                "ladder": {"be_net_margin_pct": 0.05, "be_activation_buffer_atr": 0.5},
             }
         )
 
-        self.assertIsNone(position.on_tick(100.60))
+        self.assertIsNone(position.on_tick(100.70))
 
         self.assertAlmostEqual(position.breakeven_stop, 100.20)
 
-    def test_breakeven_waits_until_price_covers_net_floor(self) -> None:
+    def test_breakeven_waits_until_price_covers_net_floor_plus_buffer(self) -> None:
         position = self._atr_position(
             entry_atr=0.05,
             config_overrides={
                 "fees": {"enabled": True, "taker_fee_pct": 0.10, "use_bnb_discount": False},
-                "ladder": {"be_net_margin_pct": 0.05},
+                "ladder": {"be_net_margin_pct": 0.05, "be_activation_buffer_atr": 0.5},
             },
         )
 
@@ -169,13 +177,17 @@ class BotFullEngineTests(unittest.TestCase):
         self.assertIsNone(position.breakeven_stop)
 
         self.assertIsNone(position.on_tick(100.251))
+        self.assertIsNone(position.breakeven_stop)
+
+        self.assertIsNone(position.on_tick(100.276))
         self.assertAlmostEqual(position.breakeven_stop, 100.25)
+        self.assertAlmostEqual(position.be_activation_price or 0, 100.275)
 
     def test_breakeven_atr_close_uses_breakeven_reason(self) -> None:
         client = FakeClient()
         position = self._atr_position(client=client)
 
-        self.assertIsNone(position.on_tick(100.60))
+        self.assertIsNone(position.on_tick(100.70))
         event = position.on_tick(100.01)
 
         self.assertIsNotNone(event)
@@ -183,6 +195,11 @@ class BotFullEngineTests(unittest.TestCase):
         self.assertEqual(position.exit_reason, "BREAKEVEN")
         self.assertEqual(event["exit_reason"], "BREAKEVEN")
         self.assertEqual(client.sells[0][1], 1.0)
+        self.assertEqual(event["price_source"], "market_fill")
+        self.assertEqual(event["trigger_price_source"], "aggTrade")
+        self.assertAlmostEqual(event["trigger_price"], 100.01)
+        self.assertAlmostEqual(event["stop_hit"], 100.02)
+        self.assertAlmostEqual(event["exit_slippage_pct"], ((106 / 100.02) - 1) * 100)
 
     def test_missing_entry_atr_marks_position_needs_review(self) -> None:
         position = self._atr_position(entry_atr=None)
@@ -205,6 +222,7 @@ class BotFullEngineTests(unittest.TestCase):
                 ],
             },
             "trailing": {"mode": "atr", "activation_atr": 10, "gap_atr": 5},
+            "ladder": {"be_activation_buffer_atr": 0.5},
         }
         if config_overrides:
             config.update(config_overrides)

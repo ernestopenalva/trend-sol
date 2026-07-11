@@ -84,7 +84,7 @@ profiles:
 capital:
   operational_balance_usdt: 100
   trade_size_pct: 20
-  max_open_positions: 2
+  max_open_positions: 5
 
 exit_server_simple_trail:
   preferred_order_type: "STOP_LOSS"
@@ -129,6 +129,7 @@ risk:
 
 ladder:
   be_net_margin_pct: 0.05
+  be_activation_buffer_atr: 0.5
 
 cycle:
   pairs_per_cycle: 1

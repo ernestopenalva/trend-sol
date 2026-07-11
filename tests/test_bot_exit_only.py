@@ -22,7 +22,15 @@ from src.position.bot_full_engine import BotFullExitPosition
 from src.state_manager import StateManager
 from src.trade_ledger import TradeLedger
 from tools.list_positions import _normalize_state, _print_human
-from tools.trades_report import _estimated_fees_pct, _exit_reason, _filter, _parse_args, _slots_full_pct
+from tools.trades_report import (
+    _estimated_fees_pct,
+    _estimated_fees_pct_for_records,
+    _exit_reason,
+    _filter,
+    _net_pnl,
+    _parse_args,
+    _slots_full_pct,
+)
 
 
 class FakeClient:
@@ -220,6 +228,17 @@ class BotExitOnlyTests(unittest.TestCase):
 
         self.assertAlmostEqual(_slots_full_pct(records, config), 100 / 3)
 
+    def test_trades_report_prefers_record_level_fees_and_net(self) -> None:
+        config = {"fees": {"enabled": True, "taker_fee_pct": 0.10, "use_bnb_discount": False}}
+        records = [
+            {"gross_pnl_pct": 0.50, "estimated_fees_pct": 0.20, "net_pnl_pct": 0.30},
+            {"realized_pnl_pct": 0.40},
+        ]
+
+        self.assertAlmostEqual(_estimated_fees_pct_for_records(records, config), 0.40)
+        self.assertAlmostEqual(_net_pnl(records[0], config), 0.30)
+        self.assertAlmostEqual(_net_pnl(records[1], config), 0.20)
+
     def test_list_positions_omits_a_in_bot_exit_only(self) -> None:
         config = _config()
         state = [
@@ -275,6 +294,16 @@ def _closed_position(root: Path) -> BotFullExitPosition:
     position.highest_price = 101.6
     position.effective_stop = 100.6
     position.stop_type = "profit_lock"
+    position.be_atr_stop = 100.02
+    position.be_net_floor = 100.25
+    position.be_stop = 100.25
+    position.be_activation_price = 100.35
+    position.be_activation_buffer_atr = 0.5
+    position.be_floor_source = "NET_FLOOR"
+    position.be_floor_absorbed_atr_stop = True
+    position.exit_trigger_price = 100.4
+    position.exit_trigger_price_source = "aggTrade"
+    position.exit_slippage_pct = -0.1
     position.mark_closed(100.5, "PROFIT_LOCK", "2026-07-08T22:10:00+00:00", {})
     return position
 

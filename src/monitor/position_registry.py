@@ -105,7 +105,16 @@ class PositionRegistry:
                     source_candle_open_time=signal.source_candle_open_time,
                     position_notional_usdt=quote_per_position,
                 )
-                self.logger.trade(position._trade_event("OPEN", entry_price, 0.0, None, order))
+                self.logger.trade(
+                    position._trade_event(
+                        "OPEN",
+                        entry_price,
+                        0.0,
+                        None,
+                        order,
+                        price_source="market_fill",
+                    )
+                )
 
             opened.append(position)
             self.positions.append(position)

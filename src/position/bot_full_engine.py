@@ -82,6 +82,16 @@ class BotFullExitPosition(PositionBase):
         self.effective_stop = self.review_stop
         self.stop_price = self.effective_stop
         self.stop_type = "review"
+        self.be_atr_stop: Optional[float] = None
+        self.be_net_floor: Optional[float] = None
+        self.be_stop: Optional[float] = None
+        self.be_activation_price: Optional[float] = None
+        self.be_activation_buffer_atr = self._be_activation_buffer_atr()
+        self.be_floor_source: Optional[str] = None
+        self.be_floor_absorbed_atr_stop: Optional[bool] = None
+        self.exit_trigger_price: Optional[float] = None
+        self.exit_trigger_price_source: Optional[str] = None
+        self.exit_slippage_pct: Optional[float] = None
 
     @classmethod
     def from_state(
@@ -124,6 +134,17 @@ class BotFullExitPosition(PositionBase):
         position.trailing_mode = str(state.get("trailing_mode", position.trailing_mode)).lower()
         position.review_stop = float(state.get("review_stop", state.get("review_stop_price", position.review_stop)))
         position.breakeven_stop = _optional_float(state.get("breakeven_stop", position.breakeven_stop))
+        position.be_atr_stop = _optional_float(state.get("be_atr_stop", position.be_atr_stop))
+        position.be_net_floor = _optional_float(state.get("be_net_floor", position.be_net_floor))
+        position.be_stop = _optional_float(state.get("be_stop", position.be_stop))
+        position.be_activation_price = _optional_float(state.get("be_activation_price", position.be_activation_price))
+        position.be_activation_buffer_atr = _optional_float(
+            state.get("be_activation_buffer_atr", position.be_activation_buffer_atr)
+        ) or 0.0
+        position.be_floor_source = state.get("be_floor_source", position.be_floor_source)
+        position.be_floor_absorbed_atr_stop = state.get(
+            "be_floor_absorbed_atr_stop", position.be_floor_absorbed_atr_stop
+        )
         position.profit_lock_stop = _optional_float(state.get("profit_lock_stop", position.profit_lock_stop))
         position.trailing_stop = _optional_float(state.get("trailing_stop", position.trailing_stop))
         position.effective_stop = float(state.get("effective_stop", state.get("stop_price", position.effective_stop)))
@@ -207,10 +228,24 @@ class BotFullExitPosition(PositionBase):
 
         client_order_id = f"ts-{self.pair_id}-B-close"
         self.validate_sell_quantity(self.reserved_qty)
+        trigger_price = price
+        trigger_stop = self.effective_stop
         order = self.client.market_sell(self.symbol, self.reserved_qty, client_order_id)
         executed_price = _average_fill_price(order) or price
+        self.exit_trigger_price = trigger_price
+        self.exit_trigger_price_source = "aggTrade"
+        self.exit_slippage_pct = _slippage_pct(executed_price, trigger_stop)
         self.mark_closed(executed_price, reason, ts, order)
-        event = self._trade_event("CLOSE", executed_price, self.pnl_pct(executed_price), reason, order)
+        event = self._trade_event(
+            "CLOSE",
+            executed_price,
+            self.pnl_pct(executed_price),
+            reason,
+            order,
+            price_source="market_fill",
+            trigger_price=trigger_price,
+            trigger_price_source="aggTrade",
+        )
         self.logger.trade(event)
         return event
 
@@ -221,8 +256,13 @@ class BotFullExitPosition(PositionBase):
         pnl_pct: float,
         exit_reason: Optional[str],
         order: Optional[Dict[str, Any]] = None,
+        price_source: str = "aggTrade",
+        trigger_price: Optional[float] = None,
+        trigger_price_source: Optional[str] = None,
     ) -> Dict[str, Any]:
         order = order or {}
+        estimated_fees_pct = self._estimated_round_trip_fees_pct()
+        stop_hit = self.effective_stop if event == "CLOSE" else None
         return {
             "ts": now_iso(),
             "pair_id": self.pair_id,
@@ -232,16 +272,31 @@ class BotFullExitPosition(PositionBase):
             "engine": self.engine,
             "event": event,
             "price": price,
+            "price_source": price_source,
+            "trigger_price": trigger_price,
+            "trigger_price_source": trigger_price_source,
             "pnl_pct": pnl_pct,
+            "gross_pnl_pct": pnl_pct,
+            "estimated_fees_pct": estimated_fees_pct,
+            "net_pnl_pct": pnl_pct - estimated_fees_pct,
             "pnl_atr": self.pnl_atr(price),
             "entry_atr": self.entry_atr,
             "breakeven_mode": self.breakeven_mode,
             "profit_lock_mode": self.profit_lock_mode,
             "trailing_mode": self.trailing_mode,
             "breakeven_stop": self.breakeven_stop,
+            "be_atr_stop": self.be_atr_stop,
+            "be_net_floor": self.be_net_floor,
+            "be_stop": self.be_stop,
+            "be_activation_price": self.be_activation_price,
+            "be_activation_buffer_atr": self.be_activation_buffer_atr,
+            "be_floor_source": self.be_floor_source,
+            "be_floor_absorbed_atr_stop": self.be_floor_absorbed_atr_stop,
             "profit_lock_stop": self.profit_lock_stop,
             "trailing_stop": self.trailing_stop,
             "effective_stop": self.effective_stop,
+            "stop_hit": stop_hit,
+            "exit_slippage_pct": self.exit_slippage_pct if event == "CLOSE" else None,
             "stop_type": self.stop_type,
             "exit_reason": exit_reason,
             "order_id": order.get("orderId"),
@@ -277,21 +332,11 @@ class BotFullExitPosition(PositionBase):
         return candidates
 
     def _apply_breakeven(self, pnl_pct: float, pnl_atr: Optional[float], price: float) -> None:
-        trigger_hit = False
-        new_stop = None
-        if self.breakeven_mode == "atr":
-            if pnl_atr is None or self.breakeven_trigger_atr is None or self.breakeven_offset_atr is None:
-                return
-            new_stop = self.entry_price + self.breakeven_offset_atr * float(self.entry_atr)
-            trigger_price = self.entry_price + self.breakeven_trigger_atr * float(self.entry_atr)
-        elif self.breakeven_trigger_pct is not None and self.breakeven_stop_to_pct is not None:
-            new_stop = self.entry_price * (1 + self.breakeven_stop_to_pct / 100)
-            trigger_price = self.entry_price * (1 + self.breakeven_trigger_pct / 100)
-        else:
+        plan = self._breakeven_plan()
+        if plan is None:
             return
-
-        new_stop = max(new_stop, self._net_breakeven_floor())
-        trigger_hit = _gte(price, max(trigger_price, new_stop))
+        new_stop = float(plan["be_stop"])
+        trigger_hit = _gte(price, float(plan["be_activation_price"]))
         if not trigger_hit:
             return
         if self.breakeven_stop is None or new_stop > self.breakeven_stop:
@@ -322,6 +367,67 @@ class BotFullExitPosition(PositionBase):
         ladder = self.config.get("ladder") if isinstance(self.config.get("ladder"), dict) else {}
         margin_pct = _float_or_zero(ladder.get("be_net_margin_pct"))
         return self.entry_price * (1 + (2 * taker_fee_pct / 100) + (margin_pct / 100))
+
+    def _breakeven_plan(self) -> Optional[Dict[str, float | str | bool | None]]:
+        if self.breakeven_mode == "atr":
+            if self.breakeven_trigger_atr is None or self.breakeven_offset_atr is None:
+                return None
+            if not self._valid_entry_atr():
+                return None
+            be_atr_stop: Optional[float] = self.entry_price + self.breakeven_offset_atr * float(self.entry_atr)
+            trigger_price = self.entry_price + self.breakeven_trigger_atr * float(self.entry_atr)
+        elif self.breakeven_trigger_pct is not None and self.breakeven_stop_to_pct is not None:
+            be_atr_stop = None
+            trigger_price = self.entry_price * (1 + self.breakeven_trigger_pct / 100)
+            pct_stop = self.entry_price * (1 + self.breakeven_stop_to_pct / 100)
+        else:
+            return None
+
+        net_floor = self._net_breakeven_floor_or_none()
+        base_stop = be_atr_stop if be_atr_stop is not None else pct_stop
+        candidates = [base_stop]
+        if net_floor is not None:
+            candidates.append(net_floor)
+        be_stop = max(candidates)
+        floor_source = "NET_FLOOR" if net_floor is not None and net_floor >= base_stop else "ATR"
+        absorbed = bool(net_floor is not None and net_floor > base_stop)
+        buffer_abs = self.be_activation_buffer_atr * float(self.entry_atr) if self._valid_entry_atr() else 0.0
+        activation_price = max(trigger_price, be_stop + buffer_abs)
+
+        self.be_atr_stop = be_atr_stop
+        self.be_net_floor = net_floor
+        self.be_stop = be_stop
+        self.be_activation_price = activation_price
+        self.be_activation_buffer_atr = self._be_activation_buffer_atr()
+        self.be_floor_source = floor_source
+        self.be_floor_absorbed_atr_stop = absorbed
+        return {
+            "be_atr_stop": be_atr_stop,
+            "be_net_floor": net_floor,
+            "be_stop": be_stop,
+            "be_activation_price": activation_price,
+            "be_floor_source": floor_source,
+            "be_floor_absorbed_atr_stop": absorbed,
+        }
+
+    def _net_breakeven_floor_or_none(self) -> Optional[float]:
+        fees = self.config.get("fees") if isinstance(self.config.get("fees"), dict) else {}
+        if not fees or not bool(fees.get("enabled", False)):
+            return None
+        return self._net_breakeven_floor()
+
+    def _be_activation_buffer_atr(self) -> float:
+        ladder = self.config.get("ladder") if isinstance(self.config.get("ladder"), dict) else {}
+        return _float_or_zero(ladder.get("be_activation_buffer_atr"))
+
+    def _estimated_round_trip_fees_pct(self) -> float:
+        fees = self.config.get("fees") if isinstance(self.config.get("fees"), dict) else {}
+        if not fees or not bool(fees.get("enabled", False)):
+            return 0.0
+        taker_fee_pct = _float_or_zero(fees.get("taker_fee_pct"))
+        if bool(fees.get("use_bnb_discount", False)):
+            taker_fee_pct *= 0.75
+        return taker_fee_pct * 2
 
     def _current_trailing_stop(self) -> Optional[float]:
         if self.trailing_mode == "atr":
@@ -372,6 +478,13 @@ class BotFullExitPosition(PositionBase):
                 "trailing_mode": self.trailing_mode,
                 "review_stop": self.review_stop,
                 "breakeven_stop": self.breakeven_stop,
+                "be_atr_stop": self.be_atr_stop,
+                "be_net_floor": self.be_net_floor,
+                "be_stop": self.be_stop,
+                "be_activation_price": self.be_activation_price,
+                "be_activation_buffer_atr": self.be_activation_buffer_atr,
+                "be_floor_source": self.be_floor_source,
+                "be_floor_absorbed_atr_stop": self.be_floor_absorbed_atr_stop,
                 "profit_lock_stop": self.profit_lock_stop,
                 "trailing_stop": self.trailing_stop,
                 "effective_stop": self.effective_stop,
@@ -444,3 +557,9 @@ def _gte(left: float, right: float) -> bool:
 
 def _commission(order: Dict[str, Any]) -> float:
     return sum(_float_or_zero(fill.get("commission")) for fill in order.get("fills", []) or [])
+
+
+def _slippage_pct(exit_price: float, stop_hit: Optional[float]) -> Optional[float]:
+    if stop_hit is None or stop_hit <= 0:
+        return None
+    return ((exit_price / stop_hit) - 1) * 100

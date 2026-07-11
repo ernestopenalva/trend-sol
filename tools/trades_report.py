@@ -76,6 +76,13 @@ def _print_report(records: list[Dict[str, Any]], args: argparse.Namespace, confi
     print()
     _print_counts("Ladder", Counter(str(record.get("final_step") or "UNKNOWN") for record in records))
     print()
+    _print_counts("BE floor source", Counter(_be_floor_source(record) for record in records if _be_floor_source(record)))
+    print()
+    _print_counts(
+        "BE floor absorbed ATR stop",
+        Counter(str(record.get("be_floor_absorbed_atr_stop")) for record in records if record.get("be_floor_absorbed_atr_stop") is not None),
+    )
+    print()
     if args.detail:
         _print_detail(records)
     else:
@@ -83,24 +90,32 @@ def _print_report(records: list[Dict[str, Any]], args: argparse.Namespace, confi
 
 
 def _print_summary(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
-    pnls = [_float(record.get("realized_pnl_pct")) for record in records]
+    pnls = [_gross_pnl(record) for record in records]
     pnls = [value for value in pnls if value is not None]
+    net_pnls = [_net_pnl(record, config) for record in records]
+    net_pnls = [value for value in net_pnls if value is not None]
+    slippages = [_float(record.get("exit_slippage_pct")) for record in records]
+    slippages = [value for value in slippages if value is not None]
     ages = [_float(record.get("age_seconds")) for record in records]
     ages = [value for value in ages if value is not None]
     wins = [value for value in pnls if value > 0]
     gross_total = sum(pnls) if pnls else 0
-    estimated_fees = _estimated_fees_pct(len(records), config)
-    net_total = gross_total - estimated_fees
+    estimated_fees = _estimated_fees_pct_for_records(records, config)
+    net_total = sum(net_pnls) if net_pnls else gross_total - estimated_fees
     print("Summary:")
     print(f"  trades: {len(records)}")
     print(f"  gross total: {_fmt_signed_pct(gross_total)}")
     print(f"  estimated fees: {_fmt_signed_pct(-estimated_fees)}")
     print(f"  net total: {_fmt_signed_pct(net_total)}")
-    print(f"  avg/trade: {_fmt_signed_pct(sum(pnls) / len(pnls) if pnls else 0)}")
+    print(f"  avg gross/trade: {_fmt_signed_pct(sum(pnls) / len(pnls) if pnls else 0)}")
+    print(f"  avg net/trade: {_fmt_signed_pct(sum(net_pnls) / len(net_pnls) if net_pnls else 0)}")
     print(f"  best: {_fmt_signed_pct(max(pnls) if pnls else 0)}")
     print(f"  worst: {_fmt_signed_pct(min(pnls) if pnls else 0)}")
     print(f"  winrate: {(len(wins) / len(pnls) * 100) if pnls else 0:.1f}%")
     print(f"  avg age: {_fmt_duration(sum(ages) / len(ages) if ages else 0)}")
+    print(f"  avg exit slippage: {_fmt_signed_pct(sum(slippages) / len(slippages) if slippages else 0)}")
+    print(f"  best exit slippage: {_fmt_signed_pct(max(slippages) if slippages else 0)}")
+    print(f"  worst exit slippage: {_fmt_signed_pct(min(slippages) if slippages else 0)}")
     print(f"  slots full time: {_slots_full_pct(records, config):.1f}%")
 
 
@@ -136,6 +151,12 @@ def _print_detail(records: list[Dict[str, Any]]) -> None:
         print(
             f"{record.get('pair_id')} qty={_fmt_number(record.get('qty'))} "
             f"entry_atr={_fmt_number(record.get('entry_atr'))} stop_hit={_fmt_price(record.get('stop_hit'))} "
+            f"exit={_fmt_price(record.get('exit_price'))} slip={_fmt_signed_pct(record.get('exit_slippage_pct'))} "
+            f"gross={_fmt_signed_pct(_gross_pnl(record))} fees={_fmt_signed_pct(-(_float(record.get('estimated_fees_pct')) or 0))} "
+            f"net={_fmt_signed_pct(record.get('net_pnl_pct'))} "
+            f"be_stop={_fmt_price(record.get('be_stop'))} be_net={_fmt_price(record.get('be_net_floor'))} "
+            f"be_activation={_fmt_price(record.get('be_activation_price'))} be_source={record.get('be_floor_source') or 'n/a'} "
+            f"be_absorbed={record.get('be_floor_absorbed_atr_stop')} "
             f"peak={_fmt_price(record.get('peak_price'))} pnl_abs={_fmt_number(record.get('realized_pnl_abs'))} "
             f"run_id={record.get('run_id')} strategy={record.get('strategy_version')} "
             f"opened_at={record.get('opened_at')} closed_at={record.get('closed_at')}"
@@ -170,8 +191,10 @@ def _parse_basic_config(text: str) -> Dict[str, Any]:
     config: Dict[str, Any] = {}
     fees: Dict[str, Any] = {}
     capital: Dict[str, Any] = {}
+    ladder: Dict[str, Any] = {}
     in_fees = False
     in_capital = False
+    in_ladder = False
     for raw_line in text.splitlines():
         line = raw_line.split("#", 1)[0].rstrip()
         if not line.strip():
@@ -179,6 +202,7 @@ def _parse_basic_config(text: str) -> Dict[str, Any]:
         if not line.startswith(" ") and line.endswith(":"):
             in_fees = line.strip() == "fees:"
             in_capital = line.strip() == "capital:"
+            in_ladder = line.strip() == "ladder:"
             continue
         if not line.startswith(" ") and ":" in line:
             key, value = line.split(":", 1)
@@ -186,6 +210,7 @@ def _parse_basic_config(text: str) -> Dict[str, Any]:
                 config["active_profile"] = _basic_value(value)
             in_fees = False
             in_capital = False
+            in_ladder = False
             continue
         if in_fees and line.startswith(" ") and ":" in line:
             key, value = line.split(":", 1)
@@ -193,10 +218,15 @@ def _parse_basic_config(text: str) -> Dict[str, Any]:
         if in_capital and line.startswith(" ") and ":" in line:
             key, value = line.split(":", 1)
             capital[key.strip()] = _basic_value(value)
+        if in_ladder and line.startswith(" ") and ":" in line:
+            key, value = line.split(":", 1)
+            ladder[key.strip()] = _basic_value(value)
     if fees:
         config["fees"] = fees
     if capital:
         config["capital"] = capital
+    if ladder:
+        config["ladder"] = ladder
     return config
 
 
@@ -220,6 +250,39 @@ def _estimated_fees_pct(trade_count: int, config: Dict[str, Any]) -> float:
     if bool(fees.get("use_bnb_discount", False)):
         taker_fee *= 0.75
     return trade_count * taker_fee * 2
+
+
+def _estimated_fees_pct_for_records(records: list[Dict[str, Any]], config: Dict[str, Any]) -> float:
+    total = 0.0
+    missing = 0
+    for record in records:
+        fee = _float(record.get("estimated_fees_pct"))
+        if fee is None:
+            missing += 1
+        else:
+            total += fee
+    return total + _estimated_fees_pct(missing, config)
+
+
+def _gross_pnl(record: Dict[str, Any]) -> Optional[float]:
+    value = _float(record.get("gross_pnl_pct"))
+    if value is not None:
+        return value
+    return _float(record.get("realized_pnl_pct"))
+
+
+def _net_pnl(record: Dict[str, Any], config: Dict[str, Any]) -> Optional[float]:
+    value = _float(record.get("net_pnl_pct"))
+    if value is not None:
+        return value
+    gross = _gross_pnl(record)
+    if gross is None:
+        return None
+    return gross - _estimated_fees_pct(1, config)
+
+
+def _be_floor_source(record: Dict[str, Any]) -> str:
+    return str(record.get("be_floor_source") or "")
 
 
 def _slots_full_pct(records: list[Dict[str, Any]], config: Dict[str, Any]) -> float:

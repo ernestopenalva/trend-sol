@@ -47,6 +47,8 @@ class TradeLedger:
         exit_price = _float_or_none(position.exit_price)
         qty = _float_or_none(position.quantity)
         realized_pct = position.pnl_pct(exit_price) if exit_price is not None else None
+        estimated_fees_pct = _estimated_fees_pct(config)
+        net_pct = realized_pct - estimated_fees_pct if realized_pct is not None else None
         return {
             "run_id": config.get("run_id"),
             "strategy_version": config.get("strategy_version"),
@@ -61,14 +63,28 @@ class TradeLedger:
             "age_seconds": _age_seconds(position.open_ts, position.close_ts),
             "entry_price": entry_price,
             "exit_price": exit_price,
+            "exit_price_source": "market_fill" if position.exit_order else None,
+            "exit_trigger_price": _float_or_none(getattr(position, "exit_trigger_price", None)),
+            "exit_trigger_price_source": getattr(position, "exit_trigger_price_source", None),
             "qty": qty,
             "entry_atr": _float_or_none(position.entry_atr),
             "peak_price": _float_or_none(position.highest_price),
             "peak_atr": position.peak_atr(),
             "stop_hit": _float_or_none(position.effective_stop),
+            "exit_slippage_pct": _float_or_none(getattr(position, "exit_slippage_pct", None)),
             "exit_reason": position.exit_reason,
             "final_step": _final_step(position),
+            "be_atr_stop": _float_or_none(getattr(position, "be_atr_stop", None)),
+            "be_net_floor": _float_or_none(getattr(position, "be_net_floor", None)),
+            "be_stop": _float_or_none(getattr(position, "be_stop", None)),
+            "be_activation_price": _float_or_none(getattr(position, "be_activation_price", None)),
+            "be_activation_buffer_atr": _float_or_none(getattr(position, "be_activation_buffer_atr", None)),
+            "be_floor_source": getattr(position, "be_floor_source", None),
+            "be_floor_absorbed_atr_stop": getattr(position, "be_floor_absorbed_atr_stop", None),
             "realized_pnl_pct": realized_pct,
+            "gross_pnl_pct": realized_pct,
+            "estimated_fees_pct": estimated_fees_pct,
+            "net_pnl_pct": net_pct,
             "realized_pnl_abs": ((exit_price - entry_price) * qty) if None not in (entry_price, exit_price, qty) else None,
         }
 
@@ -129,3 +145,13 @@ def _float_or_none(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _estimated_fees_pct(config: Dict[str, Any]) -> float:
+    fees = config.get("fees") if isinstance(config.get("fees"), dict) else {}
+    if not fees or not bool(fees.get("enabled", False)):
+        return 0.0
+    taker_fee_pct = _float_or_none(fees.get("taker_fee_pct")) or 0.0
+    if bool(fees.get("use_bnb_discount", False)):
+        taker_fee_pct *= 0.75
+    return taker_fee_pct * 2
