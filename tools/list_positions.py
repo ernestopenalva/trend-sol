@@ -76,7 +76,7 @@ def _normalize_state(state: List[Dict[str, Any]], current_price: Optional[float]
             if pos.get("open_ts_raw")
         ]
         opened = min((value for value in opens if value is not None), default=None)
-        pair["opened"] = _short_time(opened)
+        pair["opened"] = _short_datetime(opened)
         pair["opened_at"] = _format_brasilia(opened) if opened else None
         pair["age"] = _age_from_dt(opened)
     return {
@@ -516,6 +516,12 @@ def _short_time(value: Optional[datetime]) -> Optional[str]:
     if value is None:
         return None
     return value.astimezone(BRASILIA_TZ).strftime("%H:%M")
+
+
+def _short_datetime(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    return value.astimezone(BRASILIA_TZ).strftime("%d/%m %H:%M")
 
 
 def _age_from_dt(value: Optional[datetime]) -> str:

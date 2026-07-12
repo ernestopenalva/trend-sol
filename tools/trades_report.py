@@ -87,6 +87,7 @@ def _print_summary(records: list[Dict[str, Any]], config: Dict[str, Any]) -> Non
     ages = [_float(record.get("age_seconds")) for record in records]
     ages = [value for value in ages if value is not None]
     wins = [value for value in pnls if value > 0]
+    net_wins = [value for value in net_pnls if value > 0]
     gross_total = sum(pnls) if pnls else 0
     estimated_fees = _estimated_fees_pct_for_records(records, config)
     net_total = sum(net_pnls) if net_pnls else gross_total - estimated_fees
@@ -101,6 +102,9 @@ def _print_summary(records: list[Dict[str, Any]], config: Dict[str, Any]) -> Non
     print(f"  best: {_fmt_signed_pct(max(pnls) if pnls else 0)}")
     print(f"  worst: {_fmt_signed_pct(min(pnls) if pnls else 0)}")
     print(f"  winrate: {(len(wins) / len(pnls) * 100) if pnls else 0:.1f}%")
+    print(f"  net best: {_fmt_signed_pct(max(net_pnls) if net_pnls else 0)}")
+    print(f"  net worst: {_fmt_signed_pct(min(net_pnls) if net_pnls else 0)}")
+    print(f"  net winrate: {(len(net_wins) / len(net_pnls) * 100) if net_pnls else 0:.1f}%")
     print(f"  avg age: {_fmt_duration(sum(ages) / len(ages) if ages else 0)}")
     print(f"  slots full time: {_slots_full_pct(records, config):.1f}%")
 
@@ -156,6 +160,8 @@ def _print_detail(records: list[Dict[str, Any]]) -> None:
             f"{record.get('pair_id')} qty={_fmt_number(record.get('qty'))} "
             f"entry_atr={_fmt_number(record.get('entry_atr'))} stop_hit={_fmt_price(record.get('stop_hit'))} "
             f"exit={_fmt_price(record.get('exit_price'))} slip={_fmt_signed_pct(record.get('exit_slippage_pct'))} "
+            f"exit_source={record.get('exit_price_source') or 'n/a'} "
+            f"trigger={_fmt_price(record.get('exit_trigger_price'))} trigger_source={record.get('exit_trigger_price_source') or 'n/a'} "
             f"gross={_fmt_signed_pct(_gross_pnl(record))} fees={_fmt_signed_pct(-(_float(record.get('estimated_fees_pct')) or 0))} "
             f"net={_fmt_signed_pct(record.get('net_pnl_pct'))} "
             f"be_stop={_fmt_price(record.get('be_stop'))} be_net={_fmt_price(record.get('be_net_floor'))} "

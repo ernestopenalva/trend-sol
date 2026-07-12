@@ -265,6 +265,7 @@ class BotExitOnlyTests(unittest.TestCase):
         text = output.getvalue()
         self.assertNotIn("A Binance Trail", text)
         self.assertIn("Bot Exit", text)
+        self.assertIn("opened 08/07 19:00 | age", text)
 
 
 def _parse_args_for_tests(args):
