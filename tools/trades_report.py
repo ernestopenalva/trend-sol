@@ -116,6 +116,19 @@ def _print_detail_sections(records: list[Dict[str, Any]]) -> None:
     print(f"  avg exit slippage: {_fmt_signed_pct(sum(slippages) / len(slippages) if slippages else 0)}")
     print(f"  best exit slippage: {_fmt_signed_pct(max(slippages) if slippages else 0)}")
     print(f"  worst exit slippage: {_fmt_signed_pct(min(slippages) if slippages else 0)}")
+    complete_records = [record for record in records if record.get("trough_tracking_complete") is not False]
+    trough_pcts = [_float(record.get("trough_pct")) for record in complete_records]
+    trough_pcts = [value for value in trough_pcts if value is not None]
+    trough_atrs = [_float(record.get("trough_atr")) for record in complete_records]
+    trough_atrs = [value for value in trough_atrs if value is not None]
+    trough_times = [_float(record.get("time_to_trough_seconds")) for record in complete_records]
+    trough_times = [value for value in trough_times if value is not None]
+    print()
+    print(f"MAE / trough (N={len(trough_pcts)}/{len(records)}):")
+    print(f"  avg trough: {_fmt_signed_pct(sum(trough_pcts) / len(trough_pcts) if trough_pcts else None)}")
+    print(f"  worst trough: {_fmt_signed_pct(min(trough_pcts) if trough_pcts else None)}")
+    print(f"  avg trough ATR: {_fmt_signed_number(sum(trough_atrs) / len(trough_atrs) if trough_atrs else None)}")
+    print(f"  avg time to trough: {_fmt_optional_duration(sum(trough_times) / len(trough_times) if trough_times else None)}")
     print()
     _print_counts("Peak step", Counter(str(record.get("final_step") or "UNKNOWN") for record in records))
     print()
@@ -168,6 +181,10 @@ def _print_detail(records: list[Dict[str, Any]]) -> None:
             f"be_activation={_fmt_price(record.get('be_activation_price'))} be_source={record.get('be_floor_source') or 'n/a'} "
             f"be_absorbed={record.get('be_floor_absorbed_atr_stop')} "
             f"peak={_fmt_price(record.get('peak_price'))} pnl_abs={_fmt_number(record.get('realized_pnl_abs'))} "
+            f"trough={_fmt_price(record.get('trough_price'))} trough_pct={_fmt_signed_pct(record.get('trough_pct'))} "
+            f"trough_atr={_fmt_signed_number(record.get('trough_atr'))} trough_at={record.get('trough_at') or 'n/a'} "
+            f"time_to_trough={_fmt_optional_duration(record.get('time_to_trough_seconds'))} "
+            f"trough_complete={record.get('trough_tracking_complete')} "
             f"run_id={record.get('run_id')} strategy={record.get('strategy_version')} "
             f"opened_at={record.get('opened_at')} closed_at={record.get('closed_at')}"
         )
@@ -410,6 +427,11 @@ def _fmt_duration(seconds: float) -> str:
     return f"{minutes}m"
 
 
+def _fmt_optional_duration(seconds: Any) -> str:
+    number = _float(seconds)
+    return "n/a" if number is None else _fmt_duration(number)
+
+
 def _fmt_price(value: Any) -> str:
     number = _float(value)
     return "n/a" if number is None else f"{number:.4f}"
@@ -418,6 +440,11 @@ def _fmt_price(value: Any) -> str:
 def _fmt_number(value: Any) -> str:
     number = _float(value)
     return "n/a" if number is None else f"{number:.4f}"
+
+
+def _fmt_signed_number(value: Any) -> str:
+    number = _float(value)
+    return "n/a" if number is None else f"{number:+.4f}"
 
 
 def _fmt_signed_pct(value: Any) -> str:

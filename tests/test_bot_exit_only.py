@@ -29,6 +29,7 @@ from tools.trades_report import (
     _filter,
     _net_pnl,
     _parse_args,
+    _print_detail_sections,
     _slots_full_pct,
 )
 
@@ -62,6 +63,15 @@ class FakeClient:
 
     def all_orders(self, symbol: str, limit: int = 100):
         return []
+
+
+class FakeTelemetryWriter:
+    def __init__(self) -> None:
+        self.events = []
+
+    def submit(self, stream: str, event: dict) -> bool:
+        self.events.append((stream, event))
+        return True
 
 
 class BotExitOnlyTests(unittest.TestCase):
@@ -172,6 +182,7 @@ class BotExitOnlyTests(unittest.TestCase):
             root = Path(tmp)
             logger = JsonlLogger(root, config)
             state = StateManager(root)
+            telemetry = FakeTelemetryWriter()
             registry = PositionRegistry(
                 config,
                 FakeClient(),  # type: ignore[arg-type]
@@ -179,6 +190,7 @@ class BotExitOnlyTests(unittest.TestCase):
                 CycleManager(root, config, logger, state),
                 state,
                 TradeLedger(root),
+                telemetry,  # type: ignore[arg-type]
             )
 
             registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", 1, 0.2, "1m", 14))
@@ -186,6 +198,48 @@ class BotExitOnlyTests(unittest.TestCase):
 
             self.assertEqual(len(registry.positions), 1)
             self.assertEqual(_last_decision_reason(root), "BLOCKED_MAX_POSITIONS")
+            rejected = [event for stream, event in telemetry.events if stream == "rejected_signal"]
+            self.assertEqual(len(rejected), 1)
+            self.assertEqual(rejected[0]["reason"], "BLOCKED_MAX_POSITIONS")
+            self.assertEqual(rejected[0]["open_positions"], 1)
+            self.assertAlmostEqual(rejected[0]["worst_open_pnl_pct"], 1.0)
+            self.assertFalse(rejected[0]["phantom_created"])
+
+    def test_hourly_snapshot_is_emitted_on_first_tick_of_new_hour(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config = _config()
+            config["capital"] = {"operational_balance_usdt": 100, "trade_size_pct": 20, "max_open_positions": 5}
+            config["entry"] = {"entry_spacing_atr": 0, "max_entries_per_candle": 1}
+            root = Path(tmp)
+            logger = JsonlLogger(root, config)
+            state = StateManager(root)
+            telemetry = FakeTelemetryWriter()
+            registry = PositionRegistry(
+                config,
+                FakeClient(),  # type: ignore[arg-type]
+                logger,
+                CycleManager(root, config, logger, state),
+                state,
+                TradeLedger(root),
+                telemetry,  # type: ignore[arg-type]
+            )
+            registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", 1, 0.2, "1m", 14))
+
+            registry.on_tick(100.0, market_ts="2026-07-12T10:59:59+00:00")
+            registry.on_tick(100.1, market_ts="2026-07-12T11:00:00+00:00")
+            registry.on_tick(100.2, market_ts="2026-07-12T11:30:00+00:00")
+            registry.on_tick(99.8, market_ts="2026-07-12T11:31:00+00:00")
+
+            snapshots = [event for stream, event in telemetry.events if stream == "position_snapshot"]
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(snapshots[0]["snapshot_hour"], "2026-07-12T11:00:00+00:00")
+            self.assertEqual(snapshots[0]["position_id"], 1)
+            self.assertAlmostEqual(snapshots[0]["entry_atr"], 0.2)
+            self.assertEqual(snapshots[0]["current_step"], "NONE")
+            troughs = [event for stream, event in telemetry.events if stream == "trough_event"]
+            self.assertEqual(len(troughs), 1)
+            self.assertEqual(troughs[0]["ts"], "2026-07-12T11:31:00+00:00")
+            self.assertAlmostEqual(troughs[0]["trough_atr"], -1.0)
 
     def test_closed_bot_trade_is_written_once(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -196,6 +250,8 @@ class BotExitOnlyTests(unittest.TestCase):
             self.assertTrue(ledger.append_closed_bot_trade(position, _config()))
             self.assertFalse(ledger.append_closed_bot_trade(position, _config()))
             self.assertEqual(len(ledger.load()), 1)
+            self.assertAlmostEqual(ledger.load()[0]["trough_price"], 99.0)
+            self.assertEqual(ledger.load()[0]["time_to_trough_seconds"], 300)
 
     def test_trades_report_filters_since_and_strategy(self) -> None:
         records = [
@@ -239,6 +295,26 @@ class BotExitOnlyTests(unittest.TestCase):
         self.assertAlmostEqual(_net_pnl(records[0], config), 0.30)
         self.assertAlmostEqual(_net_pnl(records[1], config), 0.20)
 
+    def test_trades_report_mae_is_null_safe_and_shows_sample_size(self) -> None:
+        records = [
+            {
+                "trough_pct": -1.5,
+                "trough_atr": -4,
+                "time_to_trough_seconds": 3600,
+                "trough_tracking_complete": True,
+            },
+            {"trough_tracking_complete": False},
+            {},
+        ]
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            _print_detail_sections(records)
+
+        text = output.getvalue()
+        self.assertIn("MAE / trough (N=1/3)", text)
+        self.assertIn("worst trough: -1.50%", text)
+
     def test_list_positions_omits_a_in_bot_exit_only(self) -> None:
         config = _config()
         state = [
@@ -265,7 +341,12 @@ class BotExitOnlyTests(unittest.TestCase):
         text = output.getvalue()
         self.assertNotIn("A Binance Trail", text)
         self.assertIn("Bot Exit", text)
-        self.assertIn("opened 08/07 19:00 | age", text)
+        self.assertNotIn("SOL/USDT | opened", text)
+        self.assertIn("entry: 08/07 19:00 (age ", text)
+        self.assertIn(") | 100.0000 -> now 100.5000", text)
+        self.assertIn("peak:  101.0000  (+1.00% / +5.00 ATR)", text)
+        self.assertIn("next:  PL2 at 101.6000 (+1.60% / +8.00 ATR)", text)
+        self.assertIn("trail: inactive, activates at 102.0000 (+2.00% / +10.00 ATR)", text)
 
 
 def _parse_args_for_tests(args):
@@ -292,6 +373,7 @@ def _closed_position(root: Path) -> BotFullExitPosition:
         atr_timeframe="1m",
         atr_period=14,
     )
+    position.on_tick(99.0, market_ts="2026-07-08T22:05:00+00:00")
     position.highest_price = 101.6
     position.effective_stop = 100.6
     position.stop_type = "profit_lock"
@@ -322,6 +404,7 @@ def _last_decision(root: Path) -> dict:
 def _config():
     return {
         "symbol": "SOLUSDT",
+        "active_profile": "intraday",
         "position_mode": "bot_exit_only",
         "strategy_version": "b_atr_v1.2",
         "run_id": "run1",

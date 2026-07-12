@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -26,6 +27,7 @@ from src.monitor.ws_manager import WSManager
 from src.project_env import load_project_env
 from src.state_manager import StateManager
 from src.trade_ledger import TradeLedger
+from src.telemetry_writer import TelemetryWriter
 
 
 class Monitor:
@@ -35,6 +37,7 @@ class Monitor:
         self.config = effective_config(self._load_yaml(config_path))
         self.config["run_id"] = _run_id(self.config)
         self.logger = JsonlLogger(self.project_root, self.config)
+        self.telemetry_writer = TelemetryWriter(self.project_root, self.config, self.logger)
         self.last_price: float | None = None
         self.last_tick_monotonic: float | None = None
         self.started_monotonic = time.monotonic()
@@ -70,42 +73,46 @@ class Monitor:
             self.cycle_manager,
             self.state_manager,
             self.trade_ledger,
+            self.telemetry_writer,
         )
         self.entry_engine = EntryEngine(str(self.config["symbol"]), self.config, self.logger)
         self.logger.set_entry_console_context(self._entry_console_context)
 
     def run(self) -> None:
-        self.logger.system("validating_startup")
-        self._validate_startup()
-        self._load_historical_candles()
-        market_cfg = self.config["market_data"]
-        streams = [market_cfg["trade_stream"], *market_cfg["kline_streams"]]
-        self.ws_manager = WSManager(
-            market_cfg["ws_url"],
-            streams,
-            self.logger,
-            self._on_ws_event,
-            ping_interval_seconds=int(market_cfg.get("ws_ping_interval_seconds", 180)),
-            ping_timeout_seconds=int(market_cfg.get("ws_ping_timeout_seconds", 30)),
-        )
-        console_cfg = self.config.get("console", {})
-        self.status_reporter = HumanConsoleReporter(
-            entry_engine=self.entry_engine,
-            registry=self.registry,
-            cycle_manager=self.cycle_manager,
-            ws_status=lambda: self.ws_manager.status if self.ws_manager else "starting",
-            uptime_seconds=lambda: time.monotonic() - self.started_monotonic,
-            last_tick_age_seconds=self._last_tick_age_seconds,
-            last_price=lambda: self.last_price,
-            interval_seconds=int(console_cfg.get("interval_seconds", 60)),
-            max_market_data_age_seconds=int(self.config["market_data"].get("max_market_data_age_seconds", 60)),
-        )
-        self.status_reporter.start()
-        self.logger.system("monitor_starting", symbol=self.config["symbol"], streams=streams)
+        self.telemetry_writer.start()
         try:
+            self.logger.system("validating_startup")
+            self._validate_startup()
+            self._load_historical_candles()
+            market_cfg = self.config["market_data"]
+            streams = [market_cfg["trade_stream"], *market_cfg["kline_streams"]]
+            self.ws_manager = WSManager(
+                market_cfg["ws_url"],
+                streams,
+                self.logger,
+                self._on_ws_event,
+                ping_interval_seconds=int(market_cfg.get("ws_ping_interval_seconds", 180)),
+                ping_timeout_seconds=int(market_cfg.get("ws_ping_timeout_seconds", 30)),
+            )
+            console_cfg = self.config.get("console", {})
+            self.status_reporter = HumanConsoleReporter(
+                entry_engine=self.entry_engine,
+                registry=self.registry,
+                cycle_manager=self.cycle_manager,
+                ws_status=lambda: self.ws_manager.status if self.ws_manager else "starting",
+                uptime_seconds=lambda: time.monotonic() - self.started_monotonic,
+                last_tick_age_seconds=self._last_tick_age_seconds,
+                last_price=lambda: self.last_price,
+                interval_seconds=int(console_cfg.get("interval_seconds", 60)),
+                max_market_data_age_seconds=int(self.config["market_data"].get("max_market_data_age_seconds", 60)),
+            )
+            self.status_reporter.start()
+            self.logger.system("monitor_starting", symbol=self.config["symbol"], streams=streams)
             self.ws_manager.run_forever()
         finally:
-            self.status_reporter.stop()
+            if self.status_reporter:
+                self.status_reporter.stop()
+            self.telemetry_writer.stop()
 
     def _validate_startup(self) -> None:
         self.client.require_credentials()
@@ -141,7 +148,7 @@ class Monitor:
             price = float(payload["p"])
             self.last_price = price
             self.last_tick_monotonic = time.monotonic()
-            self.registry.on_tick(price)
+            self.registry.on_tick(price, market_ts=_market_timestamp(payload))
             self._stop_after_cycle_if_needed()
             return
 
@@ -256,6 +263,14 @@ def _run_id(config: Dict[str, Any]) -> str:
     from datetime import datetime
 
     return f"{datetime.now(BRASILIA_TZ).strftime('%Y%m%d_%H%M')}_{strategy}"
+
+
+def _market_timestamp(payload: Dict[str, Any]) -> str:
+    raw = payload.get("T", payload.get("E"))
+    try:
+        return datetime.fromtimestamp(float(raw) / 1000, timezone.utc).isoformat(timespec="milliseconds")
+    except (TypeError, ValueError, OSError):
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from src.logging_utils import JsonlLogger, now_iso
@@ -92,6 +93,11 @@ class BotFullExitPosition(PositionBase):
         self.exit_trigger_price: Optional[float] = None
         self.exit_trigger_price_source: Optional[str] = None
         self.exit_slippage_pct: Optional[float] = None
+        self.trough_price = self.entry_price
+        self.trough_at = self.open_ts
+        self.trough_tracking_complete = True
+        self.trough_tracking_started_at = self.open_ts
+        self.last_trough_event: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_state(
@@ -152,13 +158,21 @@ class BotFullExitPosition(PositionBase):
         position.stop_type = str(state.get("stop_type", position.stop_type))
         position.applied_steps = {str(item) for item in state.get("applied_steps", [])}
         position.trailing_active = bool(state.get("trailing_active", False))
+        has_trough_state = state.get("trough_price") is not None
+        position.trough_price = float(state.get("trough_price", position.entry_price))
+        position.trough_at = str(state.get("trough_at", position.open_ts))
+        position.trough_tracking_complete = bool(state.get("trough_tracking_complete", has_trough_state))
+        position.trough_tracking_started_at = str(
+            state.get("trough_tracking_started_at", position.open_ts if has_trough_state else now_iso())
+        )
         return position
 
-    def on_tick(self, price: float) -> Optional[Dict[str, Any]]:
+    def on_tick(self, price: float, market_ts: Optional[str] = None) -> Optional[Dict[str, Any]]:
         if self.status != "OPEN":
             return None
 
         ts = now_iso()
+        self._update_trough(price, market_ts or ts)
         if price > self.highest_price:
             self.highest_price = price
 
@@ -315,6 +329,49 @@ class BotFullExitPosition(PositionBase):
         if not self._valid_entry_atr():
             return None
         return (self.highest_price - self.entry_price) / float(self.entry_atr)
+
+    def trough_pct(self) -> float:
+        return self.pnl_pct(self.trough_price)
+
+    def trough_atr(self) -> Optional[float]:
+        return self.pnl_atr(self.trough_price)
+
+    def time_to_trough_seconds(self) -> Optional[int]:
+        opened = _parse_ts(self.open_ts)
+        trough = _parse_ts(self.trough_at)
+        if opened is None or trough is None:
+            return None
+        return max(0, int((trough - opened).total_seconds()))
+
+    def current_step(self) -> str:
+        if self.trailing_active:
+            return "TRAIL"
+        indexes = []
+        for step in self.applied_steps:
+            if not step.startswith(f"{self.profit_lock_mode}:"):
+                continue
+            try:
+                indexes.append(int(step.rsplit(":", 1)[1]))
+            except (TypeError, ValueError):
+                continue
+        if indexes:
+            return f"PL{max(indexes)}"
+        if self.breakeven_stop is not None:
+            return "BE"
+        return "NONE"
+
+    def _update_trough(self, price: float, market_ts: str) -> None:
+        self.last_trough_event = None
+        if price >= self.trough_price:
+            return
+        self.trough_price = price
+        self.trough_at = market_ts
+        self.last_trough_event = {
+            "price": self.trough_price,
+            "trough_pct": self.trough_pct(),
+            "trough_atr": self.trough_atr(),
+            "trough_at": self.trough_at,
+        }
 
     def _profit_lock_candidates(self, pnl_pct: float, pnl_atr: Optional[float]) -> list[tuple[int, float]]:
         candidates: list[tuple[int, float]] = []
@@ -495,6 +552,10 @@ class BotFullExitPosition(PositionBase):
                 "trailing_gap_pct": self.trailing_gap_pct,
                 "trailing_activation_atr": self.trailing_activation_atr,
                 "trailing_gap_atr": self.trailing_gap_atr,
+                "trough_price": self.trough_price,
+                "trough_at": self.trough_at,
+                "trough_tracking_complete": self.trough_tracking_complete,
+                "trough_tracking_started_at": self.trough_tracking_started_at,
             }
         )
         return state
@@ -537,6 +598,18 @@ def _optional_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_ts(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _section_value(section: Any, key: str, default: Any = None) -> Any:

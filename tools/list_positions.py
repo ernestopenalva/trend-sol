@@ -108,6 +108,7 @@ def _normalize_position(item: Dict[str, Any], current_price: Optional[float], co
         "pnl_pct": _pnl_pct(entry, current_price) if status == "OPEN" else None,
         "pnl_atr": _pnl_atr(entry, current_price, entry_atr) if status == "OPEN" else None,
         "peak": peak,
+        "peak_pct": _pnl_pct(entry, peak),
         "peak_atr": _pnl_atr(entry, peak, entry_atr),
         "effective_stop": effective_stop,
         "stop_type": item.get("stop_type"),
@@ -138,8 +139,14 @@ def _print_human(normalized: Dict[str, Any], config: Dict[str, Any]) -> None:
         for index, pair in enumerate(bot_pairs):
             if index:
                 print()
-            print(f"{symbol} | opened {pair.get('opened') or 'n/a'} | age {pair.get('age') or 'n/a'}")
-            _print_position_b(pair.get("positions", {}).get("B"), config, title="Bot Exit")
+            _print_position_b(
+                pair.get("positions", {}).get("B"),
+                config,
+                title="Bot Exit",
+                opened=pair.get("opened"),
+                age=pair.get("age"),
+                leading_blank=False,
+            )
         return
     for index, pair in enumerate(pairs):
         if index:
@@ -166,37 +173,53 @@ def _print_position_a(position: Optional[Dict[str, Any]]) -> None:
     print(f"  trail: Binance {_fmt_plain_pct(position.get('binance_trail_pct'))}")
 
 
-def _print_position_b(position: Optional[Dict[str, Any]], config: Dict[str, Any], title: str = "B Bot Exit") -> None:
+def _print_position_b(
+    position: Optional[Dict[str, Any]],
+    config: Dict[str, Any],
+    title: str = "B Bot Exit",
+    opened: Optional[str] = None,
+    age: Optional[str] = None,
+    leading_blank: bool = True,
+) -> None:
     if not position:
         return
     ladder = position.get("ladder") or {}
-    print()
+    if leading_blank:
+        print()
     print(title)
     print(f"  {position['status']}")
     if position.get("status") == "OPEN":
+        entry_context = f"{opened or 'n/a'} (age {age or 'n/a'}) | " if opened or age else ""
         print(
             "  entry: "
-            f"{_fmt_price(position.get('entry'))} -> now {_fmt_price(position.get('current'))}  "
+            f"{entry_context}{_fmt_price(position.get('entry'))} -> now {_fmt_price(position.get('current'))}  "
             f"({_fmt_signed_pct(position.get('pnl_pct'))} / {_fmt_signed_atr(position.get('pnl_atr'))})"
         )
-        print(f"  peak:  {_fmt_price(position.get('peak'))}  ({_fmt_signed_atr(position.get('peak_atr'))})")
+        print(f"  peak:  {_fmt_price(position.get('peak'))}  {_fmt_pct_atr(position.get('peak_pct'), position.get('peak_atr'))}")
         print(f"  step:  {ladder.get('current_step', 'NONE')} | stop {_fmt_price(position.get('effective_stop'))}{_lock_text(ladder)}")
         next_event = ladder.get("next_event")
         if next_event:
-            print(f"  next:  {next_event['name']} at {_fmt_price(next_event['price'])} (+{_fmt_atr_value(next_event['trigger_atr'])} ATR)")
+            print(
+                f"  next:  {next_event['name']} at {_fmt_price(next_event['price'])} "
+                f"{_fmt_pct_atr(next_event.get('trigger_pct'), next_event.get('trigger_atr'))}"
+            )
         trail = ladder.get("trail")
         if trail:
             if trail.get("active"):
-                print(f"  trail: active, gap {_fmt_atr_value(trail.get('gap_atr'))} ATR from peak")
+                print(
+                    "  trail: active, gap "
+                    f"{_fmt_plain_pct(trail.get('gap_pct'))} / {_fmt_atr_value(trail.get('gap_atr'))} ATR from peak"
+                )
             else:
                 print(
                     "  trail: inactive, activates at "
-                    f"{_fmt_price(trail.get('activation_price'))} (+{_fmt_atr_value(trail.get('activation_atr'))} ATR)"
+                    f"{_fmt_price(trail.get('activation_price'))} "
+                    f"{_fmt_pct_atr(trail.get('activation_pct'), trail.get('activation_atr'))}"
                 )
         return
 
     print(f"  entry:    {_fmt_price(position.get('entry'))}")
-    print(f"  peak:     {_fmt_price(position.get('peak'))}  ({_fmt_signed_atr(position.get('peak_atr'))})")
+    print(f"  peak:     {_fmt_price(position.get('peak'))}  {_fmt_pct_atr(position.get('peak_pct'), position.get('peak_atr'))}")
     print(f"  step:     {ladder.get('current_step', 'NONE')}{_lock_text(ladder)}")
     print(f"  stop hit: {_fmt_price(position.get('effective_stop'))}")
     print(f"  exit:     {_fmt_price(position.get('exit'))}  ({_fmt_signed_pct(position.get('realized_pct'))})")
@@ -220,7 +243,10 @@ def _print_no_open_bot_b(config: Dict[str, Any]) -> None:
         f"{_fmt_price(latest.get('entry_price'))} -> exit {_fmt_price(latest.get('exit_price'))} "
         f"({_fmt_signed_pct(latest.get('realized_pnl_pct'))})"
     )
-    print(f"  peak: {_fmt_price(latest.get('peak_price'))} ({_fmt_signed_atr(latest.get('peak_atr'))})")
+    print(
+        f"  peak: {_fmt_price(latest.get('peak_price'))} "
+        f"{_fmt_pct_atr(_pnl_pct(_optional_float(latest.get('entry_price')), _optional_float(latest.get('peak_price'))), latest.get('peak_atr'))}"
+    )
     print(f"  reason: {latest.get('exit_reason') or 'n/a'} | step {latest.get('final_step') or 'n/a'}")
 
 
@@ -280,15 +306,19 @@ def _ladder_state(item: Dict[str, Any], current_price: Optional[float], config: 
     trail_cfg = (risk.get("trailing") or {}) if isinstance(risk.get("trailing"), dict) else {}
     activation_atr = _optional_float(trail_cfg.get("activation_atr")) or 10.0
     gap_atr = _optional_float(trail_cfg.get("gap_atr")) or 5.0
+    lock_atr = _lock_for_step(current_step, events, gap_atr)
     return {
         "current_step": current_step,
-        "lock_atr": _lock_for_step(current_step, events, gap_atr),
+        "lock_atr": lock_atr,
+        "lock_pct": _atr_pct(entry, entry_atr, lock_atr),
         "next_event": next_event,
         "trail": {
             "active": trailing_active,
             "activation_atr": activation_atr,
+            "activation_pct": _atr_pct(entry, entry_atr, activation_atr),
             "activation_price": entry + activation_atr * entry_atr,
             "gap_atr": gap_atr,
+            "gap_pct": _atr_pct(entry, entry_atr, gap_atr),
         },
     }
 
@@ -314,6 +344,7 @@ def _ladder_events(entry: float, entry_atr: float, risk: Dict[str, Any]) -> List
         events.append({"name": "TRAIL", "trigger_atr": activation, "lock_atr": None})
     for event in events:
         event["price"] = entry + float(event["trigger_atr"]) * entry_atr
+        event["trigger_pct"] = _atr_pct(entry, entry_atr, event["trigger_atr"])
     return sorted(events, key=lambda event: (float(event["trigger_atr"]), event["name"] == "TRAIL"))
 
 
@@ -352,10 +383,11 @@ def _lock_for_step(step_name: str, events: Iterable[Dict[str, Any]], gap_atr: fl
 def _lock_text(ladder: Dict[str, Any]) -> str:
     step = ladder.get("current_step")
     lock = ladder.get("lock_atr")
+    lock_pct = ladder.get("lock_pct")
     if step == "TRAIL" and lock is not None:
-        return f" | gap {_fmt_atr_value(lock)} ATR from peak"
+        return f" | gap {_fmt_plain_pct(lock_pct)} / {_fmt_atr_value(lock)} ATR from peak"
     if lock is not None:
-        return f" (+{_fmt_atr_value(lock)} ATR locked)"
+        return f" {_fmt_pct_atr(lock_pct, lock, suffix=' locked')}"
     return ""
 
 
@@ -377,6 +409,13 @@ def _pnl_atr(entry: Optional[float], price: Optional[float], entry_atr: Optional
     if price is None or entry is None or entry_atr in (None, 0.0):
         return None
     return (price - entry) / entry_atr
+
+
+def _atr_pct(entry: Optional[float], entry_atr: Optional[float], atr_value: Any) -> Optional[float]:
+    atr = _optional_float(atr_value)
+    if entry in (None, 0.0) or entry_atr is None or atr is None:
+        return None
+    return atr * entry_atr / entry * 100
 
 
 def _peak_atr(item: Dict[str, Any]) -> Optional[float]:
@@ -450,6 +489,10 @@ def _fmt_signed_atr(value: Any) -> str:
     if number is None:
         return "n/a"
     return f"{number:+.2f} ATR"
+
+
+def _fmt_pct_atr(pct: Any, atr: Any, suffix: str = "") -> str:
+    return f"({_fmt_signed_pct(pct)} / {_fmt_signed_atr(atr)}{suffix})"
 
 
 def _fmt_atr_value(value: Any) -> str:

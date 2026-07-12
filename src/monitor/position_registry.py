@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from src.exchange.binance_client import BinanceClient
@@ -12,6 +13,7 @@ from src.position.position_base import PositionBase
 from src.position.server_simple_trail import ServerSimpleTrailPosition
 from src.state_manager import StateManager
 from src.trade_ledger import TradeLedger
+from src.telemetry_writer import TelemetryWriter
 
 
 class PositionRegistry:
@@ -23,6 +25,7 @@ class PositionRegistry:
         cycle_manager: CycleManager,
         state_manager: StateManager,
         trade_ledger: TradeLedger | None = None,
+        telemetry_writer: TelemetryWriter | None = None,
     ) -> None:
         self.config = config
         self.symbol = str(config["symbol"])
@@ -31,6 +34,7 @@ class PositionRegistry:
         self.cycle_manager = cycle_manager
         self.state_manager = state_manager
         self.trade_ledger = trade_ledger
+        self.telemetry_writer = telemetry_writer
         self.positions: List[PositionBase] = []
         self.entries_paused = False
         self.review_required = False
@@ -39,6 +43,7 @@ class PositionRegistry:
         self._entries_by_candle: dict[int, int] = {}
         self._last_admission_details: Dict[str, Any] = {}
         self._next_position_id = 1
+        self._last_snapshot_hour: Optional[str] = None
         self.load_state()
         self.reconcile_with_binance()
 
@@ -137,12 +142,14 @@ class PositionRegistry:
             self.logger.system("bot_position_opened", pair_id=pair_id, entry=opened[0].entry_price)
         self.save_state()
 
-    def on_tick(self, price: float) -> None:
+    def on_tick(self, price: float, market_ts: Optional[str] = None) -> None:
+        observed_at = market_ts or now_iso()
         for position in list(self.positions):
             if isinstance(position, ServerSimpleTrailPosition):
                 event = position.poll_fill()
             elif isinstance(position, BotFullExitPosition):
-                event = position.on_tick(price)
+                event = position.on_tick(price, market_ts=observed_at)
+                self._record_trough_event(position)
             else:
                 event = None
             if event:
@@ -160,6 +167,7 @@ class PositionRegistry:
             self._purge_closed_bot_positions()
         else:
             self._purge_closed_pairs()
+        self._record_hourly_snapshots(price, observed_at)
         self.save_state()
 
     def load_state(self) -> None:
@@ -385,6 +393,103 @@ class PositionRegistry:
                 **self._last_admission_details,
             }
         )
+        if reason == "BLOCKED_MAX_POSITIONS":
+            self._record_rejected_signal(signal, reason)
+
+    def _record_trough_event(self, position: BotFullExitPosition) -> None:
+        event = position.last_trough_event
+        if not event:
+            return
+        self._submit_telemetry(
+            "trough_event",
+            {
+                "ts": event.get("trough_at"),
+                "profile": self.config.get("active_profile"),
+                "run_id": self.config.get("run_id"),
+                "strategy_version": self.config.get("strategy_version"),
+                "pair_id": position.pair_id,
+                "position_id": position.position_id,
+                "price": event.get("price"),
+                "trough_pct": event.get("trough_pct"),
+                "trough_atr": event.get("trough_atr"),
+                "trough_tracking_complete": position.trough_tracking_complete,
+            },
+        )
+
+    def _record_hourly_snapshots(self, price: float, observed_at: str) -> None:
+        observed = _parse_ts(observed_at)
+        if observed is None:
+            return
+        snapshot_hour = observed.replace(minute=0, second=0, microsecond=0).isoformat()
+        if self._last_snapshot_hour is None:
+            self._last_snapshot_hour = snapshot_hour
+            return
+        if snapshot_hour <= self._last_snapshot_hour:
+            return
+        self._last_snapshot_hour = snapshot_hour
+        open_positions = [
+            position
+            for position in self.positions
+            if isinstance(position, BotFullExitPosition) and position.status == "OPEN"
+        ]
+        open_count = self.open_pair_count
+        for position in open_positions:
+            self._submit_telemetry(
+                "position_snapshot",
+                {
+                    "ts": observed_at,
+                    "snapshot_hour": snapshot_hour,
+                    "profile": self.config.get("active_profile"),
+                    "run_id": self.config.get("run_id"),
+                    "strategy_version": self.config.get("strategy_version"),
+                    "pair_id": position.pair_id,
+                    "position_id": position.position_id,
+                    "opened_at": position.open_ts,
+                    "entry_price": position.entry_price,
+                    "entry_atr": position.entry_atr,
+                    "price": price,
+                    "pnl_pct": position.pnl_pct(price),
+                    "pnl_atr": position.pnl_atr(price),
+                    "age_minutes": _age_minutes(position.open_ts, observed_at),
+                    "current_step": position.current_step(),
+                    "effective_stop": position.effective_stop,
+                    "open_positions": open_count,
+                    "max_open_positions": self.max_open_positions,
+                },
+            )
+
+    def _record_rejected_signal(self, signal: EntrySignal, reason: str) -> None:
+        pnl_values = [
+            position.pnl_pct(signal.price)
+            for position in self.positions
+            if isinstance(position, BotFullExitPosition) and position.status == "OPEN"
+        ]
+        self._submit_telemetry(
+            "rejected_signal",
+            {
+                "ts": now_iso(),
+                "profile": self.config.get("active_profile"),
+                "run_id": self.config.get("run_id"),
+                "strategy_version": self.config.get("strategy_version"),
+                "source_candle_open_time": signal.source_candle_open_time,
+                "price": signal.price,
+                "entry_atr": signal.entry_atr,
+                "reason": reason,
+                "open_positions": self.open_pair_count,
+                "max_open_positions": self.max_open_positions,
+                "worst_open_pnl_pct": min(pnl_values) if pnl_values else None,
+                "phantom_created": False,
+                "phantom_id": None,
+            },
+        )
+
+    def _submit_telemetry(self, stream: str, event: Dict[str, Any]) -> None:
+        if not self.telemetry_writer:
+            return
+        try:
+            self.telemetry_writer.submit(stream, event)
+        except Exception as exc:
+            self.logger.system("telemetry_submit_failed", stream=stream, error=str(exc))
 
     def _allocate_position_id(self) -> int:
         position_id = self._next_position_id
@@ -408,6 +513,26 @@ def _float_or_zero(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _parse_ts(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _age_minutes(opened_at: Any, observed_at: Any) -> Optional[int]:
+    opened = _parse_ts(opened_at)
+    observed = _parse_ts(observed_at)
+    if opened is None or observed is None:
+        return None
+    return max(0, int((observed - opened).total_seconds() // 60))
 
 
 def _next_position_id(positions: List[PositionBase]) -> int:

@@ -209,6 +209,34 @@ class BotFullEngineTests(unittest.TestCase):
         self.assertEqual(position.status, "NEEDS_REVIEW")
         self.assertEqual(position.reserved_qty, 1.0)
 
+    def test_trough_tracks_first_timestamp_of_each_new_low_and_survives_state(self) -> None:
+        position = self._atr_position()
+
+        self.assertIsNone(position.on_tick(99.80, market_ts="2026-07-04T00:01:00+00:00"))
+        self.assertIsNone(position.on_tick(99.90, market_ts="2026-07-04T00:02:00+00:00"))
+
+        self.assertAlmostEqual(position.trough_price, 99.80)
+        self.assertAlmostEqual(position.trough_pct(), -0.20)
+        self.assertAlmostEqual(position.trough_atr() or 0, -1.0)
+        self.assertEqual(position.trough_at, "2026-07-04T00:01:00+00:00")
+        self.assertEqual(position.time_to_trough_seconds(), 60)
+
+        restored = BotFullExitPosition.from_state(
+            position.to_state(),
+            position.config,
+            position.client,
+            position.logger,
+        )
+        self.assertAlmostEqual(restored.trough_price, 99.80)
+        self.assertEqual(restored.trough_at, "2026-07-04T00:01:00+00:00")
+        self.assertTrue(restored.trough_tracking_complete)
+
+        legacy_state = position.to_state()
+        for field in ("trough_price", "trough_at", "trough_tracking_complete", "trough_tracking_started_at"):
+            legacy_state.pop(field)
+        legacy = BotFullExitPosition.from_state(legacy_state, position.config, position.client, position.logger)
+        self.assertFalse(legacy.trough_tracking_complete)
+
     def _atr_position(self, entry_atr=0.20, client=None, config_overrides=None) -> BotFullExitPosition:
         config = {
             "review_stop_pct": 30,

@@ -144,6 +144,13 @@ logging:
   decision_log: "logs/decisions.jsonl"
   system_log: "logs/system.log"
 
+instrumentation:
+  enabled: true
+  queue_max_size: 10000
+  trough_events_file: "data/telemetry/trough_events.jsonl"
+  position_snapshots_file: "data/telemetry/position_snapshots.jsonl"
+  rejected_signals_file: "data/telemetry/rejected_signals.jsonl"
+
 console:
   mode: human
   interval_seconds: 60
