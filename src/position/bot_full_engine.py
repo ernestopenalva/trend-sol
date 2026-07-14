@@ -51,6 +51,19 @@ class BotFullExitPosition(PositionBase):
         self.atr_period = int(atr_period) if atr_period is not None else None
         self.review_stop_pct = float(config.get("review_stop_pct", config.get("stop_loss_pct", 30)))
         self.review_stop = entry_price * (1 - self.review_stop_pct / 100)
+        hard_stop_cfg = config.get("hard_stop") if isinstance(config.get("hard_stop"), dict) else {}
+        self.hard_stop_enabled = bool(hard_stop_cfg.get("enabled", False))
+        self.hard_stop_pct = _optional_float(hard_stop_cfg.get("stop_pct"))
+        if self.hard_stop_enabled and (
+            self.hard_stop_pct is None or self.hard_stop_pct <= 0 or self.hard_stop_pct >= 100
+        ):
+            raise ValueError("risk.hard_stop.stop_pct must be greater than 0 and less than 100")
+        self.hard_stop_price = (
+            entry_price * (1 - float(self.hard_stop_pct) / 100)
+            if self.hard_stop_enabled and self.hard_stop_pct is not None
+            else None
+        )
+        self.hard_stop_applied_on_restore = False
         breakeven_cfg = config.get("breakeven", [])
         self.breakeven_mode = str(_section_value(breakeven_cfg, "mode", "pct")).lower()
         self.breakeven_trigger_pct = _optional_float(_section_value(breakeven_cfg, "trigger_pct"))
@@ -80,9 +93,9 @@ class BotFullExitPosition(PositionBase):
         self.trailing_gap_atr = float(trailing_cfg.get("gap_atr", 3))
         self.trailing_active = False
         self.trailing_stop: Optional[float] = None
-        self.effective_stop = self.review_stop
+        self.effective_stop = self.hard_stop_price if self.hard_stop_price is not None else self.review_stop
         self.stop_price = self.effective_stop
-        self.stop_type = "review"
+        self.stop_type = "hard_stop" if self.hard_stop_price is not None else "review"
         self.be_atr_stop: Optional[float] = None
         self.be_net_floor: Optional[float] = None
         self.be_stop: Optional[float] = None
@@ -165,6 +178,13 @@ class BotFullExitPosition(PositionBase):
         position.trough_tracking_started_at = str(
             state.get("trough_tracking_started_at", position.open_ts if has_trough_state else now_iso())
         )
+        position.hard_stop_applied_on_restore = bool(
+            state.get(
+                "hard_stop_applied_on_restore",
+                position.hard_stop_enabled and not bool(state.get("hard_stop_enabled", False)),
+            )
+        )
+        position._refresh_effective_stop()
         return position
 
     def on_tick(self, price: float, market_ts: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -229,6 +249,7 @@ class BotFullExitPosition(PositionBase):
         if price <= self.effective_stop:
             reason = {
                 "review": "REVIEW_STOP",
+                "hard_stop": "HARD_STOP",
                 "breakeven": "BREAKEVEN",
                 "profit_lock": "PROFIT_LOCK",
                 "trailing": "TRAILING",
@@ -296,6 +317,10 @@ class BotFullExitPosition(PositionBase):
             "pnl_atr": self.pnl_atr(price),
             "entry_atr": self.entry_atr,
             "breakeven_mode": self.breakeven_mode,
+            "hard_stop_enabled": self.hard_stop_enabled,
+            "hard_stop_pct": self.hard_stop_pct,
+            "hard_stop_price": self.hard_stop_price,
+            "hard_stop_applied_on_restore": self.hard_stop_applied_on_restore,
             "profit_lock_mode": self.profit_lock_mode,
             "trailing_mode": self.trailing_mode,
             "breakeven_stop": self.breakeven_stop,
@@ -504,6 +529,7 @@ class BotFullExitPosition(PositionBase):
         stops = [
             ("current", self.effective_stop),
             ("review", self.review_stop),
+            ("hard_stop", self.hard_stop_price),
             ("breakeven", self.breakeven_stop),
             ("profit_lock", self.profit_lock_stop),
             ("trailing", self.trailing_stop),
@@ -534,6 +560,10 @@ class BotFullExitPosition(PositionBase):
                 "profit_lock_mode": self.profit_lock_mode,
                 "trailing_mode": self.trailing_mode,
                 "review_stop": self.review_stop,
+                "hard_stop_enabled": self.hard_stop_enabled,
+                "hard_stop_pct": self.hard_stop_pct,
+                "hard_stop_price": self.hard_stop_price,
+                "hard_stop_applied_on_restore": self.hard_stop_applied_on_restore,
                 "breakeven_stop": self.breakeven_stop,
                 "be_atr_stop": self.be_atr_stop,
                 "be_net_floor": self.be_net_floor,

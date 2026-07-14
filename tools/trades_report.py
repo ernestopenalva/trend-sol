@@ -151,7 +151,7 @@ def _print_counts(title: str, counts: Counter[str]) -> None:
 
 def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
     print("Trades:")
-    print("opened       closed       age    entry    peak     exit     gross   net     reason")
+    print("opened       closed       age    entry    peak     trough   exit     gross   net     reason")
     for record in records:
         print(
             f"{_short_time(record.get('opened_at')):11} "
@@ -159,11 +159,14 @@ def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None
             f"{_fmt_duration(_float(record.get('age_seconds')) or 0):6} "
             f"{_fmt_price(record.get('entry_price')):8} "
             f"{_fmt_price(record.get('peak_price')):8} "
+            f"{_trough_cell(record):8} "
             f"{_fmt_price(record.get('exit_price')):8} "
             f"{_fmt_signed_pct(_gross_pnl(record)):7} "
             f"{_fmt_signed_pct(_net_pnl(record, config)):7} "
             f"{_exit_reason(record)}"
         )
+    if any(record.get("trough_price") is not None and record.get("trough_tracking_complete") is False for record in records):
+        print("* observed trough; tracking started after the trade opened")
 
 
 def _print_detail(records: list[Dict[str, Any]]) -> None:
@@ -177,6 +180,8 @@ def _print_detail(records: list[Dict[str, Any]]) -> None:
             f"trigger={_fmt_price(record.get('exit_trigger_price'))} trigger_source={record.get('exit_trigger_price_source') or 'n/a'} "
             f"gross={_fmt_signed_pct(_gross_pnl(record))} fees={_fmt_signed_pct(-(_float(record.get('estimated_fees_pct')) or 0))} "
             f"net={_fmt_signed_pct(record.get('net_pnl_pct'))} "
+            f"hard_stop={_fmt_price(record.get('hard_stop_price'))} hard_stop_pct={_fmt_loss_pct(record.get('hard_stop_pct'))} "
+            f"hard_stop_on_restore={record.get('hard_stop_applied_on_restore')} "
             f"be_stop={_fmt_price(record.get('be_stop'))} be_net={_fmt_price(record.get('be_net_floor'))} "
             f"be_activation={_fmt_price(record.get('be_activation_price'))} be_source={record.get('be_floor_source') or 'n/a'} "
             f"be_absorbed={record.get('be_floor_absorbed_atr_stop')} "
@@ -450,6 +455,19 @@ def _fmt_signed_number(value: Any) -> str:
 def _fmt_signed_pct(value: Any) -> str:
     number = _float(value)
     return "n/a" if number is None else f"{number:+.2f}%"
+
+
+def _fmt_loss_pct(value: Any) -> str:
+    number = _float(value)
+    return "n/a" if number is None else f"-{number:.2f}%"
+
+
+def _trough_cell(record: Dict[str, Any]) -> str:
+    price = record.get("trough_price")
+    if price is None:
+        return "n/a"
+    suffix = "*" if record.get("trough_tracking_complete") is False else ""
+    return f"{_fmt_price(price)}{suffix}"
 
 
 def _float(value: Any) -> Optional[float]:

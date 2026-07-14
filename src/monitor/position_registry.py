@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from src.exchange.binance_client import BinanceClient
+from src.exchange.binance_client import BinanceClient, BinanceClientError
 from src.logging_utils import JsonlLogger, now_iso
 from src.monitor.cycle_manager import CycleManager
 from src.monitor.entry_engine import EntrySignal
@@ -148,7 +148,23 @@ class PositionRegistry:
             if isinstance(position, ServerSimpleTrailPosition):
                 event = position.poll_fill()
             elif isinstance(position, BotFullExitPosition):
-                event = position.on_tick(price, market_ts=observed_at)
+                try:
+                    event = position.on_tick(price, market_ts=observed_at)
+                except BinanceClientError as exc:
+                    self._record_trough_event(position)
+                    position.status = "NEEDS_REVIEW"
+                    self.review_required = True
+                    self.logger.system(
+                        "position_exit_needs_review",
+                        pair_id=position.pair_id,
+                        position_id=position.position_id,
+                        price=price,
+                        effective_stop=position.effective_stop,
+                        stop_type=position.stop_type,
+                        error=str(exc),
+                    )
+                    self.save_state()
+                    continue
                 self._record_trough_event(position)
             else:
                 event = None
@@ -204,6 +220,16 @@ class PositionRegistry:
         self._next_position_id = _next_position_id(restored)
         if restored:
             self.logger.system("positions_restored", positions=len(restored), open_pairs=self.open_pair_count)
+        for position in restored:
+            if isinstance(position, BotFullExitPosition) and position.hard_stop_applied_on_restore:
+                self.logger.system(
+                    "hard_stop_applied_on_restore",
+                    pair_id=position.pair_id,
+                    position_id=position.position_id,
+                    entry_price=position.entry_price,
+                    hard_stop_pct=position.hard_stop_pct,
+                    hard_stop_price=position.hard_stop_price,
+                )
 
     def save_state(self) -> None:
         self.state_manager.save_open_positions([position.to_state() for position in self.positions])
@@ -453,6 +479,10 @@ class PositionRegistry:
                     "age_minutes": _age_minutes(position.open_ts, observed_at),
                     "current_step": position.current_step(),
                     "effective_stop": position.effective_stop,
+                    "stop_type": position.stop_type,
+                    "hard_stop_pct": position.hard_stop_pct,
+                    "hard_stop_price": position.hard_stop_price,
+                    "hard_stop_applied_on_restore": position.hard_stop_applied_on_restore,
                     "open_positions": open_count,
                     "max_open_positions": self.max_open_positions,
                 },

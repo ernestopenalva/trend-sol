@@ -26,4 +26,19 @@ def effective_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         f"{symbol}@kline_{entry_timeframe}",
         f"{symbol}@kline_{trend_timeframe}",
     ]
+    _validate_hard_stop(config)
     return config
+
+
+def _validate_hard_stop(config: Dict[str, Any]) -> None:
+    risk = config.get("risk") if isinstance(config.get("risk"), dict) else {}
+    hard_stop = risk.get("hard_stop") if isinstance(risk.get("hard_stop"), dict) else {}
+    if not bool(hard_stop.get("enabled", False)):
+        return
+    value = hard_stop.get("stop_pct")
+    try:
+        stop_pct = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("risk.hard_stop.stop_pct must be greater than 0 and less than 100") from None
+    if isinstance(value, bool) or stop_pct <= 0 or stop_pct >= 100:
+        raise ValueError("risk.hard_stop.stop_pct must be greater than 0 and less than 100")

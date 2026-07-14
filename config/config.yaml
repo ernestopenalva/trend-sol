@@ -108,6 +108,9 @@ exit_bot_full_engine:
 risk:
   # ATR da saida e congelado no momento da entrada.
   # BE, profit lock e trailing usam entry_atr, nao ATR recalculado ao vivo.
+  hard_stop:
+    enabled: true
+    stop_pct: 3.0
   review_stop_pct: 30
   breakeven:
     mode: atr

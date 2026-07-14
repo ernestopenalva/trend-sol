@@ -209,6 +209,58 @@ class BotFullEngineTests(unittest.TestCase):
         self.assertEqual(position.status, "NEEDS_REVIEW")
         self.assertEqual(position.reserved_qty, 1.0)
 
+    def test_hard_stop_closes_at_configured_percentage(self) -> None:
+        client = FakeClient()
+        position = self._atr_position(
+            client=client,
+            config_overrides={"hard_stop": {"enabled": True, "stop_pct": 3.0}},
+        )
+
+        self.assertAlmostEqual(position.hard_stop_price or 0, 97.0)
+        self.assertEqual(position.stop_type, "hard_stop")
+        self.assertFalse(position.hard_stop_applied_on_restore)
+        self.assertIsNone(position.on_tick(97.01))
+
+        event = position.on_tick(97.0)
+
+        self.assertIsNotNone(event)
+        self.assertEqual(position.exit_reason, "HARD_STOP")
+        self.assertEqual(event["exit_reason"], "HARD_STOP")
+        self.assertAlmostEqual(event["stop_hit"], 97.0)
+        self.assertAlmostEqual(event["trigger_price"], 97.0)
+        self.assertEqual(client.sells[0][1], 1.0)
+
+    def test_restored_position_adopts_new_hard_stop_from_config(self) -> None:
+        position = self._atr_position(
+            config_overrides={"hard_stop": {"enabled": True, "stop_pct": 3.0}},
+        )
+        state = position.to_state()
+        state["effective_stop"] = 70.0
+        state["stop_price"] = 70.0
+        state["stop_type"] = "review"
+        for field in (
+            "hard_stop_enabled",
+            "hard_stop_pct",
+            "hard_stop_price",
+            "hard_stop_applied_on_restore",
+        ):
+            state.pop(field)
+
+        restored = BotFullExitPosition.from_state(
+            state,
+            position.config,
+            position.client,
+            position.logger,
+        )
+
+        self.assertAlmostEqual(restored.effective_stop, 97.0)
+        self.assertEqual(restored.stop_type, "hard_stop")
+        self.assertTrue(restored.hard_stop_applied_on_restore)
+
+    def test_hard_stop_rejects_invalid_percentage(self) -> None:
+        with self.assertRaisesRegex(ValueError, "hard_stop.stop_pct"):
+            self._atr_position(config_overrides={"hard_stop": {"enabled": True, "stop_pct": 0}})
+
     def test_trough_tracks_first_timestamp_of_each_new_low_and_survives_state(self) -> None:
         position = self._atr_position()
 

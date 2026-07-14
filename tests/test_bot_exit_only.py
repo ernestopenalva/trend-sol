@@ -15,13 +15,14 @@ if "requests" not in sys.modules:
     sys.modules["requests"] = requests_stub
 
 from src.logging_utils import JsonlLogger
+from src.exchange.binance_client import BinanceClientError
 from src.monitor.cycle_manager import CycleManager
 from src.monitor.entry_engine import EntrySignal
 from src.monitor.position_registry import PositionRegistry
 from src.position.bot_full_engine import BotFullExitPosition
 from src.state_manager import StateManager
 from src.trade_ledger import TradeLedger
-from tools.list_positions import _normalize_state, _print_human
+from tools.list_positions import _effective_stop_text, _normalize_state, _print_human
 from tools.trades_report import (
     _estimated_fees_pct,
     _estimated_fees_pct_for_records,
@@ -30,6 +31,7 @@ from tools.trades_report import (
     _net_pnl,
     _parse_args,
     _print_detail_sections,
+    _print_trades,
     _slots_full_pct,
 )
 
@@ -39,6 +41,7 @@ class FakeClient:
         self.buys = []
         self.buy_quotes = []
         self.trailing_orders = []
+        self.sells = []
 
     def market_buy_quote(self, symbol: str, quote_qty: float, client_order_id: str):
         self.buys.append(client_order_id)
@@ -58,6 +61,16 @@ class FakeClient:
         self.trailing_orders.append(kwargs)
         return {"orderId": 2, "clientOrderId": kwargs.get("client_order_id")}
 
+    def market_sell(self, symbol: str, quantity: float, client_order_id: str):
+        self.sells.append((symbol, quantity, client_order_id))
+        return {
+            "orderId": 3,
+            "clientOrderId": client_order_id,
+            "executedQty": str(quantity),
+            "cummulativeQuoteQty": str(quantity * 97),
+            "fills": [{"price": "97", "qty": str(quantity)}],
+        }
+
     def open_orders(self, symbol: str):
         return []
 
@@ -72,6 +85,19 @@ class FakeTelemetryWriter:
     def submit(self, stream: str, event: dict) -> bool:
         self.events.append((stream, event))
         return True
+
+
+class FailingSellClient(FakeClient):
+    def __init__(self, fail_on_attempt: int) -> None:
+        super().__init__()
+        self.fail_on_attempt = fail_on_attempt
+        self.sell_attempts = 0
+
+    def market_sell(self, symbol: str, quantity: float, client_order_id: str):
+        self.sell_attempts += 1
+        if self.sell_attempts == self.fail_on_attempt:
+            raise BinanceClientError("ambiguous market sell failure")
+        return super().market_sell(symbol, quantity, client_order_id)
 
 
 class BotExitOnlyTests(unittest.TestCase):
@@ -121,6 +147,70 @@ class BotExitOnlyTests(unittest.TestCase):
             self.assertEqual(client.buy_quotes, [20.0, 20.0])
             self.assertEqual([position.position_id for position in registry.positions], [1, 2])
             self.assertEqual([position.position_notional_usdt for position in registry.positions], [20.0, 20.0])
+
+    def test_hard_stop_closes_five_positions_sequentially_and_clears_state(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config = _config()
+            config["capital"] = {"operational_balance_usdt": 100, "trade_size_pct": 20, "max_open_positions": 5}
+            config["entry"] = {"entry_spacing_atr": 0, "max_entries_per_candle": 1}
+            config["risk"]["hard_stop"] = {"enabled": True, "stop_pct": 3.0}
+            root = Path(tmp)
+            logger = JsonlLogger(root, config)
+            state = StateManager(root)
+            client = FakeClient()
+            ledger = TradeLedger(root)
+            registry = PositionRegistry(
+                config,
+                client,  # type: ignore[arg-type]
+                logger,
+                CycleManager(root, config, logger, state),
+                state,
+                ledger,
+            )
+            for candle in range(1, 6):
+                registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", candle, 0.2, "1m", 14))
+
+            registry.on_tick(96.9, market_ts="2026-07-13T22:00:00+00:00")
+
+            self.assertEqual(len(client.sells), 5)
+            self.assertEqual(registry.positions, [])
+            self.assertEqual(state.load_open_positions(), [])
+            records = ledger.load()
+            self.assertEqual(len(records), 5)
+            self.assertEqual({record["exit_reason"] for record in records}, {"HARD_STOP"})
+            self.assertEqual({record["hard_stop_pct"] for record in records}, {3.0})
+            self.assertEqual({record["hard_stop_applied_on_restore"] for record in records}, {False})
+
+    def test_hard_stop_sell_error_pauses_entries_and_continues_other_positions(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config = _config()
+            config["capital"] = {"operational_balance_usdt": 100, "trade_size_pct": 20, "max_open_positions": 3}
+            config["entry"] = {"entry_spacing_atr": 0, "max_entries_per_candle": 1}
+            config["risk"]["hard_stop"] = {"enabled": True, "stop_pct": 3.0}
+            root = Path(tmp)
+            logger = JsonlLogger(root, config)
+            state = StateManager(root)
+            client = FailingSellClient(fail_on_attempt=2)
+            ledger = TradeLedger(root)
+            registry = PositionRegistry(
+                config,
+                client,  # type: ignore[arg-type]
+                logger,
+                CycleManager(root, config, logger, state),
+                state,
+                ledger,
+            )
+            for candle in range(1, 4):
+                registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", candle, 0.2, "1m", 14))
+
+            registry.on_tick(96.9, market_ts="2026-07-13T22:00:00+00:00")
+
+            self.assertEqual(client.sell_attempts, 3)
+            self.assertEqual(len(client.sells), 2)
+            self.assertTrue(registry.review_required)
+            self.assertEqual(len(registry.positions), 1)
+            self.assertEqual(registry.positions[0].status, "NEEDS_REVIEW")
+            self.assertEqual(len(ledger.load()), 2)
 
     def test_admission_blocks_second_entry_in_same_candle(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -327,6 +417,8 @@ class BotExitOnlyTests(unittest.TestCase):
                 "quantity": 1,
                 "entry_atr": 0.2,
                 "highest_price": 101,
+                "trough_price": 99,
+                "trough_tracking_complete": True,
                 "effective_stop": 100.3,
                 "stop_type": "profit_lock",
                 "open_ts": "2026-07-08T22:00:00+00:00",
@@ -345,8 +437,38 @@ class BotExitOnlyTests(unittest.TestCase):
         self.assertIn("entry: 08/07 19:00 (age ", text)
         self.assertIn(") | 100.0000 -> now 100.5000", text)
         self.assertIn("peak:  101.0000  (+1.00% / +5.00 ATR)", text)
+        self.assertIn("trough: 99.0000  (-1.00% / -5.00 ATR)", text)
         self.assertIn("next:  PL2 at 101.6000 (+1.60% / +8.00 ATR)", text)
         self.assertIn("trail: inactive, activates at 102.0000 (+2.00% / +10.00 ATR)", text)
+        self.assertEqual(
+            _effective_stop_text({"effective_stop": 97, "stop_type": "hard_stop", "hard_stop_pct": 3}),
+            "hard stop 97.0000 (-3.00%)",
+        )
+
+    def test_trades_report_lists_trough_and_marks_partial_tracking(self) -> None:
+        records = [
+            {
+                "opened_at": "2026-07-11T07:00:00+00:00",
+                "closed_at": "2026-07-11T08:00:00+00:00",
+                "age_seconds": 3600,
+                "entry_price": 100,
+                "peak_price": 101,
+                "trough_price": 98.5,
+                "trough_tracking_complete": False,
+                "exit_price": 100.5,
+                "gross_pnl_pct": 0.5,
+                "exit_reason": "BREAKEVEN",
+            }
+        ]
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            _print_trades(records, {"fees": {"enabled": False}})
+
+        text = output.getvalue()
+        self.assertIn("peak     trough   exit", text)
+        self.assertIn("101.0000 98.5000* 100.5000", text)
+        self.assertIn("* observed trough; tracking started after the trade opened", text)
 
 
 def _parse_args_for_tests(args):

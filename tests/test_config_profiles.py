@@ -51,6 +51,13 @@ class ConfigProfileTests(unittest.TestCase):
             ["solusdt@kline_1m", "solusdt@kline_15m"],
         )
 
+    def test_enabled_hard_stop_requires_valid_percentage(self) -> None:
+        config = self.base_config()
+        config["risk"] = {"hard_stop": {"enabled": True, "stop_pct": 0}}
+
+        with self.assertRaisesRegex(ValueError, "hard_stop.stop_pct"):
+            effective_config(config)
+
 
 if __name__ == "__main__":
     unittest.main()

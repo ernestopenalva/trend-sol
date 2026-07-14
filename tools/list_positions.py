@@ -92,6 +92,7 @@ def _normalize_position(item: Dict[str, Any], current_price: Optional[float], co
     exit_price = _optional_float(item.get("exit_price"))
     entry_atr = _optional_float(item.get("entry_atr"))
     peak = None if label == "A" else _optional_float(item.get("highest_price"))
+    trough = None if label == "A" else _optional_float(item.get("trough_price"))
     effective_stop = _optional_float(item.get("effective_stop", item.get("stop_price")))
     open_dt = _parse_dt(item.get("open_ts"))
     close_dt = _parse_dt(item.get("close_ts"))
@@ -110,8 +111,13 @@ def _normalize_position(item: Dict[str, Any], current_price: Optional[float], co
         "peak": peak,
         "peak_pct": _pnl_pct(entry, peak),
         "peak_atr": _pnl_atr(entry, peak, entry_atr),
+        "trough": trough,
+        "trough_pct": _pnl_pct(entry, trough),
+        "trough_atr": _pnl_atr(entry, trough, entry_atr),
+        "trough_tracking_complete": item.get("trough_tracking_complete"),
         "effective_stop": effective_stop,
         "stop_type": item.get("stop_type"),
+        "hard_stop_pct": _optional_float(item.get("hard_stop_pct")),
         "trail_status": _trail_status(item),
         "exit": exit_price,
         "realized_pct": _pnl_pct(entry, exit_price) if status == "CLOSED" else None,
@@ -196,7 +202,15 @@ def _print_position_b(
             f"({_fmt_signed_pct(position.get('pnl_pct'))} / {_fmt_signed_atr(position.get('pnl_atr'))})"
         )
         print(f"  peak:  {_fmt_price(position.get('peak'))}  {_fmt_pct_atr(position.get('peak_pct'), position.get('peak_atr'))}")
-        print(f"  step:  {ladder.get('current_step', 'NONE')} | stop {_fmt_price(position.get('effective_stop'))}{_lock_text(ladder)}")
+        print(
+            f"  trough: {_fmt_price(position.get('trough'))}  "
+            f"{_fmt_pct_atr(position.get('trough_pct'), position.get('trough_atr'))}"
+            f"{_trough_tracking_note(position)}"
+        )
+        print(
+            f"  step:  {ladder.get('current_step', 'NONE')} | "
+            f"{_effective_stop_text(position)}{_lock_text(ladder)}"
+        )
         next_event = ladder.get("next_event")
         if next_event:
             print(
@@ -220,6 +234,11 @@ def _print_position_b(
 
     print(f"  entry:    {_fmt_price(position.get('entry'))}")
     print(f"  peak:     {_fmt_price(position.get('peak'))}  {_fmt_pct_atr(position.get('peak_pct'), position.get('peak_atr'))}")
+    print(
+        f"  trough:   {_fmt_price(position.get('trough'))}  "
+        f"{_fmt_pct_atr(position.get('trough_pct'), position.get('trough_atr'))}"
+        f"{_trough_tracking_note(position)}"
+    )
     print(f"  step:     {ladder.get('current_step', 'NONE')}{_lock_text(ladder)}")
     print(f"  stop hit: {_fmt_price(position.get('effective_stop'))}")
     print(f"  exit:     {_fmt_price(position.get('exit'))}  ({_fmt_signed_pct(position.get('realized_pct'))})")
@@ -247,13 +266,18 @@ def _print_no_open_bot_b(config: Dict[str, Any]) -> None:
         f"  peak: {_fmt_price(latest.get('peak_price'))} "
         f"{_fmt_pct_atr(_pnl_pct(_optional_float(latest.get('entry_price')), _optional_float(latest.get('peak_price'))), latest.get('peak_atr'))}"
     )
+    print(
+        f"  trough: {_fmt_price(latest.get('trough_price'))} "
+        f"{_fmt_pct_atr(latest.get('trough_pct'), latest.get('trough_atr'))}"
+        f"{_trough_tracking_note(latest)}"
+    )
     print(f"  reason: {latest.get('exit_reason') or 'n/a'} | step {latest.get('final_step') or 'n/a'}")
 
 
 def _print_detail(normalized: Dict[str, Any]) -> None:
     print(
         "opened_at           pair_id      pos type           status        entry     current   qty      "
-        "entry_atr pnl_pct   pnl_atr  peak     peak_atr effective_stop stop_type   trail    age    "
+        "entry_atr pnl_pct   pnl_atr  peak     peak_atr trough   trough_atr effective_stop stop_type   trail    age    "
         "exit     realized exit_reason closed_at           server_order_id client_order_id"
     )
     for pair in normalized.get("pairs", []):
@@ -275,6 +299,8 @@ def _print_detail(normalized: Dict[str, Any]) -> None:
                 f"{_fmt_atr_value(item.get('pnl_atr')):8} "
                 f"{_fmt_price(item.get('peak')):8} "
                 f"{_fmt_atr_value(item.get('peak_atr')):8} "
+                f"{_fmt_price(item.get('trough')):8} "
+                f"{_fmt_atr_value(item.get('trough_atr')):10} "
                 f"{_fmt_price(item.get('effective_stop')):14} "
                 f"{str(item.get('stop_type') or 'n/a'):11} "
                 f"{str(item.get('trail_status') or 'n/a'):8} "
@@ -389,6 +415,20 @@ def _lock_text(ladder: Dict[str, Any]) -> str:
     if lock is not None:
         return f" {_fmt_pct_atr(lock_pct, lock, suffix=' locked')}"
     return ""
+
+
+def _effective_stop_text(position: Dict[str, Any]) -> str:
+    price = _fmt_price(position.get("effective_stop"))
+    if str(position.get("stop_type") or "") == "hard_stop":
+        pct = _optional_float(position.get("hard_stop_pct"))
+        return f"hard stop {price} (-{_fmt_plain_pct(pct)})"
+    return f"stop {price}"
+
+
+def _trough_tracking_note(position: Dict[str, Any]) -> str:
+    if position.get("trough") is None and position.get("trough_price") is None:
+        return ""
+    return " (partial tracking)" if position.get("trough_tracking_complete") is False else ""
 
 
 def _friendly_engine(item: Dict[str, Any]) -> str:
