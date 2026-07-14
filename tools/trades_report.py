@@ -69,7 +69,7 @@ def _print_report(records: list[Dict[str, Any]], args: argparse.Namespace, confi
     print()
     _print_summary(records, config)
     print()
-    _print_counts("Exit reasons", Counter(_exit_reason(record) for record in records))
+    _print_inline_counts("Exit reasons", Counter(_exit_reason(record) for record in records))
     print()
     if args.detail:
         _print_detail_sections(records)
@@ -92,21 +92,26 @@ def _print_summary(records: list[Dict[str, Any]], config: Dict[str, Any]) -> Non
     estimated_fees = _estimated_fees_pct_for_records(records, config)
     net_total = sum(net_pnls) if net_pnls else gross_total - estimated_fees
     print("Summary:")
-    print(f"  fees: {_fee_summary(config)}")
-    print(f"  trades: {len(records)}")
-    print(f"  gross total: {_fmt_signed_pct(gross_total)}")
-    print(f"  estimated fees: {_fmt_signed_pct(-estimated_fees)}")
-    print(f"  net total: {_fmt_signed_pct(net_total)}")
-    print(f"  avg gross/trade: {_fmt_signed_pct(sum(pnls) / len(pnls) if pnls else 0)}")
-    print(f"  avg net/trade: {_fmt_signed_pct(sum(net_pnls) / len(net_pnls) if net_pnls else 0)}")
-    print(f"  best: {_fmt_signed_pct(max(pnls) if pnls else 0)}")
-    print(f"  worst: {_fmt_signed_pct(min(pnls) if pnls else 0)}")
-    print(f"  winrate: {(len(wins) / len(pnls) * 100) if pnls else 0:.1f}%")
-    print(f"  net best: {_fmt_signed_pct(max(net_pnls) if net_pnls else 0)}")
-    print(f"  net worst: {_fmt_signed_pct(min(net_pnls) if net_pnls else 0)}")
-    print(f"  net winrate: {(len(net_wins) / len(net_pnls) * 100) if net_pnls else 0:.1f}%")
-    print(f"  avg age: {_fmt_duration(sum(ages) / len(ages) if ages else 0)}")
-    print(f"  slots full time: {_slots_full_pct(records, config):.1f}%")
+    print(
+        f"  trades: {len(records)} | "
+        f"avg age={_fmt_duration(sum(ages) / len(ages) if ages else 0)} | "
+        f"slots full time={_slots_full_pct(records, config):.1f}%"
+    )
+    print(f"  fees: estimated={_fmt_signed_pct(-estimated_fees)} | {_fee_summary(config)}")
+    print(
+        f"  gross: total={_fmt_signed_pct(gross_total)} | "
+        f"avg/trade={_fmt_signed_pct(sum(pnls) / len(pnls) if pnls else 0)} | "
+        f"best={_fmt_signed_pct(max(pnls) if pnls else 0)} | "
+        f"worst={_fmt_signed_pct(min(pnls) if pnls else 0)} | "
+        f"winrate={(len(wins) / len(pnls) * 100) if pnls else 0:.1f}%"
+    )
+    print(
+        f"  net: total={_fmt_signed_pct(net_total)} | "
+        f"avg/trade={_fmt_signed_pct(sum(net_pnls) / len(net_pnls) if net_pnls else 0)} | "
+        f"best={_fmt_signed_pct(max(net_pnls) if net_pnls else 0)} | "
+        f"worst={_fmt_signed_pct(min(net_pnls) if net_pnls else 0)} | "
+        f"winrate={(len(net_wins) / len(net_pnls) * 100) if net_pnls else 0:.1f}%"
+    )
 
 
 def _print_detail_sections(records: list[Dict[str, Any]]) -> None:
@@ -147,6 +152,11 @@ def _print_counts(title: str, counts: Counter[str]) -> None:
         return
     for key, value in sorted(counts.items()):
         print(f"  {key}: {value}")
+
+
+def _print_inline_counts(title: str, counts: Counter[str]) -> None:
+    values = counts or Counter({"none": 0})
+    print(f"{title}: " + " | ".join(f"{key}={value}" for key, value in sorted(values.items())))
 
 
 def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:

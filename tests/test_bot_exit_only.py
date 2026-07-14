@@ -31,6 +31,8 @@ from tools.trades_report import (
     _net_pnl,
     _parse_args,
     _print_detail_sections,
+    _print_inline_counts,
+    _print_summary,
     _print_trades,
     _slots_full_pct,
 )
@@ -404,6 +406,34 @@ class BotExitOnlyTests(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("MAE / trough (N=1/3)", text)
         self.assertIn("worst trough: -1.50%", text)
+
+    def test_trades_report_groups_summary_families_inline(self) -> None:
+        records = [
+            {
+                "opened_at": "2026-07-11T07:00:00+00:00",
+                "closed_at": "2026-07-11T08:00:00+00:00",
+                "age_seconds": 3600,
+                "gross_pnl_pct": 0.5,
+                "estimated_fees_pct": 0.2,
+                "net_pnl_pct": 0.3,
+            }
+        ]
+        config = {
+            "fees": {"enabled": True, "taker_fee_pct": 0.1, "use_bnb_discount": False},
+            "capital": {"max_open_positions": 5},
+        }
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            _print_summary(records, config)
+            _print_inline_counts("Exit reasons", {"BREAKEVEN": 1, "HARD_STOP": 2})
+
+        text = output.getvalue()
+        self.assertIn("trades: 1 | avg age=1h00m | slots full time=0.0%", text)
+        self.assertIn("fees: estimated=-0.20% | taker=0.100%", text)
+        self.assertIn("gross: total=+0.50% | avg/trade=+0.50%", text)
+        self.assertIn("net: total=+0.30% | avg/trade=+0.30%", text)
+        self.assertIn("Exit reasons: BREAKEVEN=1 | HARD_STOP=2", text)
 
     def test_list_positions_omits_a_in_bot_exit_only(self) -> None:
         config = _config()
