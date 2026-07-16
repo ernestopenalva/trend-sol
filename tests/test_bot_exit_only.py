@@ -413,6 +413,7 @@ class BotExitOnlyTests(unittest.TestCase):
                 "opened_at": "2026-07-11T07:00:00+00:00",
                 "closed_at": "2026-07-11T08:00:00+00:00",
                 "age_seconds": 3600,
+                "position_notional_usdt": 20,
                 "gross_pnl_pct": 0.5,
                 "estimated_fees_pct": 0.2,
                 "net_pnl_pct": 0.3,
@@ -430,7 +431,7 @@ class BotExitOnlyTests(unittest.TestCase):
 
         text = output.getvalue()
         self.assertIn("trades: 1 | avg age=1h00m | slots full time=0.0%", text)
-        self.assertIn("fees: estimated=-0.20% | taker=0.100%", text)
+        self.assertIn("fees: estimated sum=-0.20% (-0.0400 USDT) | taker=0.100%/side", text)
         self.assertIn("gross: total=+0.50% | avg/trade=+0.50%", text)
         self.assertIn("net: total=+0.30% | avg/trade=+0.30%", text)
         self.assertIn("Exit reasons: BREAKEVEN=1 | HARD_STOP=2", text)
@@ -486,6 +487,7 @@ class BotExitOnlyTests(unittest.TestCase):
                 "trough_price": 98.5,
                 "trough_tracking_complete": False,
                 "exit_price": 100.5,
+                "position_notional_usdt": 20,
                 "gross_pnl_pct": 0.5,
                 "exit_reason": "BREAKEVEN",
             }
@@ -496,8 +498,11 @@ class BotExitOnlyTests(unittest.TestCase):
             _print_trades(records, {"fees": {"enabled": False}})
 
         text = output.getvalue()
-        self.assertIn("peak     trough   exit", text)
-        self.assertIn("101.0000 98.5000* 100.5000", text)
+        self.assertIn("peak               trough", text)
+        self.assertIn("101.0000 (+1.00%)", text)
+        self.assertIn("98.5000* (-1.50%)", text)
+        self.assertIn("giveback", text)
+        self.assertIn("+0.5000 (+0.50%)", text)
         self.assertIn("* observed trough; tracking started after the trade opened", text)
 
 

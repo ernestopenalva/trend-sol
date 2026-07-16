@@ -74,7 +74,7 @@ def _print_report(records: list[Dict[str, Any]], args: argparse.Namespace, confi
     if args.detail:
         _print_detail_sections(records)
         print()
-        _print_detail(records)
+        _print_detail(records, config)
     else:
         _print_trades(records, config)
 
@@ -90,6 +90,8 @@ def _print_summary(records: list[Dict[str, Any]], config: Dict[str, Any]) -> Non
     net_wins = [value for value in net_pnls if value > 0]
     gross_total = sum(pnls) if pnls else 0
     estimated_fees = _estimated_fees_pct_for_records(records, config)
+    estimated_fees_usdt = _estimated_fees_usdt_for_records(records, config)
+    estimated_fees_usdt_display = -estimated_fees_usdt if estimated_fees_usdt is not None else None
     net_total = sum(net_pnls) if net_pnls else gross_total - estimated_fees
     print("Summary:")
     print(
@@ -97,7 +99,10 @@ def _print_summary(records: list[Dict[str, Any]], config: Dict[str, Any]) -> Non
         f"avg age={_fmt_duration(sum(ages) / len(ages) if ages else 0)} | "
         f"slots full time={_slots_full_pct(records, config):.1f}%"
     )
-    print(f"  fees: estimated={_fmt_signed_pct(-estimated_fees)} | {_fee_summary(config)}")
+    print(
+        f"  fees: estimated sum={_fmt_signed_pct(-estimated_fees)} "
+        f"({_fmt_signed_usdt(estimated_fees_usdt_display)}) | {_fee_summary(config)}"
+    )
     print(
         f"  gross: total={_fmt_signed_pct(gross_total)} | "
         f"avg/trade={_fmt_signed_pct(sum(pnls) / len(pnls) if pnls else 0)} | "
@@ -161,16 +166,20 @@ def _print_inline_counts(title: str, counts: Counter[str]) -> None:
 
 def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
     print("Trades:")
-    print("opened       closed       age    entry    peak     trough   exit     gross   net     reason")
+    print(
+        f"{'opened':11} {'closed':11} {'age':6} {'entry':8} {'peak':18} {'trough':18} "
+        f"{'exit':8} {'giveback':19} {'gross':7} {'net':7} reason"
+    )
     for record in records:
         print(
             f"{_short_time(record.get('opened_at')):11} "
             f"{_short_time(record.get('closed_at')):11} "
             f"{_fmt_duration(_float(record.get('age_seconds')) or 0):6} "
             f"{_fmt_price(record.get('entry_price')):8} "
-            f"{_fmt_price(record.get('peak_price')):8} "
-            f"{_trough_cell(record):8} "
+            f"{_peak_cell(record):18} "
+            f"{_trough_cell(record):18} "
             f"{_fmt_price(record.get('exit_price')):8} "
+            f"{_giveback_cell(record):19} "
             f"{_fmt_signed_pct(_gross_pnl(record)):7} "
             f"{_fmt_signed_pct(_net_pnl(record, config)):7} "
             f"{_exit_reason(record)}"
@@ -179,7 +188,7 @@ def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None
         print("* observed trough; tracking started after the trade opened")
 
 
-def _print_detail(records: list[Dict[str, Any]]) -> None:
+def _print_detail(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
     print("Trades detail:")
     for record in records:
         print(
@@ -189,7 +198,7 @@ def _print_detail(records: list[Dict[str, Any]]) -> None:
             f"exit_source={record.get('exit_price_source') or 'n/a'} "
             f"trigger={_fmt_price(record.get('exit_trigger_price'))} trigger_source={record.get('exit_trigger_price_source') or 'n/a'} "
             f"gross={_fmt_signed_pct(_gross_pnl(record))} fees={_fmt_signed_pct(-(_float(record.get('estimated_fees_pct')) or 0))} "
-            f"net={_fmt_signed_pct(record.get('net_pnl_pct'))} "
+            f"net={_fmt_signed_pct(_net_pnl(record, config))} giveback={_giveback_cell(record)} "
             f"hard_stop={_fmt_price(record.get('hard_stop_price'))} hard_stop_pct={_fmt_loss_pct(record.get('hard_stop_pct'))} "
             f"hard_stop_on_restore={record.get('hard_stop_applied_on_restore')} "
             f"be_stop={_fmt_price(record.get('be_stop'))} be_net={_fmt_price(record.get('be_net_floor'))} "
@@ -317,8 +326,8 @@ def _fee_summary(config: Dict[str, Any]) -> str:
     effective_taker = _effective_taker_fee_pct(config)
     round_trip = _round_trip_fee_pct(config)
     return (
-        f"taker={configured_taker:.3f}% | "
-        f"effective taker={effective_taker:.3f}% | "
+        f"taker={configured_taker:.3f}%/side | "
+        f"effective taker={effective_taker:.3f}%/side | "
         f"BNB discount={discount} | "
         f"round-trip={round_trip:.3f}%/trade"
     )
@@ -336,6 +345,23 @@ def _estimated_fees_pct_for_records(records: list[Dict[str, Any]], config: Dict[
     return total + _estimated_fees_pct(missing, config)
 
 
+def _estimated_fees_usdt_for_records(records: list[Dict[str, Any]], config: Dict[str, Any]) -> Optional[float]:
+    if not records:
+        return 0.0
+    total = 0.0
+    found = False
+    for record in records:
+        notional = _position_notional_usdt(record)
+        if notional is None:
+            continue
+        fee_pct = _float(record.get("estimated_fees_pct"))
+        if fee_pct is None:
+            fee_pct = _round_trip_fee_pct(config)
+        total += notional * fee_pct / 100
+        found = True
+    return total if found else None
+
+
 def _gross_pnl(record: Dict[str, Any]) -> Optional[float]:
     value = _float(record.get("gross_pnl_pct"))
     if value is not None:
@@ -351,6 +377,17 @@ def _net_pnl(record: Dict[str, Any], config: Dict[str, Any]) -> Optional[float]:
     if gross is None:
         return None
     return gross - _estimated_fees_pct(1, config)
+
+
+def _position_notional_usdt(record: Dict[str, Any]) -> Optional[float]:
+    configured = _float(record.get("position_notional_usdt"))
+    if configured is not None and configured > 0:
+        return configured
+    quantity = _float(record.get("qty"))
+    entry_price = _float(record.get("entry_price"))
+    if quantity is not None and entry_price is not None and quantity > 0 and entry_price > 0:
+        return quantity * entry_price
+    return None
 
 
 def _be_floor_source(record: Dict[str, Any]) -> str:
@@ -462,6 +499,11 @@ def _fmt_signed_number(value: Any) -> str:
     return "n/a" if number is None else f"{number:+.4f}"
 
 
+def _fmt_signed_usdt(value: Any) -> str:
+    number = _float(value)
+    return "n/a USDT" if number is None else f"{number:+.4f} USDT"
+
+
 def _fmt_signed_pct(value: Any) -> str:
     number = _float(value)
     return "n/a" if number is None else f"{number:+.2f}%"
@@ -472,12 +514,38 @@ def _fmt_loss_pct(value: Any) -> str:
     return "n/a" if number is None else f"-{number:.2f}%"
 
 
+def _peak_cell(record: Dict[str, Any]) -> str:
+    return _price_pct_cell(record.get("peak_price"), record.get("entry_price"))
+
+
 def _trough_cell(record: Dict[str, Any]) -> str:
     price = record.get("trough_price")
     if price is None:
         return "n/a"
     suffix = "*" if record.get("trough_tracking_complete") is False else ""
-    return f"{_fmt_price(price)}{suffix}"
+    return _price_pct_cell(price, record.get("entry_price"), suffix=suffix, pct=record.get("trough_pct"))
+
+
+def _giveback_cell(record: Dict[str, Any]) -> str:
+    peak = _float(record.get("peak_price"))
+    exit_price = _float(record.get("exit_price"))
+    if peak in (None, 0.0) or exit_price is None:
+        return "n/a"
+    difference = peak - exit_price
+    percentage = difference / peak * 100
+    return f"{difference:+.4f} ({percentage:+.2f}%)"
+
+
+def _price_pct_cell(price: Any, entry_price: Any, suffix: str = "", pct: Any = None) -> str:
+    numeric_price = _float(price)
+    numeric_entry = _float(entry_price)
+    numeric_pct = _float(pct)
+    if numeric_price is None:
+        return "n/a"
+    if numeric_pct is None and numeric_entry not in (None, 0.0):
+        numeric_pct = (numeric_price / numeric_entry - 1) * 100
+    pct_text = _fmt_signed_pct(numeric_pct)
+    return f"{_fmt_price(numeric_price)}{suffix} ({pct_text})"
 
 
 def _float(value: Any) -> Optional[float]:
