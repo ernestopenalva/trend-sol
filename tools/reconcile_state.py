@@ -8,7 +8,11 @@ from src.state_manager import StateManager
 def main() -> None:
     config, client = bootstrap()
     symbol = str(config["symbol"])
-    state = StateManager(PROJECT_ROOT).load_open_positions()
+    state = [
+        item
+        for item in StateManager(PROJECT_ROOT).load_open_positions()
+        if not bool(item.get("phantom", False))
+    ]
     open_orders = client.open_orders(symbol)
     all_orders = client.all_orders(symbol, limit=100)
     open_ids = {str(order.get("clientOrderId")) for order in open_orders}

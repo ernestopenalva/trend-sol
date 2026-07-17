@@ -21,7 +21,7 @@ from src.monitor.entry_engine import EntrySignal
 from src.monitor.position_registry import PositionRegistry
 from src.position.bot_full_engine import BotFullExitPosition
 from src.state_manager import StateManager
-from src.trade_ledger import TradeLedger
+from src.trade_ledger import TradeLedger, latest_trade
 from tools.list_positions import _effective_stop_text, _normalize_state, _print_human
 from tools.trades_report import (
     _estimated_fees_pct,
@@ -30,11 +30,13 @@ from tools.trades_report import (
     _filter,
     _net_pnl,
     _parse_args,
+    _partition_records,
     _print_detail_sections,
     _print_inline_counts,
     _print_summary,
     _print_trades,
     _slots_full_pct,
+    _fmt_profit_factor,
 )
 
 
@@ -297,6 +299,93 @@ class BotExitOnlyTests(unittest.TestCase):
             self.assertAlmostEqual(rejected[0]["worst_open_pnl_pct"], 1.0)
             self.assertFalse(rejected[0]["phantom_created"])
 
+    def test_phantom_never_uses_exchange_slot_balance_or_reserved_quantity(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config = _config()
+            config["capital"] = {"operational_balance_usdt": 100, "trade_size_pct": 20, "max_open_positions": 1}
+            config["entry"] = {"entry_spacing_atr": 0, "max_entries_per_candle": 1}
+            config["instrumentation"] = {
+                "enabled": True,
+                "phantoms": {"enabled": True, "max_open_positions": 1, "max_age_hours": 72},
+            }
+            root = Path(tmp)
+            logger = JsonlLogger(root, config)
+            state = StateManager(root)
+            client = FakeClient()
+            ledger = TradeLedger(root)
+            telemetry = FakeTelemetryWriter()
+            registry = PositionRegistry(
+                config,
+                client,  # type: ignore[arg-type]
+                logger,
+                CycleManager(root, config, logger, state),
+                state,
+                ledger,
+                telemetry,  # type: ignore[arg-type]
+            )
+            registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", 1, 0.2, "1m", 14))
+            registry.open_pair(EntrySignal("SOLUSDT", 101, "ts", 2, 0.2, "1m", 14))
+            registry.open_pair(EntrySignal("SOLUSDT", 102, "ts", 3, 0.2, "1m", 14))
+
+            self.assertEqual(len(client.buys), 1)
+            self.assertEqual(registry.open_pair_count, 1)
+            self.assertEqual(len(registry.phantoms), 1)
+            self.assertAlmostEqual(registry.reserved_qty(), 1.0)
+            self.assertFalse(registry.phantoms[0].hard_stop_enabled)
+            rejected = [event for stream, event in telemetry.events if stream == "rejected_signal"]
+            self.assertTrue(rejected[0]["phantom_created"])
+            self.assertFalse(rejected[1]["phantom_created"])
+
+            registry.phantoms[0].open_ts = "2026-07-10T00:00:00+00:00"
+            registry.on_tick(101.0, market_ts="2026-07-14T00:00:00+00:00")
+
+            self.assertEqual(client.sells, [])
+            self.assertEqual(registry.open_pair_count, 1)
+            self.assertAlmostEqual(registry.reserved_qty(), 1.0)
+            self.assertEqual(registry.phantoms, [])
+            phantom_records = [record for record in ledger.load() if record.get("phantom")]
+            self.assertEqual(len(phantom_records), 1)
+            self.assertEqual(phantom_records[0]["exit_reason"], "PHANTOM_EXPIRED")
+            self.assertEqual(phantom_records[0]["exit_price_source"], "phantom_tick")
+
+    def test_phantom_state_restores_separately_from_real_positions(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config = _config()
+            config["capital"] = {"operational_balance_usdt": 100, "trade_size_pct": 20, "max_open_positions": 1}
+            config["entry"] = {"entry_spacing_atr": 0, "max_entries_per_candle": 1}
+            config["instrumentation"] = {
+                "enabled": True,
+                "phantoms": {"enabled": True, "max_open_positions": 5, "max_age_hours": 72},
+            }
+            root = Path(tmp)
+            logger = JsonlLogger(root, config)
+            state = StateManager(root)
+            client = FakeClient()
+            registry = PositionRegistry(
+                config,
+                client,  # type: ignore[arg-type]
+                logger,
+                CycleManager(root, config, logger, state),
+                state,
+                TradeLedger(root),
+            )
+            registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", 1, 0.2, "1m", 14))
+            registry.open_pair(EntrySignal("SOLUSDT", 101, "ts", 2, 0.2, "1m", 14))
+
+            restored = PositionRegistry(
+                config,
+                client,  # type: ignore[arg-type]
+                logger,
+                CycleManager(root, config, logger, state),
+                state,
+                TradeLedger(root),
+            )
+
+            self.assertEqual(restored.open_pair_count, 1)
+            self.assertEqual(len(restored.positions), 1)
+            self.assertEqual(len(restored.phantoms), 1)
+            self.assertTrue(restored.phantoms[0].phantom)
+
     def test_hourly_snapshot_is_emitted_on_first_tick_of_new_hour(self) -> None:
         with TemporaryDirectory() as tmp:
             config = _config()
@@ -344,6 +433,15 @@ class BotExitOnlyTests(unittest.TestCase):
             self.assertEqual(len(ledger.load()), 1)
             self.assertAlmostEqual(ledger.load()[0]["trough_price"], 99.0)
             self.assertEqual(ledger.load()[0]["time_to_trough_seconds"], 300)
+
+    def test_latest_trade_ignores_phantoms_by_default(self) -> None:
+        records = [
+            {"pair_id": "real", "closed_at": "2026-07-01T10:00:00+00:00"},
+            {"pair_id": "phantom", "closed_at": "2026-07-01T11:00:00+00:00", "phantom": True},
+        ]
+
+        self.assertEqual(latest_trade(records)["pair_id"], "real")
+        self.assertEqual(latest_trade(records, include_phantoms=True)["pair_id"], "phantom")
 
     def test_trades_report_filters_since_and_strategy(self) -> None:
         records = [
@@ -435,6 +533,19 @@ class BotExitOnlyTests(unittest.TestCase):
         self.assertIn("gross: total=+0.50% | avg/trade=+0.50%", text)
         self.assertIn("net: total=+0.30% | avg/trade=+0.30%", text)
         self.assertIn("Exit reasons: BREAKEVEN=1 | HARD_STOP=2", text)
+
+    def test_trades_report_excludes_phantoms_and_calculates_profit_factor(self) -> None:
+        real, phantoms = _partition_records(
+            [
+                {"pair_id": "real", "net_pnl_pct": 1.0},
+                {"pair_id": "phantom", "phantom": True, "net_pnl_pct": 10.0},
+            ]
+        )
+
+        self.assertEqual([record["pair_id"] for record in real], ["real"])
+        self.assertEqual([record["pair_id"] for record in phantoms], ["phantom"])
+        self.assertEqual(_fmt_profit_factor([1.0, 2.0, -1.0]), "3.00")
+        self.assertEqual(_fmt_profit_factor([1.0]), "inf")
 
     def test_list_positions_omits_a_in_bot_exit_only(self) -> None:
         config = _config()

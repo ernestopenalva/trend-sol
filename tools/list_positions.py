@@ -18,7 +18,11 @@ from src.trade_ledger import TradeLedger, latest_trade
 
 def main() -> None:
     args = _parse_args()
-    state = StateManager(PROJECT_ROOT).load_open_positions()
+    state = [
+        item
+        for item in StateManager(PROJECT_ROOT).load_open_positions()
+        if not bool(item.get("phantom", False))
+    ]
     config = _load_config()
     price = args.price if args.price is not None else _fetch_current_price(config)
     if not state:
@@ -64,6 +68,8 @@ def _load_config() -> Dict[str, Any]:
 def _normalize_state(state: List[Dict[str, Any]], current_price: Optional[float], config: Dict[str, Any]) -> Dict[str, Any]:
     pairs: Dict[str, Dict[str, Any]] = {}
     for item in sorted(state, key=lambda row: (row.get("pair_id", ""), row.get("label", ""))):
+        if bool(item.get("phantom", False)):
+            continue
         pair_id = str(item.get("pair_id", ""))
         pair = pairs.setdefault(pair_id, {"pair_id": pair_id, "positions": {}})
         position = _normalize_position(item, current_price, config)

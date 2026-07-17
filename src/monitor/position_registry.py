@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -9,6 +10,7 @@ from src.logging_utils import JsonlLogger, now_iso
 from src.monitor.cycle_manager import CycleManager
 from src.monitor.entry_engine import EntrySignal
 from src.position.bot_full_engine import BotFullExitPosition
+from src.position.phantom_execution import PhantomExecutionClient
 from src.position.position_base import PositionBase
 from src.position.server_simple_trail import ServerSimpleTrailPosition
 from src.state_manager import StateManager
@@ -36,6 +38,7 @@ class PositionRegistry:
         self.trade_ledger = trade_ledger
         self.telemetry_writer = telemetry_writer
         self.positions: List[PositionBase] = []
+        self.phantoms: List[BotFullExitPosition] = []
         self.entries_paused = False
         self.review_required = False
         self._blocked_candles: set[int] = set()
@@ -183,12 +186,35 @@ class PositionRegistry:
             self._purge_closed_bot_positions()
         else:
             self._purge_closed_pairs()
+        self._process_phantoms(price, observed_at)
         self._record_hourly_snapshots(price, observed_at)
         self.save_state()
 
     def load_state(self) -> None:
         restored: List[PositionBase] = []
+        restored_phantoms: List[BotFullExitPosition] = []
         for item in self.state_manager.load_open_positions():
+            if bool(item.get("phantom", False)):
+                try:
+                    if not self._phantoms_enabled or item.get("status") != "OPEN":
+                        continue
+                    phantom_client = PhantomExecutionClient()
+                    phantom = BotFullExitPosition.from_state(
+                        item,
+                        self._phantom_exit_config(),
+                        phantom_client,  # type: ignore[arg-type]
+                        self.logger,
+                    )
+                    phantom.phantom = True
+                    phantom.phantom_id = str(item.get("phantom_id") or phantom.pair_id)
+                    restored_phantoms.append(phantom)
+                except Exception as exc:
+                    self.logger.system(
+                        "phantom_restore_failed",
+                        phantom_id=item.get("phantom_id"),
+                        error=str(exc),
+                    )
+                continue
             try:
                 if self._bot_exit_only and item.get("label") == "A":
                     continue
@@ -215,11 +241,14 @@ class PositionRegistry:
                 self.review_required = True
                 self.logger.system("position_restore_failed", pair_id=item.get("pair_id"), error=str(exc))
         self.positions = restored
+        self.phantoms = restored_phantoms
         self._last_entry_candle_open_time = _latest_candle_open_time(restored)
         self._entries_by_candle = _entries_by_candle(restored)
         self._next_position_id = _next_position_id(restored)
         if restored:
             self.logger.system("positions_restored", positions=len(restored), open_pairs=self.open_pair_count)
+        if restored_phantoms:
+            self.logger.system("phantoms_restored", phantoms=len(restored_phantoms))
         for position in restored:
             if isinstance(position, BotFullExitPosition) and position.hard_stop_applied_on_restore:
                 self.logger.system(
@@ -232,7 +261,9 @@ class PositionRegistry:
                 )
 
     def save_state(self) -> None:
-        self.state_manager.save_open_positions([position.to_state() for position in self.positions])
+        real_state = [position.to_state() for position in self.positions]
+        phantom_state = [position.to_state() for position in self.phantoms if position.status == "OPEN"]
+        self.state_manager.save_open_positions([*real_state, *phantom_state])
 
     def reconcile_with_binance(self) -> None:
         try:
@@ -419,8 +450,8 @@ class PositionRegistry:
                 **self._last_admission_details,
             }
         )
-        if reason == "BLOCKED_MAX_POSITIONS":
-            self._record_rejected_signal(signal, reason)
+        phantom_id = self._open_phantom(signal) if reason == "BLOCKED_MAX_POSITIONS" else None
+        self._record_rejected_signal(signal, reason, phantom_id)
 
     def _record_trough_event(self, position: BotFullExitPosition) -> None:
         event = position.last_trough_event
@@ -439,6 +470,8 @@ class PositionRegistry:
                 "trough_pct": event.get("trough_pct"),
                 "trough_atr": event.get("trough_atr"),
                 "trough_tracking_complete": position.trough_tracking_complete,
+                "phantom": position.phantom,
+                "phantom_id": position.phantom_id,
             },
         )
 
@@ -458,8 +491,9 @@ class PositionRegistry:
             for position in self.positions
             if isinstance(position, BotFullExitPosition) and position.status == "OPEN"
         ]
+        snapshot_positions = [*open_positions, *(position for position in self.phantoms if position.status == "OPEN")]
         open_count = self.open_pair_count
-        for position in open_positions:
+        for position in snapshot_positions:
             self._submit_telemetry(
                 "position_snapshot",
                 {
@@ -485,10 +519,17 @@ class PositionRegistry:
                     "hard_stop_applied_on_restore": position.hard_stop_applied_on_restore,
                     "open_positions": open_count,
                     "max_open_positions": self.max_open_positions,
+                    "phantom": position.phantom,
+                    "phantom_id": position.phantom_id,
                 },
             )
 
-    def _record_rejected_signal(self, signal: EntrySignal, reason: str) -> None:
+    def _record_rejected_signal(
+        self,
+        signal: EntrySignal,
+        reason: str,
+        phantom_id: Optional[str],
+    ) -> None:
         pnl_values = [
             position.pnl_pct(signal.price)
             for position in self.positions
@@ -508,10 +549,148 @@ class PositionRegistry:
                 "open_positions": self.open_pair_count,
                 "max_open_positions": self.max_open_positions,
                 "worst_open_pnl_pct": min(pnl_values) if pnl_values else None,
-                "phantom_created": False,
-                "phantom_id": None,
+                "phantom_created": phantom_id is not None,
+                "phantom_id": phantom_id,
             },
         )
+
+    @property
+    def _phantoms_enabled(self) -> bool:
+        instrumentation = self.config.get("instrumentation")
+        if not isinstance(instrumentation, dict) or not bool(instrumentation.get("enabled", False)):
+            return False
+        phantoms = instrumentation.get("phantoms")
+        return isinstance(phantoms, dict) and bool(phantoms.get("enabled", False))
+
+    def _phantom_settings(self) -> Dict[str, Any]:
+        instrumentation = self.config.get("instrumentation")
+        if not isinstance(instrumentation, dict):
+            return {}
+        phantoms = instrumentation.get("phantoms")
+        return phantoms if isinstance(phantoms, dict) else {}
+
+    def _phantom_exit_config(self) -> Dict[str, Any]:
+        config = deepcopy(self._bot_exit_config())
+        hard_stop = config.get("hard_stop")
+        if not isinstance(hard_stop, dict):
+            hard_stop = {}
+            config["hard_stop"] = hard_stop
+        hard_stop["enabled"] = False
+        return config
+
+    def _open_phantom(self, signal: EntrySignal) -> Optional[str]:
+        if not self._phantoms_enabled:
+            return None
+        settings = self._phantom_settings()
+        cap = int(settings["max_open_positions"])
+        if len([position for position in self.phantoms if position.status == "OPEN"]) >= cap:
+            self.logger.system("phantom_cap_reached", cap=cap, signal_price=signal.price)
+            return None
+        try:
+            phantom_id = f"ph-{uuid.uuid4().hex[:12]}"
+            notional = (
+                float(self.config["capital"]["operational_balance_usdt"])
+                * float(self.config["capital"]["trade_size_pct"])
+                / 100
+            )
+            quantity = notional / float(signal.price)
+            phantom_client = PhantomExecutionClient()
+            phantom = BotFullExitPosition(
+                pair_id=phantom_id,
+                symbol=self.symbol,
+                entry_price=float(signal.price),
+                quantity=quantity,
+                entry_order={"phantom": True},
+                open_ts=now_iso(),
+                config=self._phantom_exit_config(),
+                client=phantom_client,  # type: ignore[arg-type]
+                logger=self.logger,
+                entry_atr=signal.entry_atr,
+                atr_timeframe=signal.atr_timeframe,
+                atr_period=signal.atr_period,
+                source_candle_open_time=signal.source_candle_open_time,
+                position_notional_usdt=notional,
+            )
+            phantom.phantom = True
+            phantom.phantom_id = phantom_id
+            self.phantoms.append(phantom)
+            self.logger.trade(
+                phantom._trade_event(
+                    "OPEN",
+                    phantom.entry_price,
+                    0.0,
+                    None,
+                    price_source="rejected_signal",
+                )
+            )
+            self.logger.system(
+                "phantom_opened",
+                phantom_id=phantom_id,
+                signal_price=signal.price,
+                source_candle_open_time=signal.source_candle_open_time,
+            )
+            self.save_state()
+            return phantom_id
+        except Exception as exc:
+            self.logger.system("phantom_open_failed", signal_price=signal.price, error=str(exc))
+            return None
+
+    def _process_phantoms(self, price: float, observed_at: str) -> None:
+        if not self.phantoms:
+            return
+        settings = self._phantom_settings()
+        max_age_hours = float(settings["max_age_hours"])
+        keep: List[BotFullExitPosition] = []
+        for position in list(self.phantoms):
+            try:
+                client = position.client
+                if not isinstance(client, PhantomExecutionClient):
+                    raise RuntimeError("phantom position has a non-phantom execution client")
+                client.set_price(price)
+                event = position.on_tick(price, market_ts=observed_at)
+                self._record_trough_event(position)
+                if event is None and position.status == "OPEN" and max_age_hours > 0:
+                    age_minutes = _age_minutes(position.open_ts, observed_at)
+                    if age_minutes is not None and age_minutes >= max_age_hours * 60:
+                        position.exit_trigger_price = price
+                        position.exit_trigger_price_source = "aggTrade"
+                        position.exit_slippage_pct = None
+                        position.mark_closed(
+                            price,
+                            "PHANTOM_EXPIRED",
+                            observed_at,
+                            {"phantom": True},
+                        )
+                        event = position._trade_event(
+                            "CLOSE",
+                            price,
+                            position.pnl_pct(price),
+                            "PHANTOM_EXPIRED",
+                            price_source="phantom_tick",
+                            trigger_price=price,
+                            trigger_price_source="aggTrade",
+                        )
+                        self.logger.trade(event)
+                if position.status == "CLOSED":
+                    if self.trade_ledger:
+                        self.trade_ledger.append_closed_phantom_trade(position, self.config)
+                    self.logger.system(
+                        "phantom_closed",
+                        phantom_id=position.phantom_id,
+                        reason=position.exit_reason,
+                        exit_price=position.exit_price,
+                    )
+                else:
+                    keep.append(position)
+            except Exception as exc:
+                keep.append(position)
+                self.logger.system(
+                    "phantom_tick_failed",
+                    phantom_id=position.phantom_id,
+                    price=price,
+                    error=str(exc),
+                )
+        self.phantoms = keep
 
     def _submit_telemetry(self, stream: str, event: Dict[str, Any]) -> None:
         if not self.telemetry_writer:

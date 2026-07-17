@@ -150,6 +150,10 @@ logging:
 instrumentation:
   enabled: true
   queue_max_size: 10000
+  phantoms:
+    enabled: true
+    max_open_positions: 5
+    max_age_hours: 72
   trough_events_file: "data/telemetry/trough_events.jsonl"
   position_snapshots_file: "data/telemetry/position_snapshots.jsonl"
   rejected_signals_file: "data/telemetry/rejected_signals.jsonl"

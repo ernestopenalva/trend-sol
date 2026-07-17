@@ -111,6 +111,8 @@ class BotFullExitPosition(PositionBase):
         self.trough_tracking_complete = True
         self.trough_tracking_started_at = self.open_ts
         self.last_trough_event: Optional[Dict[str, Any]] = None
+        self.phantom = False
+        self.phantom_id: Optional[str] = None
 
     @classmethod
     def from_state(
@@ -184,6 +186,8 @@ class BotFullExitPosition(PositionBase):
                 position.hard_stop_enabled and not bool(state.get("hard_stop_enabled", False)),
             )
         )
+        position.phantom = bool(state.get("phantom", False))
+        position.phantom_id = str(state["phantom_id"]) if state.get("phantom_id") else None
         position._refresh_effective_stop()
         return position
 
@@ -271,13 +275,14 @@ class BotFullExitPosition(PositionBase):
         self.exit_trigger_price_source = "aggTrade"
         self.exit_slippage_pct = _slippage_pct(executed_price, trigger_stop)
         self.mark_closed(executed_price, reason, ts, order)
+        exit_price_source = "phantom_tick" if self.phantom else "market_fill"
         event = self._trade_event(
             "CLOSE",
             executed_price,
             self.pnl_pct(executed_price),
             reason,
             order,
-            price_source="market_fill",
+            price_source=exit_price_source,
             trigger_price=trigger_price,
             trigger_price_source="aggTrade",
         )
@@ -304,6 +309,8 @@ class BotFullExitPosition(PositionBase):
             "position_id": self.position_id,
             "position": self.label,
             "position_notional_usdt": self.position_notional_usdt,
+            "phantom": self.phantom,
+            "phantom_id": self.phantom_id,
             "engine": self.engine,
             "event": event,
             "price": price,
@@ -586,6 +593,8 @@ class BotFullExitPosition(PositionBase):
                 "trough_at": self.trough_at,
                 "trough_tracking_complete": self.trough_tracking_complete,
                 "trough_tracking_started_at": self.trough_tracking_started_at,
+                "phantom": self.phantom,
+                "phantom_id": self.phantom_id,
             }
         )
         return state

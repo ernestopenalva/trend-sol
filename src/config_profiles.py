@@ -27,6 +27,7 @@ def effective_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         f"{symbol}@kline_{trend_timeframe}",
     ]
     _validate_hard_stop(config)
+    _validate_phantoms(config)
     return config
 
 
@@ -42,3 +43,22 @@ def _validate_hard_stop(config: Dict[str, Any]) -> None:
         raise ValueError("risk.hard_stop.stop_pct must be greater than 0 and less than 100") from None
     if isinstance(value, bool) or stop_pct <= 0 or stop_pct >= 100:
         raise ValueError("risk.hard_stop.stop_pct must be greater than 0 and less than 100")
+
+
+def _validate_phantoms(config: Dict[str, Any]) -> None:
+    instrumentation = config.get("instrumentation")
+    if not isinstance(instrumentation, dict) or not bool(instrumentation.get("enabled", False)):
+        return
+    phantoms = instrumentation.get("phantoms")
+    if not isinstance(phantoms, dict) or not bool(phantoms.get("enabled", False)):
+        return
+    max_open = phantoms.get("max_open_positions")
+    max_age = phantoms.get("max_age_hours")
+    if isinstance(max_open, bool) or not isinstance(max_open, int) or max_open <= 0:
+        raise ValueError("instrumentation.phantoms.max_open_positions must be a positive integer")
+    try:
+        max_age_value = float(max_age)
+    except (TypeError, ValueError):
+        raise ValueError("instrumentation.phantoms.max_age_hours must be greater than 0") from None
+    if isinstance(max_age, bool) or max_age_value <= 0:
+        raise ValueError("instrumentation.phantoms.max_age_hours must be greater than 0")

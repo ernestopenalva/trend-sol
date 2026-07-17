@@ -13,13 +13,24 @@ class TradeLedger:
         self.path = project_root / "data" / "trades" / "trades_B.jsonl"
 
     def append_closed_bot_trade(self, position: BotFullExitPosition, config: Dict[str, Any]) -> bool:
+        return self._append_closed(position, config, "BOT_EXIT")
+
+    def append_closed_phantom_trade(self, position: BotFullExitPosition, config: Dict[str, Any]) -> bool:
+        return self._append_closed(position, config, "PHANTOM")
+
+    def _append_closed(
+        self,
+        position: BotFullExitPosition,
+        config: Dict[str, Any],
+        position_type: str,
+    ) -> bool:
         if position.status != "CLOSED":
             return False
-        if self._contains(position.pair_id, "BOT_EXIT"):
+        if self._contains(position.pair_id, position_type):
             return False
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(self._record(position, config), ensure_ascii=False) + "\n")
+            handle.write(json.dumps(self._record(position, config, position_type), ensure_ascii=False) + "\n")
         return True
 
     def load(self) -> list[Dict[str, Any]]:
@@ -42,28 +53,37 @@ class TradeLedger:
             for record in self.load()
         )
 
-    def _record(self, position: BotFullExitPosition, config: Dict[str, Any]) -> Dict[str, Any]:
+    def _record(
+        self,
+        position: BotFullExitPosition,
+        config: Dict[str, Any],
+        position_type: str = "BOT_EXIT",
+    ) -> Dict[str, Any]:
         entry_price = _float_or_none(position.entry_price)
         exit_price = _float_or_none(position.exit_price)
         qty = _float_or_none(position.quantity)
         realized_pct = position.pnl_pct(exit_price) if exit_price is not None else None
         estimated_fees_pct = _estimated_fees_pct(config)
         net_pct = realized_pct - estimated_fees_pct if realized_pct is not None else None
+        phantom = position_type == "PHANTOM" or bool(getattr(position, "phantom", False))
         return {
             "run_id": config.get("run_id"),
             "strategy_version": config.get("strategy_version"),
             "profile": config.get("active_profile"),
             "pair_id": position.pair_id,
             "position_id": position.position_id,
+            "source_candle_open_time": position.source_candle_open_time,
+            "phantom": phantom,
+            "phantom_id": getattr(position, "phantom_id", None),
             "symbol": position.symbol,
-            "position_type": "BOT_EXIT",
+            "position_type": position_type,
             "position_notional_usdt": _float_or_none(position.position_notional_usdt),
             "opened_at": position.open_ts,
             "closed_at": position.close_ts,
             "age_seconds": _age_seconds(position.open_ts, position.close_ts),
             "entry_price": entry_price,
             "exit_price": exit_price,
-            "exit_price_source": "market_fill" if position.exit_order else None,
+            "exit_price_source": "phantom_tick" if phantom else ("market_fill" if position.exit_order else None),
             "exit_trigger_price": _float_or_none(getattr(position, "exit_trigger_price", None)),
             "exit_trigger_price_source": getattr(position, "exit_trigger_price_source", None),
             "qty": qty,
@@ -100,10 +120,17 @@ class TradeLedger:
         }
 
 
-def latest_trade(records: Iterable[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def latest_trade(
+    records: Iterable[Dict[str, Any]],
+    include_phantoms: bool = False,
+) -> Optional[Dict[str, Any]]:
     latest = None
     latest_ts = None
     for record in records:
+        if not include_phantoms and (
+            bool(record.get("phantom", False)) or str(record.get("position_type") or "") == "PHANTOM"
+        ):
+            continue
         closed = _parse_ts(record.get("closed_at"))
         if closed is not None and (latest_ts is None or closed > latest_ts):
             latest = record

@@ -25,12 +25,23 @@ def main() -> None:
     args = _parse_args()
     config = _load_config()
     records = TradeLedger(PROJECT_ROOT).load()
-    filtered = _filter(records, args)
+    selected = _filter(records, args)
+    filtered, phantoms = _partition_records(selected)
     if args.csv:
-        _write_csv(filtered, Path(args.csv))
+        _write_csv([*filtered, *phantoms] if args.phantoms else filtered, Path(args.csv))
         print(f"CSV written: {args.csv}")
         return
     _print_report(filtered, args, config)
+    if args.phantoms:
+        print()
+        print("PHANTOMS | synthetic rejected-signal positions")
+        print("Execution source: aggTrade tick; no exchange order, slot, balance or reserved quantity.")
+        print()
+        _print_summary(phantoms, config)
+        print()
+        _print_inline_counts("Exit reasons", Counter(_exit_reason(record) for record in phantoms))
+        print()
+        _print_trades(phantoms, config)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -40,6 +51,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--strategy", help="Filtra por strategy_version.")
     parser.add_argument("--run-id", help="Filtra por run_id.")
     parser.add_argument("--detail", action="store_true", help="Mostra campos tecnicos completos.")
+    parser.add_argument(
+        "--phantoms",
+        action="store_true",
+        help="Mostra fantasmas em secao separada; eles nunca entram nos agregados reais.",
+    )
     parser.add_argument("--csv", help="Exporta CSV para o caminho informado.")
     return parser.parse_args()
 
@@ -108,14 +124,16 @@ def _print_summary(records: list[Dict[str, Any]], config: Dict[str, Any]) -> Non
         f"avg/trade={_fmt_signed_pct(sum(pnls) / len(pnls) if pnls else 0)} | "
         f"best={_fmt_signed_pct(max(pnls) if pnls else 0)} | "
         f"worst={_fmt_signed_pct(min(pnls) if pnls else 0)} | "
-        f"winrate={(len(wins) / len(pnls) * 100) if pnls else 0:.1f}%"
+        f"winrate={(len(wins) / len(pnls) * 100) if pnls else 0:.1f}% | "
+        f"profit factor={_fmt_profit_factor(pnls)}"
     )
     print(
         f"  net: total={_fmt_signed_pct(net_total)} | "
         f"avg/trade={_fmt_signed_pct(sum(net_pnls) / len(net_pnls) if net_pnls else 0)} | "
         f"best={_fmt_signed_pct(max(net_pnls) if net_pnls else 0)} | "
         f"worst={_fmt_signed_pct(min(net_pnls) if net_pnls else 0)} | "
-        f"winrate={(len(net_wins) / len(net_pnls) * 100) if net_pnls else 0:.1f}%"
+        f"winrate={(len(net_wins) / len(net_pnls) * 100) if net_pnls else 0:.1f}% | "
+        f"profit factor={_fmt_profit_factor(net_pnls)}"
     )
 
 
@@ -435,6 +453,27 @@ def _exit_reason(record: Dict[str, Any]) -> str:
     if reason == "REVIEW_STOP" and str(record.get("final_step") or "") == "BE":
         return "BREAKEVEN"
     return reason
+
+
+def _is_phantom(record: Dict[str, Any]) -> bool:
+    return bool(record.get("phantom", False)) or str(record.get("position_type") or "") == "PHANTOM"
+
+
+def _partition_records(records: Iterable[Dict[str, Any]]) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
+    real: list[Dict[str, Any]] = []
+    phantoms: list[Dict[str, Any]] = []
+    for record in records:
+        (phantoms if _is_phantom(record) else real).append(record)
+    return real, phantoms
+
+
+def _fmt_profit_factor(values: Iterable[float]) -> str:
+    numbers = list(values)
+    gains = sum(value for value in numbers if value > 0)
+    losses = abs(sum(value for value in numbers if value < 0))
+    if losses == 0:
+        return "inf" if gains > 0 else "n/a"
+    return f"{gains / losses:.2f}"
 
 
 def _parse_since(value: Optional[str]) -> Optional[datetime]:

@@ -58,6 +58,16 @@ class ConfigProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "hard_stop.stop_pct"):
             effective_config(config)
 
+    def test_enabled_phantoms_require_explicit_positive_limits(self) -> None:
+        config = self.base_config()
+        config["instrumentation"] = {
+            "enabled": True,
+            "phantoms": {"enabled": True, "max_open_positions": 0, "max_age_hours": 72},
+        }
+
+        with self.assertRaisesRegex(ValueError, "phantoms.max_open_positions"):
+            effective_config(config)
+
 
 if __name__ == "__main__":
     unittest.main()
