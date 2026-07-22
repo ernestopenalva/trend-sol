@@ -1,7 +1,7 @@
 symbol: SOLUSDT
 active_profile: intraday
 position_mode: bot_exit_only
-strategy_version: "b_atr_v1.2"
+strategy_version: "b_atr_v1.3"
 
 fees:
   enabled: true
@@ -110,7 +110,7 @@ risk:
   # BE, profit lock e trailing usam entry_atr, nao ATR recalculado ao vivo.
   hard_stop:
     enabled: true
-    stop_pct: 3.0
+    stop_pct: 2.0
   review_stop_pct: 30
   breakeven:
     mode: atr
@@ -118,6 +118,10 @@ risk:
     offset_atr: 0.1
   profit_lock:
     mode: atr
+    net_floor_shadow:
+      enabled: true
+      net_margin_pct: 0.05
+      activation_buffer_atr: 0.5
     steps:
       - trigger_atr: 5
         lock_atr: 1.5

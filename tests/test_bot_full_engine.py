@@ -86,6 +86,93 @@ class BotFullEngineTests(unittest.TestCase):
         self.assertEqual(position.stop_type, "profit_lock")
         self.assertAlmostEqual(position.effective_stop, 100.30)
 
+    def test_profit_lock_net_floor_shadow_observes_without_changing_live_stop(self) -> None:
+        client = FakeClient()
+        position = self._atr_position(
+            entry_atr=0.05,
+            client=client,
+            config_overrides={
+                "fees": {"enabled": True, "taker_fee_pct": 0.10, "use_bnb_discount": False},
+                "breakeven": {"mode": "atr", "trigger_atr": 100, "offset_atr": 0.1},
+                "profit_lock": {
+                    "mode": "atr",
+                    "net_floor_shadow": {
+                        "enabled": True,
+                        "net_margin_pct": 0.05,
+                        "activation_buffer_atr": 0.5,
+                    },
+                    "steps": [
+                        {"trigger_atr": 5, "lock_atr": 1.5},
+                        {"trigger_atr": 8, "lock_atr": 3},
+                        {"trigger_atr": 12, "lock_atr": 6},
+                    ],
+                },
+            },
+        )
+
+        self.assertIsNone(position.on_tick(100.26))
+        self.assertAlmostEqual(position.profit_lock_stop or 0, 100.075)
+        self.assertEqual(position.pl_shadow_status, "PENDING")
+        self.assertAlmostEqual(position.effective_stop, 100.075)
+
+        self.assertIsNone(position.on_tick(100.28, market_ts="2026-07-04T00:01:00+00:00"))
+        self.assertEqual(position.pl_shadow_status, "ACTIVE")
+        self.assertEqual(position.pl_shadow_step, "PL1")
+        self.assertAlmostEqual(position.pl_shadow_raw_stop or 0, 100.075)
+        self.assertAlmostEqual(position.pl_shadow_net_floor or 0, 100.25)
+        self.assertAlmostEqual(position.pl_shadow_stop or 0, 100.25)
+        self.assertAlmostEqual(position.pl_shadow_activation_price or 0, 100.275)
+        self.assertTrue(position.pl_shadow_floor_absorbed)
+        self.assertAlmostEqual(position.effective_stop, 100.075)
+        self.assertEqual(client.sells, [])
+
+        self.assertIsNone(position.on_tick(100.24, market_ts="2026-07-04T00:02:00+00:00"))
+        self.assertEqual(position.pl_shadow_status, "CLOSED")
+        self.assertAlmostEqual(position.pl_shadow_close_price or 0, 100.24)
+        self.assertEqual(position.status, "OPEN")
+        self.assertEqual(client.sells, [])
+
+        restored = BotFullExitPosition.from_state(
+            position.to_state(),
+            position.config,
+            position.client,
+            position.logger,
+        )
+        self.assertEqual(restored.pl_shadow_status, "CLOSED")
+        self.assertAlmostEqual(restored.pl_shadow_stop or 0, 100.25)
+
+    def test_profit_lock_shadow_applies_floor_to_all_steps(self) -> None:
+        position = self._atr_position(
+            entry_atr=0.05,
+            config_overrides={
+                "fees": {"enabled": True, "taker_fee_pct": 0.10, "use_bnb_discount": False},
+                "breakeven": {"mode": "atr", "trigger_atr": 100, "offset_atr": 0.1},
+                "profit_lock": {
+                    "mode": "atr",
+                    "net_floor_shadow": {
+                        "enabled": True,
+                        "net_margin_pct": 0.05,
+                        "activation_buffer_atr": 0.5,
+                    },
+                    "steps": [
+                        {"trigger_atr": 5, "lock_atr": 1.5},
+                        {"trigger_atr": 8, "lock_atr": 3},
+                        {"trigger_atr": 12, "lock_atr": 6},
+                    ],
+                },
+            },
+        )
+
+        self.assertIsNone(position.on_tick(100.41))
+        self.assertEqual(position.pl_shadow_step, "PL2")
+        self.assertAlmostEqual(position.pl_shadow_stop or 0, 100.25)
+        self.assertTrue(position.pl_shadow_floor_absorbed)
+
+        self.assertIsNone(position.on_tick(100.61))
+        self.assertEqual(position.pl_shadow_step, "PL3")
+        self.assertAlmostEqual(position.pl_shadow_stop or 0, 100.30)
+        self.assertFalse(position.pl_shadow_floor_absorbed)
+
     def test_atr_trailing_activates_at_trigger(self) -> None:
         position = self._atr_position()
 

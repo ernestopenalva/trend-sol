@@ -14,6 +14,17 @@ python main.py
 
 O monitor usa dados reais da Binance via WebSocket e executa ordens na Spot Testnet.
 
+## Risco e PL shadow
+
+O hard stop percentual e configurado em `risk.hard_stop`. O experimento
+`b_atr_v1.3` usa `2%` e mantem o desconto de BNB desativado.
+
+`risk.profit_lock.net_floor_shadow` calcula, para todos os degraus PL, um piso que
+cobre as duas taxas taker mais a margem liquida configurada. A ativacao tambem exige
+o buffer em ATR. Os estados `PENDING`, `ACTIVE` e `CLOSED` sao apenas observacionais:
+o shadow nunca altera o stop efetivo, envia ordem, ocupa slot ou reserva quantidade.
+Se o trade real fechar primeiro, o ledger marca o contrafactual como censurado.
+
 ## Logs
 
 - `logs/decisions.jsonl`: avaliacoes dos portoes de entrada.

@@ -83,6 +83,27 @@ class BotFullExitPosition(PositionBase):
             profit_lock_cfg.get("steps", config.get("profit_lock_atr", [])),
             key=lambda item: item["trigger_atr"],
         )
+        pl_shadow_cfg = (
+            profit_lock_cfg.get("net_floor_shadow")
+            if isinstance(profit_lock_cfg.get("net_floor_shadow"), dict)
+            else {}
+        )
+        self.pl_shadow_enabled = bool(pl_shadow_cfg.get("enabled", False))
+        self.pl_shadow_net_margin_pct = _float_or_zero(pl_shadow_cfg.get("net_margin_pct"))
+        self.pl_shadow_activation_buffer_atr = _float_or_zero(pl_shadow_cfg.get("activation_buffer_atr"))
+        self.pl_shadow_status = "PENDING" if self.pl_shadow_enabled else "DISABLED"
+        self.pl_shadow_applied_steps: set[str] = set()
+        self.pl_shadow_step: Optional[str] = None
+        self.pl_shadow_raw_stop: Optional[float] = None
+        self.pl_shadow_net_floor: Optional[float] = None
+        self.pl_shadow_stop: Optional[float] = None
+        self.pl_shadow_activation_price: Optional[float] = None
+        self.pl_shadow_floor_absorbed: Optional[bool] = None
+        self.pl_shadow_active_step: Optional[str] = None
+        self.pl_shadow_active_stop: Optional[float] = None
+        self.pl_shadow_activated_at: Optional[str] = None
+        self.pl_shadow_close_price: Optional[float] = None
+        self.pl_shadow_closed_at: Optional[str] = None
         self.applied_steps: set[str] = set()
         self.profit_lock_stop: Optional[float] = None
         trailing_cfg = config.get("trailing", {})
@@ -167,6 +188,29 @@ class BotFullExitPosition(PositionBase):
             "be_floor_absorbed_atr_stop", position.be_floor_absorbed_atr_stop
         )
         position.profit_lock_stop = _optional_float(state.get("profit_lock_stop", position.profit_lock_stop))
+        position.pl_shadow_status = str(state.get("pl_shadow_status", position.pl_shadow_status))
+        position.pl_shadow_applied_steps = {str(item) for item in state.get("pl_shadow_applied_steps", [])}
+        position.pl_shadow_step = state.get("pl_shadow_step", position.pl_shadow_step)
+        position.pl_shadow_raw_stop = _optional_float(state.get("pl_shadow_raw_stop", position.pl_shadow_raw_stop))
+        position.pl_shadow_net_floor = _optional_float(
+            state.get("pl_shadow_net_floor", position.pl_shadow_net_floor)
+        )
+        position.pl_shadow_stop = _optional_float(state.get("pl_shadow_stop", position.pl_shadow_stop))
+        position.pl_shadow_activation_price = _optional_float(
+            state.get("pl_shadow_activation_price", position.pl_shadow_activation_price)
+        )
+        position.pl_shadow_floor_absorbed = state.get(
+            "pl_shadow_floor_absorbed", position.pl_shadow_floor_absorbed
+        )
+        position.pl_shadow_active_step = state.get("pl_shadow_active_step", position.pl_shadow_active_step)
+        position.pl_shadow_active_stop = _optional_float(
+            state.get("pl_shadow_active_stop", position.pl_shadow_active_stop)
+        )
+        position.pl_shadow_activated_at = state.get("pl_shadow_activated_at", position.pl_shadow_activated_at)
+        position.pl_shadow_close_price = _optional_float(
+            state.get("pl_shadow_close_price", position.pl_shadow_close_price)
+        )
+        position.pl_shadow_closed_at = state.get("pl_shadow_closed_at", position.pl_shadow_closed_at)
         position.trailing_stop = _optional_float(state.get("trailing_stop", position.trailing_stop))
         position.effective_stop = float(state.get("effective_stop", state.get("stop_price", position.effective_stop)))
         position.stop_price = position.effective_stop
@@ -215,6 +259,7 @@ class BotFullExitPosition(PositionBase):
         pnl_pct = self.pnl_pct(price)
         pnl_atr = self.pnl_atr(price)
         self._apply_breakeven(pnl_pct, pnl_atr, price)
+        self._observe_profit_lock_shadow(price, pnl_pct, pnl_atr, market_ts or ts)
         for index, new_stop in self._profit_lock_candidates(pnl_pct, pnl_atr):
             step_key = f"{self.profit_lock_mode}:{index}"
             if step_key not in self.applied_steps:
@@ -339,6 +384,21 @@ class BotFullExitPosition(PositionBase):
             "be_floor_source": self.be_floor_source,
             "be_floor_absorbed_atr_stop": self.be_floor_absorbed_atr_stop,
             "profit_lock_stop": self.profit_lock_stop,
+            "pl_shadow_enabled": self.pl_shadow_enabled,
+            "pl_shadow_status": self.pl_shadow_status,
+            "pl_shadow_step": self.pl_shadow_step,
+            "pl_shadow_raw_stop": self.pl_shadow_raw_stop,
+            "pl_shadow_net_floor": self.pl_shadow_net_floor,
+            "pl_shadow_stop": self.pl_shadow_stop,
+            "pl_shadow_activation_price": self.pl_shadow_activation_price,
+            "pl_shadow_activation_buffer_atr": self.pl_shadow_activation_buffer_atr,
+            "pl_shadow_net_margin_pct": self.pl_shadow_net_margin_pct,
+            "pl_shadow_floor_absorbed": self.pl_shadow_floor_absorbed,
+            "pl_shadow_active_step": self.pl_shadow_active_step,
+            "pl_shadow_active_stop": self.pl_shadow_active_stop,
+            "pl_shadow_activated_at": self.pl_shadow_activated_at,
+            "pl_shadow_close_price": self.pl_shadow_close_price,
+            "pl_shadow_closed_at": self.pl_shadow_closed_at,
             "trailing_stop": self.trailing_stop,
             "effective_stop": self.effective_stop,
             "stop_hit": stop_hit,
@@ -419,6 +479,115 @@ class BotFullExitPosition(PositionBase):
             if _gte(pnl_pct, float(step["trigger_pct"])):
                 candidates.append((index, self.entry_price * (1 + float(step["stop_to_pct"]) / 100)))
         return candidates
+
+    def _observe_profit_lock_shadow(
+        self,
+        price: float,
+        pnl_pct: float,
+        pnl_atr: Optional[float],
+        market_ts: str,
+    ) -> None:
+        if not self.pl_shadow_enabled or self.pl_shadow_status == "CLOSED":
+            return
+        for plan in self._profit_lock_shadow_plans():
+            if _gte(price, float(plan["raw_trigger"])):
+                self.pl_shadow_step = str(plan["step"])
+                self.pl_shadow_raw_stop = float(plan["raw_stop"])
+                self.pl_shadow_net_floor = _optional_float(plan["net_floor"])
+                self.pl_shadow_stop = float(plan["stop"])
+                self.pl_shadow_activation_price = float(plan["activation_price"])
+                self.pl_shadow_floor_absorbed = bool(plan["floor_absorbed"])
+            step_key = str(plan["step_key"])
+            if step_key in self.pl_shadow_applied_steps:
+                continue
+            if not _gte(price, float(plan["activation_price"])):
+                continue
+            self.pl_shadow_applied_steps.add(step_key)
+            self.pl_shadow_status = "ACTIVE"
+            self.pl_shadow_active_step = str(plan["step"])
+            self.pl_shadow_active_stop = float(plan["stop"])
+            self.pl_shadow_activated_at = market_ts
+            self.logger.trade(
+                self._trade_event(
+                    event=f"PROFIT_LOCK_SHADOW_{self.profit_lock_mode.upper()}_{plan['index']}",
+                    price=price,
+                    pnl_pct=pnl_pct,
+                    exit_reason=None,
+                )
+            )
+
+        if self.pl_shadow_status != "ACTIVE" or self.pl_shadow_active_stop is None:
+            return
+        if price > self.pl_shadow_active_stop:
+            return
+        self.pl_shadow_status = "CLOSED"
+        self.pl_shadow_close_price = price
+        self.pl_shadow_closed_at = market_ts
+        self.logger.trade(
+            self._trade_event(
+                event="PROFIT_LOCK_SHADOW_CLOSE",
+                price=price,
+                pnl_pct=pnl_pct,
+                exit_reason=None,
+            )
+        )
+
+    def _profit_lock_shadow_plans(self) -> list[Dict[str, Any]]:
+        if not self.pl_shadow_enabled:
+            return []
+        net_floor = self._profit_lock_shadow_net_floor()
+        buffer_abs = (
+            self.pl_shadow_activation_buffer_atr * float(self.entry_atr)
+            if self._valid_entry_atr()
+            else 0.0
+        )
+        plans: list[Dict[str, Any]] = []
+        if self.profit_lock_mode == "atr":
+            if not self._valid_entry_atr():
+                return plans
+            for index, step in enumerate(self.profit_lock_atr_steps, start=1):
+                raw_stop = self.entry_price + float(step["lock_atr"]) * float(self.entry_atr)
+                raw_trigger = self.entry_price + float(step["trigger_atr"]) * float(self.entry_atr)
+                plans.append(self._profit_lock_shadow_plan(index, raw_stop, raw_trigger, net_floor, buffer_abs))
+            return plans
+
+        for index, step in enumerate(self.profit_lock_pct_steps, start=1):
+            raw_stop = self.entry_price * (1 + float(step["stop_to_pct"]) / 100)
+            raw_trigger = self.entry_price * (1 + float(step["trigger_pct"]) / 100)
+            plans.append(self._profit_lock_shadow_plan(index, raw_stop, raw_trigger, net_floor, buffer_abs))
+        return plans
+
+    def _profit_lock_shadow_plan(
+        self,
+        index: int,
+        raw_stop: float,
+        raw_trigger: float,
+        net_floor: Optional[float],
+        buffer_abs: float,
+    ) -> Dict[str, Any]:
+        stop = max(raw_stop, net_floor) if net_floor is not None else raw_stop
+        return {
+            "index": index,
+            "step": f"PL{index}",
+            "step_key": f"{self.profit_lock_mode}:{index}",
+            "raw_stop": raw_stop,
+            "raw_trigger": raw_trigger,
+            "net_floor": net_floor,
+            "stop": stop,
+            "activation_price": max(raw_trigger, stop + buffer_abs),
+            "floor_absorbed": bool(net_floor is not None and net_floor > raw_stop),
+        }
+
+    def _profit_lock_shadow_net_floor(self) -> Optional[float]:
+        fees = self.config.get("fees") if isinstance(self.config.get("fees"), dict) else {}
+        if not fees or not bool(fees.get("enabled", False)):
+            return None
+        taker_fee_pct = _float_or_zero(fees.get("taker_fee_pct"))
+        if bool(fees.get("use_bnb_discount", False)):
+            taker_fee_pct *= 0.75
+        return self.entry_price * (
+            1 + ((2 * taker_fee_pct + self.pl_shadow_net_margin_pct) / 100)
+        )
 
     def _apply_breakeven(self, pnl_pct: float, pnl_atr: Optional[float], price: float) -> None:
         plan = self._breakeven_plan()
@@ -580,6 +749,22 @@ class BotFullExitPosition(PositionBase):
                 "be_floor_source": self.be_floor_source,
                 "be_floor_absorbed_atr_stop": self.be_floor_absorbed_atr_stop,
                 "profit_lock_stop": self.profit_lock_stop,
+                "pl_shadow_enabled": self.pl_shadow_enabled,
+                "pl_shadow_status": self.pl_shadow_status,
+                "pl_shadow_applied_steps": sorted(self.pl_shadow_applied_steps),
+                "pl_shadow_step": self.pl_shadow_step,
+                "pl_shadow_raw_stop": self.pl_shadow_raw_stop,
+                "pl_shadow_net_floor": self.pl_shadow_net_floor,
+                "pl_shadow_stop": self.pl_shadow_stop,
+                "pl_shadow_activation_price": self.pl_shadow_activation_price,
+                "pl_shadow_activation_buffer_atr": self.pl_shadow_activation_buffer_atr,
+                "pl_shadow_net_margin_pct": self.pl_shadow_net_margin_pct,
+                "pl_shadow_floor_absorbed": self.pl_shadow_floor_absorbed,
+                "pl_shadow_active_step": self.pl_shadow_active_step,
+                "pl_shadow_active_stop": self.pl_shadow_active_stop,
+                "pl_shadow_activated_at": self.pl_shadow_activated_at,
+                "pl_shadow_close_price": self.pl_shadow_close_price,
+                "pl_shadow_closed_at": self.pl_shadow_closed_at,
                 "trailing_stop": self.trailing_stop,
                 "effective_stop": self.effective_stop,
                 "stop_type": self.stop_type,

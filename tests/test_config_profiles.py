@@ -68,6 +68,21 @@ class ConfigProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "phantoms.max_open_positions"):
             effective_config(config)
 
+    def test_profit_lock_shadow_requires_non_negative_parameters(self) -> None:
+        config = self.base_config()
+        config["risk"] = {
+            "profit_lock": {
+                "net_floor_shadow": {
+                    "enabled": True,
+                    "net_margin_pct": 0.05,
+                    "activation_buffer_atr": -0.5,
+                }
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "net_floor_shadow.activation_buffer_atr"):
+            effective_config(config)
+
 
 if __name__ == "__main__":
     unittest.main()

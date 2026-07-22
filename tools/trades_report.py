@@ -87,6 +87,8 @@ def _print_report(records: list[Dict[str, Any]], args: argparse.Namespace, confi
     print()
     _print_inline_counts("Exit reasons", Counter(_exit_reason(record) for record in records))
     print()
+    _print_exit_reason_breakdown(records, config)
+    print()
     if args.detail:
         _print_detail_sections(records)
         print()
@@ -182,6 +184,27 @@ def _print_inline_counts(title: str, counts: Counter[str]) -> None:
     print(f"{title}: " + " | ".join(f"{key}={value}" for key, value in sorted(values.items())))
 
 
+def _print_exit_reason_breakdown(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
+    print("By exit reason:")
+    print(f"{'reason':14} {'trades':>6} {'gross':>9} {'net':>9} {'avg net':>9}")
+    grouped: Dict[str, list[Dict[str, Any]]] = {}
+    for record in records:
+        grouped.setdefault(_exit_reason(record), []).append(record)
+    if not grouped:
+        print(f"{'none':14} {0:6d} {_fmt_signed_pct(0):>9} {_fmt_signed_pct(0):>9} {_fmt_signed_pct(0):>9}")
+        return
+    for reason, items in sorted(grouped.items()):
+        gross_values = [value for value in (_gross_pnl(item) for item in items) if value is not None]
+        net_values = [value for value in (_net_pnl(item, config) for item in items) if value is not None]
+        gross_total = sum(gross_values)
+        net_total = sum(net_values)
+        avg_net = net_total / len(net_values) if net_values else 0.0
+        print(
+            f"{reason:14} {len(items):6d} {_fmt_signed_pct(gross_total):>9} "
+            f"{_fmt_signed_pct(net_total):>9} {_fmt_signed_pct(avg_net):>9}"
+        )
+
+
 def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
     print("Trades:")
     print(
@@ -222,6 +245,15 @@ def _print_detail(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None
             f"be_stop={_fmt_price(record.get('be_stop'))} be_net={_fmt_price(record.get('be_net_floor'))} "
             f"be_activation={_fmt_price(record.get('be_activation_price'))} be_source={record.get('be_floor_source') or 'n/a'} "
             f"be_absorbed={record.get('be_floor_absorbed_atr_stop')} "
+            f"pl_shadow={record.get('pl_shadow_status') or 'n/a'} pl_shadow_step={record.get('pl_shadow_step') or 'n/a'} "
+            f"pl_shadow_raw={_fmt_price(record.get('pl_shadow_raw_stop'))} "
+            f"pl_shadow_floor={_fmt_price(record.get('pl_shadow_net_floor'))} "
+            f"pl_shadow_stop={_fmt_price(record.get('pl_shadow_stop'))} "
+            f"pl_shadow_activation={_fmt_price(record.get('pl_shadow_activation_price'))} "
+            f"pl_shadow_absorbed={record.get('pl_shadow_floor_absorbed')} "
+            f"pl_shadow_active_step={record.get('pl_shadow_active_step') or 'n/a'} "
+            f"pl_shadow_active_stop={_fmt_price(record.get('pl_shadow_active_stop'))} "
+            f"pl_shadow_censored={record.get('pl_shadow_censored_by_real_exit')} "
             f"peak={_fmt_price(record.get('peak_price'))} pnl_abs={_fmt_number(record.get('realized_pnl_abs'))} "
             f"trough={_fmt_price(record.get('trough_price'))} trough_pct={_fmt_signed_pct(record.get('trough_pct'))} "
             f"trough_atr={_fmt_signed_number(record.get('trough_atr'))} trough_at={record.get('trough_at') or 'n/a'} "

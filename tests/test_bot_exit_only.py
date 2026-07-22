@@ -32,6 +32,7 @@ from tools.trades_report import (
     _parse_args,
     _partition_records,
     _print_detail_sections,
+    _print_exit_reason_breakdown,
     _print_inline_counts,
     _print_summary,
     _print_trades,
@@ -427,12 +428,23 @@ class BotExitOnlyTests(unittest.TestCase):
             root = Path(tmp)
             ledger = TradeLedger(root)
             position = _closed_position(root)
+            position.pl_shadow_enabled = True
+            position.pl_shadow_status = "ACTIVE"
+            position.pl_shadow_step = "PL1"
+            position.pl_shadow_raw_stop = 100.10
+            position.pl_shadow_net_floor = 100.25
+            position.pl_shadow_stop = 100.25
+            position.pl_shadow_activation_price = 100.35
+            position.pl_shadow_floor_absorbed = True
 
             self.assertTrue(ledger.append_closed_bot_trade(position, _config()))
             self.assertFalse(ledger.append_closed_bot_trade(position, _config()))
             self.assertEqual(len(ledger.load()), 1)
             self.assertAlmostEqual(ledger.load()[0]["trough_price"], 99.0)
             self.assertEqual(ledger.load()[0]["time_to_trough_seconds"], 300)
+            self.assertAlmostEqual(ledger.load()[0]["pl_shadow_stop"], 100.25)
+            self.assertTrue(ledger.load()[0]["pl_shadow_floor_absorbed"])
+            self.assertTrue(ledger.load()[0]["pl_shadow_censored_by_real_exit"])
 
     def test_latest_trade_ignores_phantoms_by_default(self) -> None:
         records = [
@@ -546,6 +558,22 @@ class BotExitOnlyTests(unittest.TestCase):
         self.assertEqual([record["pair_id"] for record in phantoms], ["phantom"])
         self.assertEqual(_fmt_profit_factor([1.0, 2.0, -1.0]), "3.00")
         self.assertEqual(_fmt_profit_factor([1.0]), "inf")
+
+    def test_trades_report_breaks_down_results_by_exit_reason(self) -> None:
+        records = [
+            {"exit_reason": "HARD_STOP", "gross_pnl_pct": -2.0, "net_pnl_pct": -2.2},
+            {"exit_reason": "BREAKEVEN", "gross_pnl_pct": 0.3, "net_pnl_pct": 0.1},
+            {"exit_reason": "BREAKEVEN", "gross_pnl_pct": 0.4, "net_pnl_pct": 0.2},
+        ]
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            _print_exit_reason_breakdown(records, {"fees": {"enabled": False}})
+
+        text = output.getvalue()
+        self.assertIn("By exit reason:", text)
+        self.assertIn("BREAKEVEN           2    +0.70%    +0.30%    +0.15%", text)
+        self.assertIn("HARD_STOP           1    -2.00%    -2.20%    -2.20%", text)
 
     def test_list_positions_omits_a_in_bot_exit_only(self) -> None:
         config = _config()

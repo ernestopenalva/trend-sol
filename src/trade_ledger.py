@@ -112,6 +112,31 @@ class TradeLedger:
             "be_activation_buffer_atr": _float_or_none(getattr(position, "be_activation_buffer_atr", None)),
             "be_floor_source": getattr(position, "be_floor_source", None),
             "be_floor_absorbed_atr_stop": getattr(position, "be_floor_absorbed_atr_stop", None),
+            "pl_shadow_enabled": getattr(position, "pl_shadow_enabled", False),
+            "pl_shadow_status": getattr(position, "pl_shadow_status", None),
+            "pl_shadow_step": getattr(position, "pl_shadow_step", None),
+            "pl_shadow_raw_stop": _float_or_none(getattr(position, "pl_shadow_raw_stop", None)),
+            "pl_shadow_net_floor": _float_or_none(getattr(position, "pl_shadow_net_floor", None)),
+            "pl_shadow_stop": _float_or_none(getattr(position, "pl_shadow_stop", None)),
+            "pl_shadow_activation_price": _float_or_none(
+                getattr(position, "pl_shadow_activation_price", None)
+            ),
+            "pl_shadow_activation_buffer_atr": _float_or_none(
+                getattr(position, "pl_shadow_activation_buffer_atr", None)
+            ),
+            "pl_shadow_net_margin_pct": _float_or_none(
+                getattr(position, "pl_shadow_net_margin_pct", None)
+            ),
+            "pl_shadow_floor_absorbed": getattr(position, "pl_shadow_floor_absorbed", None),
+            "pl_shadow_active_step": getattr(position, "pl_shadow_active_step", None),
+            "pl_shadow_active_stop": _float_or_none(getattr(position, "pl_shadow_active_stop", None)),
+            "pl_shadow_activated_at": getattr(position, "pl_shadow_activated_at", None),
+            "pl_shadow_close_price": _float_or_none(getattr(position, "pl_shadow_close_price", None)),
+            "pl_shadow_closed_at": getattr(position, "pl_shadow_closed_at", None),
+            "pl_shadow_censored_by_real_exit": bool(
+                getattr(position, "pl_shadow_enabled", False)
+                and getattr(position, "pl_shadow_status", None) != "CLOSED"
+            ),
             "realized_pnl_pct": realized_pct,
             "gross_pnl_pct": realized_pct,
             "estimated_fees_pct": estimated_fees_pct,

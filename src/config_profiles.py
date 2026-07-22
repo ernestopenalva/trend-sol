@@ -27,6 +27,7 @@ def effective_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         f"{symbol}@kline_{trend_timeframe}",
     ]
     _validate_hard_stop(config)
+    _validate_profit_lock_shadow(config)
     _validate_phantoms(config)
     return config
 
@@ -43,6 +44,22 @@ def _validate_hard_stop(config: Dict[str, Any]) -> None:
         raise ValueError("risk.hard_stop.stop_pct must be greater than 0 and less than 100") from None
     if isinstance(value, bool) or stop_pct <= 0 or stop_pct >= 100:
         raise ValueError("risk.hard_stop.stop_pct must be greater than 0 and less than 100")
+
+
+def _validate_profit_lock_shadow(config: Dict[str, Any]) -> None:
+    risk = config.get("risk") if isinstance(config.get("risk"), dict) else {}
+    profit_lock = risk.get("profit_lock") if isinstance(risk.get("profit_lock"), dict) else {}
+    shadow = profit_lock.get("net_floor_shadow") if isinstance(profit_lock.get("net_floor_shadow"), dict) else {}
+    if not bool(shadow.get("enabled", False)):
+        return
+    for field in ("net_margin_pct", "activation_buffer_atr"):
+        value = shadow.get(field)
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"risk.profit_lock.net_floor_shadow.{field} must be greater than or equal to 0") from None
+        if isinstance(value, bool) or number < 0:
+            raise ValueError(f"risk.profit_lock.net_floor_shadow.{field} must be greater than or equal to 0")
 
 
 def _validate_phantoms(config: Dict[str, Any]) -> None:
