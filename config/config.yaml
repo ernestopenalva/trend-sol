@@ -154,6 +154,24 @@ logging:
 instrumentation:
   enabled: true
   queue_max_size: 10000
+  cohort_guard_study:
+    episode_gap_hours: 6
+    rules:
+      - name: SENSITIVE
+        min_open_positions: 3
+        underwater_ratio: 0.66
+        oldest_age_minutes: 60
+        below_average_entry_atr: 0.5
+      - name: BASE
+        min_open_positions: 3
+        underwater_ratio: 0.75
+        oldest_age_minutes: 120
+        below_average_entry_atr: 1.0
+      - name: SELECTIVE
+        min_open_positions: 3
+        underwater_ratio: 1.0
+        oldest_age_minutes: 240
+        below_average_entry_atr: 2.0
   phantoms:
     enabled: true
     max_open_positions: 5

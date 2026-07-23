@@ -53,3 +53,21 @@ janela retrospectiva em minutos e pausa em minutos. O estudo informa sua hierarq
 de fidelidade: trajetorias de eventos e snapshots sao preferidas; resumos de trough
 sao aproximacoes. O replay historico nao reconstrui os sinais adicionais que uma
 mudanca de ocupacao dos slots poderia liberar.
+
+## Estudo offline de pressao da coorte
+
+`cohort_study.py` testa se a quarta e a quinta entradas deveriam ser bloqueadas
+quando as posicoes anteriores ja indicam um pullback deteriorado. As regras ficam
+em `instrumentation.cohort_guard_study` e sao apenas parametros do replay: o estudo
+nao altera o motor, slots, ordens, estado ou saldo.
+
+```bash
+python tools/cohort_study.py --ledger data/trades/trades_B.jsonl
+python tools/cohort_study.py --ledger data/trades/trades_B.jsonl --detail
+python tools/cohort_study.py --ledger archive/trades_B.jsonl \
+  --ledger data/trades/trades_B.jsonl --mode both
+```
+
+O modo `static` preserva a ocupacao historica. O modo `sequential` remove do
+contexto as entradas reais bloqueadas anteriormente, mas nao inventa sinais que
+poderiam ter surgido com slots livres. Fantasmas sao sempre excluidos.
