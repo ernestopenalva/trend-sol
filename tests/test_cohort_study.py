@@ -117,6 +117,22 @@ class CohortStudyTests(unittest.TestCase):
         self.assertAlmostEqual(economics.foregone_winners_usdt, 0.02)
         self.assertAlmostEqual(economics.balance_delta_pct, 0.2)
 
+    def test_sizing_replay_waits_for_minimum_cohort_age(self) -> None:
+        records = [
+            _trade("a", "2026-07-01T00:00:00+00:00", "2026-07-01T10:00:00+00:00", 100, 0.1),
+            _trade("b", "2026-07-01T00:10:00+00:00", "2026-07-01T10:00:00+00:00", 100, 0.1),
+            _trade("c", "2026-07-01T00:20:00+00:00", "2026-07-01T10:00:00+00:00", 100, 0.1),
+            _trade("d", "2026-07-01T03:00:00+00:00", "2026-07-01T10:00:00+00:00", 99.5, 0.2),
+            _trade("e", "2026-07-01T05:00:00+00:00", "2026-07-01T10:00:00+00:00", 99.4, -2.2),
+        ]
+        rule = SizingRule("AGE4H_HALF", 3, -0.3, 0.66, 0.5, 240)
+
+        decisions = run_sizing_replay(records, [rule])
+        reduced = [item for item in decisions if item.reduced]
+
+        self.assertEqual([item.record["pair_id"] for item in reduced], ["e"])
+        self.assertEqual(reduced[0].metrics.oldest_age_minutes, 300)
+
 
 def _trade(
     pair_id: str,

@@ -209,6 +209,50 @@ instrumentation:
         negative_threshold_pct: -0.3
         negative_fraction: 0.66
         size_factor: 0.75
+      - name: AGE2H_HALF
+        min_open_positions: 3
+        negative_threshold_pct: -0.3
+        negative_fraction: 0.66
+        size_factor: 0.5
+        oldest_age_minutes: 120
+      - name: AGE4H_HALF
+        min_open_positions: 3
+        negative_threshold_pct: -0.3
+        negative_fraction: 0.66
+        size_factor: 0.5
+        oldest_age_minutes: 240
+      - name: AGE8H_HALF
+        min_open_positions: 3
+        negative_threshold_pct: -0.3
+        negative_fraction: 0.66
+        size_factor: 0.5
+        oldest_age_minutes: 480
+      - name: AGE12H_HALF
+        min_open_positions: 3
+        negative_threshold_pct: -0.3
+        negative_fraction: 0.66
+        size_factor: 0.5
+        oldest_age_minutes: 720
+  serial_stop_study:
+    episode_gap_hours: 6
+    min_notional_usdt: 10
+    risk_budgets_pct:
+      - 1.0
+      - 1.5
+      - 2.0
+    price_band_rules:
+      - name: BAND025_MAX2
+        band_pct: 0.25
+        max_positions: 2
+      - name: BAND050_MAX2
+        band_pct: 0.5
+        max_positions: 2
+      - name: BAND050_MAX3
+        band_pct: 0.5
+        max_positions: 3
+      - name: BAND100_MAX3
+        band_pct: 1.0
+        max_positions: 3
   phantoms:
     enabled: true
     max_open_positions: 5

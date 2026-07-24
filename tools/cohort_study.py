@@ -60,6 +60,7 @@ class SizingRule:
     negative_threshold_pct: float
     negative_fraction: float
     size_factor: float
+    oldest_age_minutes: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,7 @@ class SizingMetrics:
     negative_positions: int
     negative_fraction: float
     current_price: float
+    oldest_age_minutes: float
 
 
 @dataclass(frozen=True)
@@ -244,7 +246,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sizing-rule",
         action="append",
-        help="name/min_open/negative_threshold_pct/negative_fraction/size_factor",
+        help="name/min_open/negative_threshold_pct/negative_fraction/size_factor[/oldest_age_minutes]",
     )
     parser.add_argument("--no-sizing", action="store_true", help="Oculta o estudo de sizing degressivo.")
     parser.add_argument("--operational-balance-usdt", type=float)
@@ -309,6 +311,7 @@ def _sizing_decision(
     candidate: Dict[str, Any],
     existing: Sequence[Dict[str, Any]],
 ) -> SizingDecision:
+    opened = _opened_at(candidate)
     current_price = _float(candidate.get("entry_price")) or 0.0
     negative = sum(
         1
@@ -320,15 +323,22 @@ def _sizing_decision(
     )
     count = len(existing)
     fraction = negative / count if count else 0.0
+    ages = [
+        max(0.0, (opened - item_opened).total_seconds() / 60)
+        for item in existing
+        if opened is not None and (item_opened := _opened_at(item)) is not None
+    ]
     metrics = SizingMetrics(
         open_positions=count,
         negative_positions=negative,
         negative_fraction=fraction,
         current_price=current_price,
+        oldest_age_minutes=max(ages) if ages else 0.0,
     )
     reduced = bool(
         count >= rule.min_open_positions
         and fraction + 1e-12 >= rule.negative_fraction
+        and metrics.oldest_age_minutes + 1e-12 >= rule.oldest_age_minutes
     )
     return SizingDecision(rule, candidate, metrics, reduced)
 
@@ -555,6 +565,7 @@ def _print_report(
                 f"  {item.rule.name} {_fmt_ts(record.get('opened_at'))} "
                 f"pair={record.get('pair_id')} attempt={metrics.open_positions + 1} "
                 f"negative={metrics.negative_positions}/{metrics.open_positions} "
+                f"oldest={metrics.oldest_age_minutes:.0f}m "
                 f"factor={item.rule.size_factor:.2f} outcome={record.get('exit_reason') or 'OPEN'} "
                 f"net={_fmt_signed(_net_pnl(record))} actual={_fmt_usdt(actual)} "
                 f"hyp={_fmt_usdt(hypothetical)} delta={_fmt_usdt(delta)} "
@@ -577,7 +588,8 @@ def _print_sizing_report(
         print(
             f"  {rule.name}: min_open={rule.min_open_positions} | "
             f"position_pnl<={rule.negative_threshold_pct:.2f}% | "
-            f"negative>={rule.negative_fraction:.0%} | size={rule.size_factor:.0%}"
+            f"negative>={rule.negative_fraction:.0%} | "
+            f"oldest>={rule.oldest_age_minutes:g}m | size={rule.size_factor:.0%}"
         )
     print()
     print(
@@ -704,6 +716,7 @@ def _sizing_rules_from_config(config: Dict[str, Any]) -> list[SizingRule]:
                 negative_threshold_pct=float(item.get("negative_threshold_pct", -0.3)),
                 negative_fraction=float(item.get("negative_fraction", 0.66)),
                 size_factor=float(item.get("size_factor", 0.5)),
+                oldest_age_minutes=float(item.get("oldest_age_minutes", 0)),
             )
         )
     if rules:
@@ -716,6 +729,10 @@ def _sizing_rules_from_config(config: Dict[str, Any]) -> list[SizingRule]:
         SizingRule("FRAC100_HALF", 3, -0.3, 1.0, 0.5),
         SizingRule("CLAUDE_QTR", 3, -0.3, 0.66, 0.25),
         SizingRule("CLAUDE_75", 3, -0.3, 0.66, 0.75),
+        SizingRule("AGE2H_HALF", 3, -0.3, 0.66, 0.5, 120),
+        SizingRule("AGE4H_HALF", 3, -0.3, 0.66, 0.5, 240),
+        SizingRule("AGE8H_HALF", 3, -0.3, 0.66, 0.5, 480),
+        SizingRule("AGE12H_HALF", 3, -0.3, 0.66, 0.5, 720),
     ]
 
 
@@ -740,9 +757,20 @@ def _parse_rule(value: str) -> CohortRule:
 
 def _parse_sizing_rule(value: str) -> SizingRule:
     parts = [item.strip() for item in value.split("/")]
-    if len(parts) != 5:
-        raise ValueError("sizing rule must be name/min_open/negative_threshold_pct/negative_fraction/size_factor")
-    return SizingRule(parts[0].upper(), int(parts[1]), float(parts[2]), float(parts[3]), float(parts[4]))
+    if len(parts) not in {5, 6}:
+        raise ValueError(
+            "sizing rule must be "
+            "name/min_open/negative_threshold_pct/negative_fraction/size_factor[/oldest_age_minutes]"
+        )
+    oldest_age = float(parts[5]) if len(parts) == 6 else 0.0
+    return SizingRule(
+        parts[0].upper(),
+        int(parts[1]),
+        float(parts[2]),
+        float(parts[3]),
+        float(parts[4]),
+        oldest_age,
+    )
 
 
 def _validate_rule(rule: CohortRule) -> None:
@@ -765,6 +793,8 @@ def _validate_sizing_rule(rule: SizingRule) -> None:
         raise ValueError(f"{rule.name}: negative_fraction must be between 0 and 1")
     if not 0 < rule.size_factor <= 1:
         raise ValueError(f"{rule.name}: size_factor must be greater than zero and at most 1")
+    if rule.oldest_age_minutes < 0:
+        raise ValueError(f"{rule.name}: oldest_age_minutes cannot be negative")
 
 
 def _record_sort_key(record: Dict[str, Any]) -> tuple[datetime, int, str]:

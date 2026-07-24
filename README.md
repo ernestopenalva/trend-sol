@@ -83,8 +83,26 @@ Regras de sizing podem ser fornecidas sem editar o YAML:
 
 ```bash
 python tools/cohort_study.py --ledger data/trades/trades_B.jsonl \
-  --sizing-rule "HALF/3/-0.3/0.66/0.5"
+  --sizing-rule "HALF_4H/3/-0.3/0.66/0.5/240"
 ```
 
 Os campos representam nome, minimo de posicoes abertas, perda percentual para uma
-posicao contar como negativa, fracao negativa exigida e fator de tamanho.
+posicao contar como negativa, fracao negativa exigida, fator de tamanho e, quando
+informada, idade minima da posicao mais antiga em minutos.
+
+## Estudo offline de HARD_STOPs seriais
+
+`serial_stop_study.py` compara duas formas de limitar exposicao correlacionada:
+orçamento coletivo de risco ate os HARD_STOPs e limite de entradas abertas dentro
+de uma faixa percentual de preco.
+
+```bash
+python tools/serial_stop_study.py --ledger data/trades/trades_B.jsonl
+python tools/serial_stop_study.py \
+  --ledger data/archive/ciclo-anterior/trades/trades_B.jsonl \
+  --ledger data/trades/trades_B.jsonl --detail
+```
+
+O replay de risco e conservador: uma posicao reserva todo o risco ate seu fechamento
+historico, sem liberar orçamento quando BE, PL ou trailing protegem o trade. Entradas
+alteradas nao geram sinais historicos novos.
