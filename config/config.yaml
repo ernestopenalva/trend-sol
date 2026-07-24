@@ -172,6 +172,43 @@ instrumentation:
         underwater_ratio: 1.0
         oldest_age_minutes: 240
         below_average_entry_atr: 2.0
+  cohort_sizing_study:
+    rules:
+      - name: CLAUDE_HALF
+        min_open_positions: 3
+        negative_threshold_pct: -0.3
+        negative_fraction: 0.66
+        size_factor: 0.5
+      - name: NEG_02_HALF
+        min_open_positions: 3
+        negative_threshold_pct: -0.2
+        negative_fraction: 0.66
+        size_factor: 0.5
+      - name: NEG_05_HALF
+        min_open_positions: 3
+        negative_threshold_pct: -0.5
+        negative_fraction: 0.66
+        size_factor: 0.5
+      - name: FRAC75_HALF
+        min_open_positions: 3
+        negative_threshold_pct: -0.3
+        negative_fraction: 0.75
+        size_factor: 0.5
+      - name: FRAC100_HALF
+        min_open_positions: 3
+        negative_threshold_pct: -0.3
+        negative_fraction: 1.0
+        size_factor: 0.5
+      - name: CLAUDE_QTR
+        min_open_positions: 3
+        negative_threshold_pct: -0.3
+        negative_fraction: 0.66
+        size_factor: 0.25
+      - name: CLAUDE_75
+        min_open_positions: 3
+        negative_threshold_pct: -0.3
+        negative_fraction: 0.66
+        size_factor: 0.75
   phantoms:
     enabled: true
     max_open_positions: 5

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from tools.cohort_study import CohortRule, run_replay
+from tools.cohort_study import (
+    CohortRule,
+    SizingRule,
+    run_replay,
+    run_sizing_replay,
+    sizing_economics,
+)
 
 
 class CohortStudyTests(unittest.TestCase):
@@ -64,6 +70,52 @@ class CohortStudyTests(unittest.TestCase):
 
         self.assertEqual([item.record["pair_id"] for item in blocked], ["cleanup"])
         self.assertFalse(blocked[0].scored)
+
+    def test_sizing_replay_reduces_fourth_entry_when_cohort_is_negative(self) -> None:
+        records = [
+            _trade("a", "2026-07-01T00:00:00+00:00", "2026-07-01T10:00:00+00:00", 100, 0.1),
+            _trade("b", "2026-07-01T00:10:00+00:00", "2026-07-01T10:00:00+00:00", 100, 0.1),
+            _trade("c", "2026-07-01T00:20:00+00:00", "2026-07-01T10:00:00+00:00", 100, 0.1),
+            {
+                **_trade(
+                    "phantom",
+                    "2026-07-01T00:30:00+00:00",
+                    "2026-07-01T10:00:00+00:00",
+                    100,
+                    -2.2,
+                ),
+                "phantom": True,
+            },
+            _trade("d", "2026-07-01T03:00:00+00:00", "2026-07-01T10:00:00+00:00", 99.5, 0.2),
+        ]
+        rule = SizingRule("CLAUDE_HALF", 3, -0.3, 0.66, 0.5)
+
+        decisions = run_sizing_replay(records, [rule])
+        reduced = [item for item in decisions if item.reduced]
+
+        self.assertEqual([item.record["pair_id"] for item in reduced], ["d"])
+        self.assertEqual(reduced[0].metrics.negative_positions, 3)
+        self.assertEqual(reduced[0].metrics.open_positions, 3)
+
+    def test_sizing_economics_weights_winners_and_losses_by_notional(self) -> None:
+        records = [
+            _trade("a", "2026-07-01T00:00:00+00:00", "2026-07-01T10:00:00+00:00", 100, 0.1),
+            _trade("b", "2026-07-01T00:10:00+00:00", "2026-07-01T10:00:00+00:00", 100, 0.1),
+            _trade("c", "2026-07-01T00:20:00+00:00", "2026-07-01T10:00:00+00:00", 100, 0.1),
+            _trade("d", "2026-07-01T03:00:00+00:00", "2026-07-01T10:00:00+00:00", 99.5, 0.2),
+            _trade("e", "2026-07-01T03:10:00+00:00", "2026-07-01T10:00:00+00:00", 99.4, -2.2, "HARD_STOP"),
+        ]
+        rule = SizingRule("CLAUDE_HALF", 3, -0.3, 0.66, 0.5)
+
+        decisions = run_sizing_replay(records, [rule])
+        economics = sizing_economics(decisions, operational_balance_usdt=100)
+
+        self.assertAlmostEqual(economics.actual_net_usdt, -0.4)
+        self.assertAlmostEqual(economics.hypothetical_net_usdt, -0.2)
+        self.assertAlmostEqual(economics.delta_usdt, 0.2)
+        self.assertAlmostEqual(economics.saved_losses_usdt, 0.22)
+        self.assertAlmostEqual(economics.foregone_winners_usdt, 0.02)
+        self.assertAlmostEqual(economics.balance_delta_pct, 0.2)
 
 
 def _trade(

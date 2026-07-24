@@ -53,12 +53,63 @@ class ReplayDecision:
         return _score_eligible(self.record)
 
 
+@dataclass(frozen=True)
+class SizingRule:
+    name: str
+    min_open_positions: int
+    negative_threshold_pct: float
+    negative_fraction: float
+    size_factor: float
+
+
+@dataclass(frozen=True)
+class SizingMetrics:
+    open_positions: int
+    negative_positions: int
+    negative_fraction: float
+    current_price: float
+
+
+@dataclass(frozen=True)
+class SizingDecision:
+    rule: SizingRule
+    record: Dict[str, Any]
+    metrics: SizingMetrics
+    reduced: bool
+
+    @property
+    def scored(self) -> bool:
+        return _score_eligible(self.record)
+
+
+@dataclass(frozen=True)
+class SizingEconomics:
+    actual_net_usdt: float
+    hypothetical_net_usdt: float
+    delta_usdt: float
+    saved_losses_usdt: float
+    foregone_winners_usdt: float
+    saved_fees_usdt: float
+    balance_delta_pct: float
+
+
 def main() -> None:
     args = _parse_args()
     config = _load_config(Path(args.config))
     rules = [_parse_rule(item) for item in args.rule] if args.rule else _rules_from_config(config)
     for rule in rules:
         _validate_rule(rule)
+    sizing_rules = (
+        []
+        if args.no_sizing
+        else (
+            [_parse_sizing_rule(item) for item in args.sizing_rule]
+            if args.sizing_rule
+            else _sizing_rules_from_config(config)
+        )
+    )
+    for rule in sizing_rules:
+        _validate_sizing_rule(rule)
     records = _load_records([Path(item) for item in args.ledger], [Path(item) for item in args.state])
     records = [
         item
@@ -74,12 +125,28 @@ def main() -> None:
         for mode in modes
         for decision in _run_mode(records, rule, mode)
     ]
+    sizing_decisions = run_sizing_replay(records, sizing_rules)
     episode_gap = float(
         args.episode_gap_hours
         if args.episode_gap_hours is not None
         else _study_config(config).get("episode_gap_hours", 6)
     )
-    _print_report(records, decisions, rules, modes, episode_gap, args.detail)
+    operational_balance = float(
+        args.operational_balance_usdt
+        if args.operational_balance_usdt is not None
+        else _operational_balance(config)
+    )
+    _print_report(
+        records,
+        decisions,
+        rules,
+        modes,
+        sizing_decisions,
+        sizing_rules,
+        operational_balance,
+        episode_gap,
+        args.detail,
+    )
 
 
 def run_replay(
@@ -99,6 +166,68 @@ def run_replay(
     ]
 
 
+def run_sizing_replay(
+    records: Sequence[Dict[str, Any]],
+    rules: Sequence[SizingRule],
+) -> list[SizingDecision]:
+    normalized_records = [_normalize_record(item) for item in records]
+    normalized = _dedupe_records(item for item in normalized_records if _is_real_bot_position(item))
+    for rule in rules:
+        _validate_sizing_rule(rule)
+    ordered = sorted(normalized, key=_record_sort_key)
+    decisions: list[SizingDecision] = []
+    for candidate in ordered:
+        opened = _opened_at(candidate)
+        if opened is None:
+            continue
+        existing = [
+            item
+            for item in ordered
+            if item is not candidate and _is_open_at(item, opened) and (_opened_at(item) or opened) < opened
+        ]
+        for rule in rules:
+            decisions.append(_sizing_decision(rule, candidate, existing))
+    return decisions
+
+
+def sizing_economics(
+    decisions: Sequence[SizingDecision],
+    operational_balance_usdt: float,
+) -> SizingEconomics:
+    selected = [item for item in decisions if item.reduced and item.scored]
+    actual = sum(_net_usdt(item.record) or 0.0 for item in selected)
+    hypothetical = sum(
+        (_net_usdt(item.record) or 0.0) * item.rule.size_factor
+        for item in selected
+    )
+    saved_losses = sum(
+        -actual_net * (1 - item.rule.size_factor)
+        for item in selected
+        if (actual_net := _net_usdt(item.record) or 0.0) < 0
+    )
+    foregone_winners = sum(
+        actual_net * (1 - item.rule.size_factor)
+        for item in selected
+        if (actual_net := _net_usdt(item.record) or 0.0) > 0
+    )
+    saved_fees = sum(
+        (_fees_usdt(item.record) or 0.0) * (1 - item.rule.size_factor)
+        for item in selected
+    )
+    delta = hypothetical - actual
+    return SizingEconomics(
+        actual_net_usdt=actual,
+        hypothetical_net_usdt=hypothetical,
+        delta_usdt=delta,
+        saved_losses_usdt=saved_losses,
+        foregone_winners_usdt=foregone_winners,
+        saved_fees_usdt=saved_fees,
+        balance_delta_pct=(delta / operational_balance_usdt * 100)
+        if operational_balance_usdt > 0
+        else 0.0,
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Replay offline da admissao por pressao da coorte; nunca envia ordens nem altera o bot."
@@ -112,6 +241,13 @@ def _parse_args() -> argparse.Namespace:
         action="append",
         help="name/min_open/underwater_ratio/oldest_age_minutes/below_average_entry_atr",
     )
+    parser.add_argument(
+        "--sizing-rule",
+        action="append",
+        help="name/min_open/negative_threshold_pct/negative_fraction/size_factor",
+    )
+    parser.add_argument("--no-sizing", action="store_true", help="Oculta o estudo de sizing degressivo.")
+    parser.add_argument("--operational-balance-usdt", type=float)
     parser.add_argument("--episode-gap-hours", type=float)
     parser.add_argument("--detail", action="store_true")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config/config.yaml"))
@@ -168,6 +304,35 @@ def _decision(
     return ReplayDecision(mode, rule, candidate, metrics, blocked)
 
 
+def _sizing_decision(
+    rule: SizingRule,
+    candidate: Dict[str, Any],
+    existing: Sequence[Dict[str, Any]],
+) -> SizingDecision:
+    current_price = _float(candidate.get("entry_price")) or 0.0
+    negative = sum(
+        1
+        for item in existing
+        if (
+            pnl_pct := _mark_pnl_pct(item, current_price)
+        ) is not None
+        and pnl_pct <= rule.negative_threshold_pct + 1e-12
+    )
+    count = len(existing)
+    fraction = negative / count if count else 0.0
+    metrics = SizingMetrics(
+        open_positions=count,
+        negative_positions=negative,
+        negative_fraction=fraction,
+        current_price=current_price,
+    )
+    reduced = bool(
+        count >= rule.min_open_positions
+        and fraction + 1e-12 >= rule.negative_fraction
+    )
+    return SizingDecision(rule, candidate, metrics, reduced)
+
+
 def _cohort_metrics(candidate: Dict[str, Any], existing: Sequence[Dict[str, Any]]) -> CohortMetrics:
     opened = _opened_at(candidate)
     current_price = _float(candidate.get("entry_price")) or 0.0
@@ -198,6 +363,13 @@ def _cohort_metrics(candidate: Dict[str, Any], existing: Sequence[Dict[str, Any]
         entry_atr=entry_atr,
         below_average_entry_atr=gap_atr,
     )
+
+
+def _mark_pnl_pct(record: Dict[str, Any], current_price: float) -> Optional[float]:
+    entry = _float(record.get("entry_price"))
+    if entry is None or entry <= 0 or current_price <= 0:
+        return None
+    return (current_price / entry - 1) * 100
 
 
 def _quantity_weighted_entry(records: Sequence[Dict[str, Any]]) -> float:
@@ -279,6 +451,9 @@ def _print_report(
     decisions: Sequence[ReplayDecision],
     rules: Sequence[CohortRule],
     modes: Sequence[str],
+    sizing_decisions: Sequence[SizingDecision],
+    sizing_rules: Sequence[SizingRule],
+    operational_balance_usdt: float,
     episode_gap_hours: float,
     detail: bool,
 ) -> None:
@@ -339,6 +514,14 @@ def _print_report(
     print("cutW=net winners blocked | saveL=net losses avoided | saveHS=HARD_STOPs avoided")
     print("delta_pp=sum of blocked net returns with the sign reversed; positive improves the historical sample.")
     print("saved_fee=estimated fees avoided in USDT; episode score groups blocked entries by the configured gap.")
+    if sizing_rules:
+        _print_sizing_report(
+            sizing_decisions,
+            sizing_rules,
+            baseline_usdt,
+            operational_balance_usdt,
+            episode_gap_hours,
+        )
     if not detail:
         return
     print()
@@ -357,6 +540,89 @@ def _print_report(
             f"strategy={record.get('strategy_version') or 'state'} "
             f"scored={'yes' if item.scored else 'no'}"
         )
+    if sizing_rules:
+        print()
+        print("Reduced-size trade detail:")
+        for item in sizing_decisions:
+            if not item.reduced:
+                continue
+            record = item.record
+            metrics = item.metrics
+            actual = _net_usdt(record)
+            hypothetical = actual * item.rule.size_factor if actual is not None else None
+            delta = hypothetical - actual if actual is not None and hypothetical is not None else None
+            print(
+                f"  {item.rule.name} {_fmt_ts(record.get('opened_at'))} "
+                f"pair={record.get('pair_id')} attempt={metrics.open_positions + 1} "
+                f"negative={metrics.negative_positions}/{metrics.open_positions} "
+                f"factor={item.rule.size_factor:.2f} outcome={record.get('exit_reason') or 'OPEN'} "
+                f"net={_fmt_signed(_net_pnl(record))} actual={_fmt_usdt(actual)} "
+                f"hyp={_fmt_usdt(hypothetical)} delta={_fmt_usdt(delta)} "
+                f"scored={'yes' if item.scored else 'no'}"
+            )
+
+
+def _print_sizing_report(
+    decisions: Sequence[SizingDecision],
+    rules: Sequence[SizingRule],
+    baseline_usdt: float,
+    operational_balance_usdt: float,
+    episode_gap_hours: float,
+) -> None:
+    print()
+    print("Degressive sizing study (all approved entries remain admitted):")
+    print(f"Operational balance: {operational_balance_usdt:.2f} USDT")
+    print("Sizing rules:")
+    for rule in rules:
+        print(
+            f"  {rule.name}: min_open={rule.min_open_positions} | "
+            f"position_pnl<={rule.negative_threshold_pct:.2f}% | "
+            f"negative>={rule.negative_fraction:.0%} | size={rule.size_factor:.0%}"
+        )
+    print()
+    print(
+        f"{'rule':13} {'checks':>6} {'reduced':>7} {'b4':>4} {'b5+':>4} "
+        f"{'redW':>5} {'redL':>5} {'redHS':>6} {'saveL':>9} {'cutW':>9} "
+        f"{'feeSave':>8} {'delta':>9} {'bal_pp':>8} {'hyp_net':>9} "
+        f"{'episodes':>8} {'score +/-/=':>11}"
+    )
+    for rule in rules:
+        selected = [item for item in decisions if item.rule == rule]
+        reduced = [item for item in selected if item.reduced]
+        scored_reduced = [item for item in reduced if item.scored]
+        economics = sizing_economics(scored_reduced, operational_balance_usdt)
+        episodes = _sizing_episodes(scored_reduced, episode_gap_hours)
+        episode_deltas = [
+            sum(
+                ((_net_usdt(item.record) or 0.0) * item.rule.size_factor)
+                - (_net_usdt(item.record) or 0.0)
+                for item in group
+            )
+            for group in episodes
+        ]
+        improved = sum(value > 1e-9 for value in episode_deltas)
+        worse = sum(value < -1e-9 for value in episode_deltas)
+        flat = len(episodes) - improved - worse
+        checks = sum(
+            item.metrics.open_positions >= rule.min_open_positions
+            for item in selected
+        )
+        print(
+            f"{rule.name:13} {checks:6d} {len(reduced):7d} "
+            f"{sum(item.metrics.open_positions == 3 for item in reduced):4d} "
+            f"{sum(item.metrics.open_positions >= 4 for item in reduced):4d} "
+            f"{sum((_net_pnl(item.record) or 0.0) > 0 for item in scored_reduced):5d} "
+            f"{sum((_net_pnl(item.record) or 0.0) < 0 for item in scored_reduced):5d} "
+            f"{sum(str(item.record.get('exit_reason') or '') == 'HARD_STOP' for item in scored_reduced):6d} "
+            f"{economics.saved_losses_usdt:9.4f} {economics.foregone_winners_usdt:9.4f} "
+            f"{economics.saved_fees_usdt:8.4f} {economics.delta_usdt:+9.4f} "
+            f"{economics.balance_delta_pct:+8.3f} "
+            f"{baseline_usdt + economics.delta_usdt:+9.4f} {len(episodes):8d} "
+            f"{improved:3d}/{worse}/{flat:<3d}"
+        )
+    print()
+    print("redW/redL=net winners/losses reduced | saveL/cutW/feeSave/delta/hyp_net are USDT")
+    print("bal_pp=delta as percentage points of operational balance; sizing never frees a slot.")
 
 
 def _decision_episodes(
@@ -365,6 +631,24 @@ def _decision_episodes(
 ) -> list[list[ReplayDecision]]:
     ordered = sorted(decisions, key=lambda item: _opened_at(item.record) or datetime.min.replace(tzinfo=timezone.utc))
     output: list[list[ReplayDecision]] = []
+    for item in ordered:
+        opened = _opened_at(item.record)
+        if opened is None:
+            continue
+        previous = _opened_at(output[-1][-1].record) if output else None
+        if previous is None or opened - previous > timedelta(hours=gap_hours):
+            output.append([item])
+        else:
+            output[-1].append(item)
+    return output
+
+
+def _sizing_episodes(
+    decisions: Sequence[SizingDecision],
+    gap_hours: float,
+) -> list[list[SizingDecision]]:
+    ordered = sorted(decisions, key=lambda item: _opened_at(item.record) or datetime.min.replace(tzinfo=timezone.utc))
+    output: list[list[SizingDecision]] = []
     for item in ordered:
         opened = _opened_at(item.record)
         if opened is None:
@@ -407,11 +691,58 @@ def _study_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _sizing_rules_from_config(config: Dict[str, Any]) -> list[SizingRule]:
+    values = _sizing_study_config(config).get("rules") or []
+    rules = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        rules.append(
+            SizingRule(
+                name=str(item.get("name") or f"SIZING_{len(rules) + 1}").upper(),
+                min_open_positions=int(item.get("min_open_positions", 3)),
+                negative_threshold_pct=float(item.get("negative_threshold_pct", -0.3)),
+                negative_fraction=float(item.get("negative_fraction", 0.66)),
+                size_factor=float(item.get("size_factor", 0.5)),
+            )
+        )
+    if rules:
+        return rules
+    return [
+        SizingRule("CLAUDE_HALF", 3, -0.3, 0.66, 0.5),
+        SizingRule("NEG_02_HALF", 3, -0.2, 0.66, 0.5),
+        SizingRule("NEG_05_HALF", 3, -0.5, 0.66, 0.5),
+        SizingRule("FRAC75_HALF", 3, -0.3, 0.75, 0.5),
+        SizingRule("FRAC100_HALF", 3, -0.3, 1.0, 0.5),
+        SizingRule("CLAUDE_QTR", 3, -0.3, 0.66, 0.25),
+        SizingRule("CLAUDE_75", 3, -0.3, 0.66, 0.75),
+    ]
+
+
+def _sizing_study_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    instrumentation = config.get("instrumentation") if isinstance(config.get("instrumentation"), dict) else {}
+    value = instrumentation.get("cohort_sizing_study")
+    return value if isinstance(value, dict) else {}
+
+
+def _operational_balance(config: Dict[str, Any]) -> float:
+    capital = config.get("capital") if isinstance(config.get("capital"), dict) else {}
+    value = _float(capital.get("operational_balance_usdt"))
+    return value if value is not None and value > 0 else 100.0
+
+
 def _parse_rule(value: str) -> CohortRule:
     parts = [item.strip() for item in value.split("/")]
     if len(parts) != 5:
         raise ValueError("rule must be name/min_open/underwater_ratio/oldest_age_minutes/below_average_entry_atr")
     return CohortRule(parts[0].upper(), int(parts[1]), float(parts[2]), float(parts[3]), float(parts[4]))
+
+
+def _parse_sizing_rule(value: str) -> SizingRule:
+    parts = [item.strip() for item in value.split("/")]
+    if len(parts) != 5:
+        raise ValueError("sizing rule must be name/min_open/negative_threshold_pct/negative_fraction/size_factor")
+    return SizingRule(parts[0].upper(), int(parts[1]), float(parts[2]), float(parts[3]), float(parts[4]))
 
 
 def _validate_rule(rule: CohortRule) -> None:
@@ -423,6 +754,17 @@ def _validate_rule(rule: CohortRule) -> None:
         raise ValueError(f"{rule.name}: oldest_age_minutes cannot be negative")
     if rule.below_average_entry_atr < 0:
         raise ValueError(f"{rule.name}: below_average_entry_atr cannot be negative")
+
+
+def _validate_sizing_rule(rule: SizingRule) -> None:
+    if rule.min_open_positions < 1:
+        raise ValueError(f"{rule.name}: min_open_positions must be at least 1")
+    if rule.negative_threshold_pct > 0:
+        raise ValueError(f"{rule.name}: negative_threshold_pct must be zero or negative")
+    if not 0 <= rule.negative_fraction <= 1:
+        raise ValueError(f"{rule.name}: negative_fraction must be between 0 and 1")
+    if not 0 < rule.size_factor <= 1:
+        raise ValueError(f"{rule.name}: size_factor must be greater than zero and at most 1")
 
 
 def _record_sort_key(record: Dict[str, Any]) -> tuple[datetime, int, str]:
@@ -535,6 +877,10 @@ def _fmt_optional(value: Optional[float]) -> str:
 
 def _fmt_signed(value: Optional[float]) -> str:
     return "n/a" if value is None else f"{value:+.2f}%"
+
+
+def _fmt_usdt(value: Optional[float]) -> str:
+    return "n/a" if value is None else f"{value:+.4f}USDT"
 
 
 if __name__ == "__main__":

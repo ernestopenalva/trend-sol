@@ -71,3 +71,20 @@ python tools/cohort_study.py --ledger archive/trades_B.jsonl \
 O modo `static` preserva a ocupacao historica. O modo `sequential` remove do
 contexto as entradas reais bloqueadas anteriormente, mas nao inventa sinais que
 poderiam ter surgido com slots livres. Fantasmas sao sempre excluidos.
+
+O mesmo comando tambem simula sizing degressivo configurado em
+`instrumentation.cohort_sizing_study`. Nesse contrafactual, todas as entradas
+continuam admitidas e ocupam slots normalmente, mas o notional das entradas
+selecionadas e multiplicado por `size_factor`. O resultado e ponderado em USDT e
+como percentual de `capital.operational_balance_usdt`; nenhum tamanho real e
+alterado.
+
+Regras de sizing podem ser fornecidas sem editar o YAML:
+
+```bash
+python tools/cohort_study.py --ledger data/trades/trades_B.jsonl \
+  --sizing-rule "HALF/3/-0.3/0.66/0.5"
+```
+
+Os campos representam nome, minimo de posicoes abertas, perda percentual para uma
+posicao contar como negativa, fracao negativa exigida e fator de tamanho.
