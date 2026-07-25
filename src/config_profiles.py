@@ -29,6 +29,7 @@ def effective_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
     _validate_hard_stop(config)
     _validate_profit_lock_shadow(config)
     _validate_phantoms(config)
+    _validate_multi_market_shadow(config)
     return config
 
 
@@ -79,3 +80,43 @@ def _validate_phantoms(config: Dict[str, Any]) -> None:
         raise ValueError("instrumentation.phantoms.max_age_hours must be greater than 0") from None
     if isinstance(max_age, bool) or max_age_value <= 0:
         raise ValueError("instrumentation.phantoms.max_age_hours must be greater than 0")
+
+
+def _validate_multi_market_shadow(config: Dict[str, Any]) -> None:
+    instrumentation = config.get("instrumentation")
+    if not isinstance(instrumentation, dict) or not bool(instrumentation.get("enabled", False)):
+        return
+    shadow = instrumentation.get("multi_market_shadow")
+    if not isinstance(shadow, dict) or not bool(shadow.get("enabled", False)):
+        return
+    for field in (
+        "top_count",
+        "reevaluate_hours",
+        "max_universe_symbols",
+        "max_open_positions_per_symbol",
+        "max_entries_per_selection_epoch",
+    ):
+        value = shadow.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(
+                f"instrumentation.multi_market_shadow.{field} must be a positive integer"
+            )
+    for field in ("min_quote_volume_usdt", "max_spread_bps"):
+        value = shadow.get(field)
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"instrumentation.multi_market_shadow.{field} must be greater than 0"
+            ) from None
+        if isinstance(value, bool) or number <= 0:
+            raise ValueError(
+                f"instrumentation.multi_market_shadow.{field} must be greater than 0"
+            )
+    if int(shadow["max_open_positions_per_symbol"]) > int(
+        shadow["max_entries_per_selection_epoch"]
+    ):
+        raise ValueError(
+            "instrumentation.multi_market_shadow.max_entries_per_selection_epoch "
+            "must be greater than or equal to max_open_positions_per_symbol"
+        )

@@ -30,6 +30,7 @@ class WSManager:
         self.ping_interval_seconds = int(ping_interval_seconds)
         self.ping_timeout_seconds = int(ping_timeout_seconds)
         self._app: WebSocketApp | None = None
+        self._subscription_request_id = 1
 
     def run_forever(self) -> None:
         backoff_sequence = [1, 2, 5, 10, 30, 60]
@@ -64,6 +65,47 @@ class WSManager:
         self.stop_requested = True
         if self._app:
             self._app.close()
+
+    def update_streams(self, streams: Iterable[str]) -> bool:
+        updated = list(dict.fromkeys(str(stream) for stream in streams))
+        if updated == self.streams:
+            return False
+        previous = set(self.streams)
+        self.streams = updated
+        added = [stream for stream in updated if stream not in previous]
+        removed = [stream for stream in previous if stream not in set(updated)]
+        self.logger.system(
+            "websocket_streams_updated",
+            streams=self.streams,
+            added=added,
+            removed=removed,
+        )
+        if self._app and self.status == "connected":
+            try:
+                self._send_subscription("SUBSCRIBE", added)
+                self._send_subscription("UNSUBSCRIBE", removed)
+            except Exception as exc:
+                self.logger.system(
+                    "websocket_stream_update_failed",
+                    error=str(exc),
+                )
+                self._app.close()
+        return True
+
+    def _send_subscription(self, method: str, streams: list[str]) -> None:
+        if not streams or not self._app:
+            return
+        request_id = self._subscription_request_id
+        self._subscription_request_id += 1
+        self._app.send(
+            json.dumps(
+                {
+                    "method": method,
+                    "params": streams,
+                    "id": request_id,
+                }
+            )
+        )
 
     def _watchdog(self, app: WebSocketApp) -> None:
         while not self.stop_requested:

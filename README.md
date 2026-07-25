@@ -106,3 +106,86 @@ python tools/serial_stop_study.py \
 O replay de risco e conservador: uma posicao reserva todo o risco ate seu fechamento
 historico, sem liberar orçamento quando BE, PL ou trailing protegem o trade. Entradas
 alteradas nao geram sinais historicos novos.
+
+## Estudo offline de regime em 1h
+
+`regime_study.py` etiqueta cada entrada pelo ultimo candle de `1h` que ja estava
+fechado naquele instante. A classificacao configurada em
+`instrumentation.regime_study` usa preco versus EMA50 e a inclinacao da EMA em tres
+candles: `UP` exige preco acima e EMA subindo, `DOWN` exige preco abaixo e EMA
+caindo, e os demais casos ficam como `MIXED`.
+
+```bash
+python tools/regime_study.py --ledger data/trades/trades_B.jsonl
+python tools/regime_study.py \
+  --ledger data/archive/ciclo-anterior/trades/trades_B.jsonl \
+  --ledger data/trades/trades_B.jsonl --detail
+```
+
+Na primeira execucao, os candles publicos reais sao baixados da Binance e gravados
+em `data/market/solusdt_1h.jsonl`. Depois, `--offline` impede novos downloads e
+exige cobertura completa do cache. O estudo compara o resultado observado por
+regime e tres contrafactuais parametrizados: bloquear `DOWN`, operar `DOWN` com
+metade do tamanho e exigir `UP`. Nenhum deles altera o bot vivo.
+
+## Estudo offline dos Top Gainers da Binance
+
+`market_selection_study.py` parte dos pares Spot `USDT` que a propria Binance
+marca como `TRADING`, aplica volume minimo e reconstroi historicamente quais moedas
+estavam positivas em 24h e 7d. A cada quatro horas, compara cestas `TOP_1`,
+`TOP_3`, `TOP_5`, todas as positivas, todo o universo liquido e SOL.
+
+```bash
+python tools/market_selection_study.py
+python tools/market_selection_study.py --offline
+```
+
+Na primeira execucao, a ferramenta grava o universo atual e os candles publicos
+em `data/market_selection/`. O replay usa somente candles fechados, mas o universo
+de simbolos atuais introduz vies de sobrevivencia. O spread mostrado e o bid/ask
+real no instante da execucao; o arquivo historico oficial nao contem snapshots do
+book. O estudo valida direcao de mercado, nao os gates nem o PnL realizado do bot.
+
+## Replay completo do bot nos mercados selecionados
+
+`market_bot_replay.py` usa as classes reais `EntryEngine` e
+`BotFullExitPosition` para executar os quatro gates, spacing, limite de slots,
+hard stop, BE, profit locks e trailing sobre candles historicos de `1m` e `15m`.
+Ele compara SOL com cinco slots contra Top 5 com uma ou duas posicoes por moeda.
+
+```bash
+python tools/market_bot_replay.py
+python tools/market_bot_replay.py --offline
+```
+
+Como candles de um minuto nao revelam se a maxima veio antes da minima, o
+relatorio mostra `LOW_FIRST` e `HIGH_FIRST`. O custo de spread/slippage e uma
+hipotese parametrizada em `instrumentation.market_bot_replay`; taxas usam
+`fees.*`. O mesmo relatorio agrupa aprovacoes repetidas e simula rearme depois
+de 1, 3, 5 ou 15 candles completos sem os quatro gates passarem. Isso permite
+distinguir um novo setup da repeticao do anterior. A ferramenta nunca envia
+ordens nem altera o estado do bot.
+
+## Shadow prospectivo Top 3 multimercado
+
+`instrumentation.multi_market_shadow` seleciona os tres mercados Spot/USDT
+liquidos com melhor variacao positiva em 24h e 7d, respeitando o spread maximo,
+e executa neles o pipeline e a saida reais do Trend-Sol apenas em memoria. Cada
+mercado tem cinco slots virtuais independentes. Nenhuma ordem, saldo ou slot do
+bot vivo e alterado.
+
+A selecao e refeita a cada quatro horas. Um `HARD_STOP` coloca somente aquele
+mercado em quarentena ate o proximo candle fechado de uma hora e antecipa uma
+nova selecao. Posicoes abertas continuam acompanhadas mesmo quando seu mercado
+sai do Top 3; novas entradas deixam de ser admitidas. O limite de cinco entradas
+por mercado em cada janela de selecao evita repetir indefinidamente o mesmo
+setup.
+
+```bash
+python tools/shadow_market_report.py
+python tools/shadow_market_report.py --limit 50
+```
+
+O estado fica em `data/state/multi_market_shadow.json`, os fechamentos em
+`data/trades/trades_shadow_top3.jsonl` e a auditoria completa em
+`data/telemetry/market_shadow_events.jsonl`.

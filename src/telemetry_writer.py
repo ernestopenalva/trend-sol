@@ -14,6 +14,7 @@ class TelemetryWriter:
         "trough_event": "trough_events_file",
         "position_snapshot": "position_snapshots_file",
         "rejected_signal": "rejected_signals_file",
+        "market_shadow_event": "market_shadow_events_file",
     }
 
     def __init__(self, project_root: Path, config: Dict[str, Any], logger: JsonlLogger) -> None:

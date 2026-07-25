@@ -83,6 +83,25 @@ class ConfigProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "net_floor_shadow.activation_buffer_atr"):
             effective_config(config)
 
+    def test_multi_market_shadow_requires_epoch_cap_to_cover_slots(self) -> None:
+        config = self.base_config()
+        config["instrumentation"] = {
+            "enabled": True,
+            "multi_market_shadow": {
+                "enabled": True,
+                "top_count": 3,
+                "reevaluate_hours": 4,
+                "max_universe_symbols": 50,
+                "max_open_positions_per_symbol": 5,
+                "max_entries_per_selection_epoch": 4,
+                "min_quote_volume_usdt": 10_000_000,
+                "max_spread_bps": 10,
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "max_entries_per_selection_epoch"):
+            effective_config(config)
+
 
 if __name__ == "__main__":
     unittest.main()

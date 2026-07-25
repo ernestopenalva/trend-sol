@@ -9,14 +9,21 @@ from src.position.bot_full_engine import BotFullExitPosition
 
 
 class TradeLedger:
-    def __init__(self, project_root: Path) -> None:
-        self.path = project_root / "data" / "trades" / "trades_B.jsonl"
+    def __init__(self, project_root: Path, path: Path | None = None) -> None:
+        self.path = path or (project_root / "data" / "trades" / "trades_B.jsonl")
 
     def append_closed_bot_trade(self, position: BotFullExitPosition, config: Dict[str, Any]) -> bool:
         return self._append_closed(position, config, "BOT_EXIT")
 
     def append_closed_phantom_trade(self, position: BotFullExitPosition, config: Dict[str, Any]) -> bool:
         return self._append_closed(position, config, "PHANTOM")
+
+    def append_closed_market_shadow_trade(
+        self,
+        position: BotFullExitPosition,
+        config: Dict[str, Any],
+    ) -> bool:
+        return self._append_closed(position, config, "MARKET_SHADOW")
 
     def _append_closed(
         self,
@@ -75,6 +82,22 @@ class TradeLedger:
             "source_candle_open_time": position.source_candle_open_time,
             "phantom": phantom,
             "phantom_id": getattr(position, "phantom_id", None),
+            "shadow_kind": getattr(position, "shadow_kind", None),
+            "shadow_selection_epoch_ms": getattr(
+                position,
+                "shadow_selection_epoch_ms",
+                None,
+            ),
+            "shadow_selection_rank": getattr(
+                position,
+                "shadow_selection_rank",
+                None,
+            ),
+            "shadow_selection_snapshot": getattr(
+                position,
+                "shadow_selection_snapshot",
+                None,
+            ),
             "symbol": position.symbol,
             "position_type": position_type,
             "position_notional_usdt": _float_or_none(position.position_notional_usdt),

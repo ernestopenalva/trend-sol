@@ -22,6 +22,7 @@ from src.logging_utils import JsonlLogger
 from src.monitor.cycle_manager import CycleManager
 from src.monitor.entry_engine import EntryEngine
 from src.monitor.human_console_reporter import HumanConsoleReporter
+from src.monitor.multi_market_shadow import MultiMarketShadow
 from src.monitor.position_registry import PositionRegistry
 from src.monitor.ws_manager import WSManager
 from src.project_env import load_project_env
@@ -76,6 +77,14 @@ class Monitor:
             self.telemetry_writer,
         )
         self.entry_engine = EntryEngine(str(self.config["symbol"]), self.config, self.logger)
+        self.market_shadow = MultiMarketShadow(
+            self.project_root,
+            self.config,
+            self.market_data_client,
+            self.logger,
+            self.telemetry_writer,
+            on_streams_changed=self._refresh_market_streams,
+        )
         self.logger.set_entry_console_context(self._entry_console_context)
 
     def run(self) -> None:
@@ -84,8 +93,9 @@ class Monitor:
             self.logger.system("validating_startup")
             self._validate_startup()
             self._load_historical_candles()
+            self.market_shadow.start()
             market_cfg = self.config["market_data"]
-            streams = [market_cfg["trade_stream"], *market_cfg["kline_streams"]]
+            streams = self._market_streams()
             self.ws_manager = WSManager(
                 market_cfg["ws_url"],
                 streams,
@@ -112,6 +122,7 @@ class Monitor:
         finally:
             if self.status_reporter:
                 self.status_reporter.stop()
+            self.market_shadow.stop()
             self.telemetry_writer.stop()
 
     def _validate_startup(self) -> None:
@@ -142,7 +153,9 @@ class Monitor:
         return int(time.time() * 1000)
 
     def _on_ws_event(self, stream: str, payload: Dict[str, Any]) -> None:
-        if stream.endswith("@aggTrade"):
+        self.market_shadow.on_ws_event(stream, payload)
+        live_symbol = str(self.config["symbol"]).lower()
+        if stream == f"{live_symbol}@aggTrade":
             import time
 
             price = float(payload["p"])
@@ -152,7 +165,7 @@ class Monitor:
             self._stop_after_cycle_if_needed()
             return
 
-        if "@kline_" in stream:
+        if stream.startswith(f"{live_symbol}@") and "@kline_" in stream:
             if self._entry_should_pause(stream, payload):
                 return
             signal = self.entry_engine.on_kline(stream, payload)
@@ -161,6 +174,19 @@ class Monitor:
                     self.registry.open_pair(signal)
                 except BinanceClientError as exc:
                     self.logger.system("order_rejected", error=str(exc), signal_price=signal.price)
+
+    def _market_streams(self) -> list[str]:
+        market_cfg = self.config["market_data"]
+        streams = [
+            market_cfg["trade_stream"],
+            *market_cfg["kline_streams"],
+            *self.market_shadow.required_streams(),
+        ]
+        return list(dict.fromkeys(str(stream) for stream in streams))
+
+    def _refresh_market_streams(self) -> None:
+        if self.ws_manager:
+            self.ws_manager.update_streams(self._market_streams())
 
     @staticmethod
     def _load_yaml(path: Path) -> Dict[str, Any]:

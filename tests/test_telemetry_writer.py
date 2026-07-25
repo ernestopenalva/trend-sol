@@ -21,6 +21,7 @@ class TelemetryWriterTests(unittest.TestCase):
             self.assertTrue(writer.submit("trough_event", {"position_id": 1, "price": 99}))
             self.assertTrue(writer.submit("position_snapshot", {"position_id": 1, "price": 101}))
             self.assertTrue(writer.submit("rejected_signal", {"reason": "BLOCKED_MAX_POSITIONS"}))
+            self.assertTrue(writer.submit("market_shadow_event", {"symbol": "BTCUSDT"}))
             writer.flush()
             writer.stop()
 
@@ -29,6 +30,10 @@ class TelemetryWriterTests(unittest.TestCase):
             self.assertEqual(
                 _read_jsonl(root / "data/telemetry/rejected_signals.jsonl")[0]["reason"],
                 "BLOCKED_MAX_POSITIONS",
+            )
+            self.assertEqual(
+                _read_jsonl(root / "data/telemetry/market_shadow_events.jsonl")[0]["symbol"],
+                "BTCUSDT",
             )
 
     def test_write_failure_is_logged_and_does_not_stop_writer(self) -> None:
@@ -77,6 +82,7 @@ def _config() -> dict:
             "trough_events_file": "data/telemetry/trough_events.jsonl",
             "position_snapshots_file": "data/telemetry/position_snapshots.jsonl",
             "rejected_signals_file": "data/telemetry/rejected_signals.jsonl",
+            "market_shadow_events_file": "data/telemetry/market_shadow_events.jsonl",
         },
         "logging": {"console": False, "system_log": "logs/system.log"},
         "console": {"mode": "human"},
