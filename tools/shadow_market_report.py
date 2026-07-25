@@ -4,14 +4,17 @@ import argparse
 import json
 import math
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import yaml
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
+BRASILIA_TZ = ZoneInfo("America/Sao_Paulo")
 
 
 def main() -> None:
@@ -56,6 +59,7 @@ def main() -> None:
     )
     print(f"Open virtual positions: {open_text or 'none'}")
     print(f"Closed virtual trades: {len(records)}")
+    _print_sample_net_pnl(records)
 
     print("\nBy market:")
     print("symbol       trades  hard_stop    gross       net   avg net       PF")
@@ -76,11 +80,12 @@ def main() -> None:
         )
 
     print("\nRecent trades:")
-    print("symbol       opened               entry     exit      net  reason")
+    print("symbol       opened       closed       entry     exit      net  reason")
     for record in records[-max(0, args.limit) :]:
         print(
             f"{str(record.get('symbol') or ''):<12} "
-            f"{str(record.get('opened_at') or '')[:16]:<20} "
+            f"{_format_brasilia(record.get('opened_at')):<12} "
+            f"{_format_brasilia(record.get('closed_at')):<12} "
             f"{_num(record.get('entry_price')):>8.4f} "
             f"{_num(record.get('exit_price')):>8.4f} "
             f"{_num(record.get('net_pnl_pct')):>+7.2f}% "
@@ -136,12 +141,67 @@ def _profit_factor(records: list[dict[str, Any]]) -> str:
     return f"{profits / losses:.2f}"
 
 
+def _print_sample_net_pnl(records: list[dict[str, Any]]) -> None:
+    net_usdt = [_net_pnl_usdt(record) for record in records]
+    known_net_usdt = [value for value in net_usdt if value is not None]
+    notionals = [_notional_usdt(record) for record in records]
+    known_notionals = [value for value in notionals if value is not None]
+    net_pct_sum = sum(_num(record.get("net_pnl_pct")) for record in records)
+
+    if not known_net_usdt or len(known_net_usdt) != len(records):
+        print(f"Sample net PnL: {net_pct_sum:+.2f}% (sum of closed-trade returns)")
+        return
+
+    total_notional = sum(known_notionals)
+    sample_return = (sum(known_net_usdt) / total_notional * 100) if total_notional else 0.0
+    print(
+        f"Sample net PnL: {sum(known_net_usdt):+.4f} USDT "
+        f"({sample_return:+.2f}% on {total_notional:.2f} USDT traded)"
+    )
+
+
+def _net_pnl_usdt(record: dict[str, Any]) -> float | None:
+    notional = _notional_usdt(record)
+    net_pct = _optional_num(record.get("net_pnl_pct"))
+    if notional is None or net_pct is None:
+        return None
+    return notional * net_pct / 100
+
+
+def _notional_usdt(record: dict[str, Any]) -> float | None:
+    configured = _optional_num(record.get("position_notional_usdt"))
+    if configured is not None and configured > 0:
+        return configured
+    quantity = _optional_num(record.get("qty"))
+    entry = _optional_num(record.get("entry_price"))
+    if quantity is None or entry is None or quantity <= 0 or entry <= 0:
+        return None
+    return quantity * entry
+
+
+def _format_brasilia(value: Any) -> str:
+    if not value:
+        return "n/a"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return "n/a"
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(BRASILIA_TZ).strftime("%d/%m %H:%M")
+
+
 def _num(value: Any) -> float:
+    number = _optional_num(value)
+    return number if number is not None else 0.0
+
+
+def _optional_num(value: Any) -> float | None:
     try:
         number = float(value)
     except (TypeError, ValueError):
-        return 0.0
-    return number if math.isfinite(number) else 0.0
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _pct(value: Any) -> str:
