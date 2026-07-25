@@ -71,7 +71,10 @@ def main() -> None:
     args = _parse_args()
     config = _load_config(Path(args.config))
     study = _study_config(config)
-    records = _load_records([Path(item) for item in args.ledger])
+    records = _load_records(
+        [Path(item) for item in args.ledger],
+        include_market_shadow=args.include_market_shadow,
+    )
     records = [
         item
         for item in records
@@ -104,14 +107,16 @@ def main() -> None:
         if args.episode_gap_hours is not None
         else study.get("episode_gap_hours", 6)
     )
-    risk_decisions = run_risk_budget_replay(records, risk_rules, balance, min_notional)
+    risk_decisions = run_risk_budget_replay(
+        records, risk_rules, balance, min_notional, args.include_market_shadow
+    )
     dynamic_risk_decisions = []
     if args.events:
         events = [item for path in args.events for item in _read_jsonl(Path(path))]
         dynamic_risk_decisions = run_dynamic_risk_budget_replay(
-            records, events, risk_rules, balance, min_notional
+            records, events, risk_rules, balance, min_notional, args.include_market_shadow
         )
-    band_decisions = run_price_band_replay(records, band_rules)
+    band_decisions = run_price_band_replay(records, band_rules, args.include_market_shadow)
     _print_report(
         records,
         risk_decisions,
@@ -122,9 +127,13 @@ def main() -> None:
         min_notional,
         episode_gap,
         args.detail,
+        args.include_market_shadow,
     )
     if dynamic_risk_decisions:
-        _print_dynamic_risk_report(records, dynamic_risk_decisions, risk_rules, episode_gap, args.detail)
+        _print_dynamic_risk_report(
+            records, dynamic_risk_decisions, risk_rules, episode_gap, args.detail,
+            args.include_market_shadow,
+        )
 
 
 def run_risk_budget_replay(
@@ -132,8 +141,9 @@ def run_risk_budget_replay(
     rules: Sequence[RiskBudgetRule],
     operational_balance_usdt: float,
     min_notional_usdt: float,
+    include_market_shadow: bool = False,
 ) -> list[RiskBudgetDecision]:
-    ordered = _normalized_real_records(records)
+    ordered = _normalized_study_records(records, include_market_shadow)
     output: list[RiskBudgetDecision] = []
     for rule in rules:
         if rule.budget_pct <= 0:
@@ -181,9 +191,10 @@ def run_dynamic_risk_budget_replay(
     rules: Sequence[RiskBudgetRule],
     operational_balance_usdt: float,
     min_notional_usdt: float,
+    include_market_shadow: bool = False,
 ) -> list[RiskBudgetDecision]:
     """Replay risk budgets, releasing reservation as historical stops are raised."""
-    ordered = _normalized_real_records(records)
+    ordered = _normalized_study_records(records, include_market_shadow)
     known_pairs = {str(item.get("pair_id")) for item in ordered}
     lifecycle = sorted(
         (
@@ -248,8 +259,9 @@ def _apply_lifecycle_event(
 def run_price_band_replay(
     records: Sequence[Dict[str, Any]],
     rules: Sequence[PriceBandRule],
+    include_market_shadow: bool = False,
 ) -> list[PriceBandDecision]:
-    ordered = _normalized_real_records(records)
+    ordered = _normalized_study_records(records, include_market_shadow)
     output: list[PriceBandDecision] = []
     for rule in rules:
         if rule.band_pct <= 0 or rule.max_positions < 1:
@@ -286,12 +298,13 @@ def _print_report(
     min_notional: float,
     episode_gap_hours: float,
     detail: bool,
+    include_market_shadow: bool,
 ) -> None:
-    scored = [item for item in records if _score_eligible(item) and _is_real_bot_position(item)]
+    scored = [item for item in records if _score_eligible(item) and _is_study_position(item, include_market_shadow)]
     baseline_usdt = sum(_net_usdt(item) or 0.0 for item in scored)
     print("TREND-SOL | serial hard-stop study")
     print(
-        f"Sample: real entries={len(records)} | scored outcomes={len(scored)} | "
+        f"Sample: {'real + market-shadow' if include_market_shadow else 'real'} entries={len(records)} | scored outcomes={len(scored)} | "
         f"baseline net={baseline_usdt:+.4f} USDT"
     )
     print(
@@ -383,8 +396,9 @@ def _print_dynamic_risk_report(
     rules: Sequence[RiskBudgetRule],
     episode_gap_hours: float,
     detail: bool,
+    include_market_shadow: bool,
 ) -> None:
-    scored = [item for item in records if _score_eligible(item) and _is_real_bot_position(item)]
+    scored = [item for item in records if _score_eligible(item) and _is_study_position(item, include_market_shadow)]
     baseline_usdt = sum(_net_usdt(item) or 0.0 for item in scored)
     print()
     print("Dynamic risk-budget replay (releases reservation as effective_stop rises):")
@@ -492,16 +506,30 @@ def _net_usdt(record: Dict[str, Any]) -> Optional[float]:
     return notional * net_pct / 100 if net_pct is not None and notional is not None else None
 
 
-def _normalized_real_records(records: Sequence[Dict[str, Any]]) -> list[Dict[str, Any]]:
+def _normalized_study_records(
+    records: Sequence[Dict[str, Any]],
+    include_market_shadow: bool = False,
+) -> list[Dict[str, Any]]:
     normalized = [_normalize_record(item) for item in records]
     return sorted(
-        _dedupe_records(item for item in normalized if _is_real_bot_position(item)),
+        _dedupe_records(
+            item for item in normalized if _is_study_position(item, include_market_shadow)
+        ),
         key=_record_sort_key,
     )
 
 
-def _load_records(paths: Sequence[Path]) -> list[Dict[str, Any]]:
-    return _normalized_real_records([item for path in paths for item in _read_jsonl(path)])
+def _is_study_position(record: Dict[str, Any], include_market_shadow: bool) -> bool:
+    return _is_real_bot_position(record) or (
+        include_market_shadow
+        and str(record.get("position_type") or "") == "MARKET_SHADOW"
+    )
+
+
+def _load_records(paths: Sequence[Path], include_market_shadow: bool = False) -> list[Dict[str, Any]]:
+    return _normalized_study_records(
+        [item for path in paths for item in _read_jsonl(path)], include_market_shadow
+    )
 
 
 def _risk_episodes(
@@ -585,6 +613,10 @@ def _parse_args() -> argparse.Namespace:
         help="JSONL de eventos de trade; ativa replay dinamico que libera risco conforme effective_stop.",
     )
     parser.add_argument("--profile", choices=["intraday", "production", "all"], default="intraday")
+    parser.add_argument(
+        "--include-market-shadow", action="store_true",
+        help="Inclui somente MARKET_SHADOW alem das posicoes reais; mantem exclusao como padrao.",
+    )
     parser.add_argument("--risk-budget-pct", action="append", type=float)
     parser.add_argument("--price-band-rule", action="append")
     parser.add_argument("--operational-balance-usdt", type=float)

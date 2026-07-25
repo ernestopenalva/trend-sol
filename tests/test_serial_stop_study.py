@@ -82,6 +82,18 @@ class SerialStopStudyTests(unittest.TestCase):
         self.assertEqual([item.factor for item in decisions], [1.0, 1.0, 1.0])
         self.assertAlmostEqual(decisions[-1].risk_before_usdt, 0.44)
 
+    def test_risk_budget_includes_market_shadow_only_when_requested(self) -> None:
+        trade = _trade("shadow", "2026-07-01T00:00:00+00:00", "2026-07-01T10:00:00+00:00", 100)
+        trade.update({"position_type": "MARKET_SHADOW", "phantom": True})
+
+        excluded = run_risk_budget_replay([trade], [RiskBudgetRule("RISK_1", 1.0)], 100, 10)
+        included = run_risk_budget_replay(
+            [trade], [RiskBudgetRule("RISK_1", 1.0)], 100, 10, include_market_shadow=True
+        )
+
+        self.assertEqual(excluded, [])
+        self.assertEqual([item.record["pair_id"] for item in included], ["shadow"])
+
 
 def _trade(
     pair_id: str,
