@@ -5,6 +5,7 @@ import unittest
 from tools.serial_stop_study import (
     PriceBandRule,
     RiskBudgetRule,
+    run_dynamic_risk_budget_replay,
     run_price_band_replay,
     run_risk_budget_replay,
 )
@@ -58,6 +59,28 @@ class SerialStopStudyTests(unittest.TestCase):
         blocked = [item.record["pair_id"] for item in decisions if item.blocked]
 
         self.assertEqual(blocked, ["c"])
+
+    def test_dynamic_risk_releases_budget_after_net_protective_stop(self) -> None:
+        records = [
+            _trade("a", "2026-07-01T00:00:00+00:00", "2026-07-01T10:00:00+00:00", 100),
+            _trade("b", "2026-07-01T00:10:00+00:00", "2026-07-01T10:00:00+00:00", 100.1),
+            _trade("c", "2026-07-01T00:20:00+00:00", "2026-07-01T10:00:00+00:00", 100.2),
+        ]
+        events = [
+            {
+                "ts": "2026-07-01T00:15:00+00:00",
+                "pair_id": "a",
+                "event": "BREAKEVEN_ATR",
+                "effective_stop": 100.25,
+            }
+        ]
+
+        decisions = run_dynamic_risk_budget_replay(
+            records, events, [RiskBudgetRule("RISK_1", 1.0)], 100, 10
+        )
+
+        self.assertEqual([item.factor for item in decisions], [1.0, 1.0, 1.0])
+        self.assertAlmostEqual(decisions[-1].risk_before_usdt, 0.44)
 
 
 def _trade(

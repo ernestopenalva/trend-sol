@@ -105,6 +105,12 @@ def main() -> None:
         else study.get("episode_gap_hours", 6)
     )
     risk_decisions = run_risk_budget_replay(records, risk_rules, balance, min_notional)
+    dynamic_risk_decisions = []
+    if args.events:
+        events = [item for path in args.events for item in _read_jsonl(Path(path))]
+        dynamic_risk_decisions = run_dynamic_risk_budget_replay(
+            records, events, risk_rules, balance, min_notional
+        )
     band_decisions = run_price_band_replay(records, band_rules)
     _print_report(
         records,
@@ -117,6 +123,8 @@ def main() -> None:
         episode_gap,
         args.detail,
     )
+    if dynamic_risk_decisions:
+        _print_dynamic_risk_report(records, dynamic_risk_decisions, risk_rules, episode_gap, args.detail)
 
 
 def run_risk_budget_replay(
@@ -165,6 +173,76 @@ def run_risk_budget_replay(
             if factor > 0:
                 active.append((candidate, factor))
     return output
+
+
+def run_dynamic_risk_budget_replay(
+    records: Sequence[Dict[str, Any]],
+    events: Sequence[Dict[str, Any]],
+    rules: Sequence[RiskBudgetRule],
+    operational_balance_usdt: float,
+    min_notional_usdt: float,
+) -> list[RiskBudgetDecision]:
+    """Replay risk budgets, releasing reservation as historical stops are raised."""
+    ordered = _normalized_real_records(records)
+    known_pairs = {str(item.get("pair_id")) for item in ordered}
+    lifecycle = sorted(
+        (
+            (timestamp, index, event)
+            for index, event in enumerate(events)
+            if str(event.get("pair_id")) in known_pairs
+            if (timestamp := _timestamp(event.get("ts"))) is not None
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
+    output: list[RiskBudgetDecision] = []
+    for rule in rules:
+        if rule.budget_pct <= 0:
+            raise ValueError(f"{rule.name}: budget_pct must be positive")
+        budget_usdt = operational_balance_usdt * rule.budget_pct / 100
+        active: dict[str, tuple[Dict[str, Any], float, float]] = {}
+        event_index = 0
+        for candidate in ordered:
+            opened = _opened_at(candidate)
+            if opened is None:
+                continue
+            while event_index < len(lifecycle) and lifecycle[event_index][0] <= opened:
+                _, _, event = lifecycle[event_index]
+                _apply_lifecycle_event(active, event)
+                event_index += 1
+            active = {
+                pair_id: value
+                for pair_id, value in active.items()
+                if _closed_at(value[0]) is None or opened < _closed_at(value[0])
+            }
+            risk_before = sum(risk for _, _, risk in active.values())
+            full_risk = _full_trade_risk_usdt(candidate)
+            factor = 1.0
+            if full_risk is not None and full_risk > 0:
+                factor = min(1.0, max(0.0, (budget_usdt - risk_before) / full_risk))
+                notional = _position_notional(candidate)
+                if notional is None or notional * factor + 1e-12 < min_notional_usdt:
+                    factor = 0.0
+            risk_after = risk_before + (full_risk or 0.0) * factor
+            output.append(RiskBudgetDecision(rule, candidate, factor, risk_before, full_risk, risk_after))
+            if factor > 0:
+                active[str(candidate.get("pair_id"))] = (candidate, factor, (full_risk or 0.0) * factor)
+    return output
+
+
+def _apply_lifecycle_event(
+    active: dict[str, tuple[Dict[str, Any], float, float]], event: Dict[str, Any]
+) -> None:
+    pair_id = str(event.get("pair_id"))
+    current = active.get(pair_id)
+    if current is None:
+        return
+    record, factor, risk = current
+    if str(event.get("event") or "") == "CLOSE":
+        active.pop(pair_id, None)
+        return
+    effective_stop = _float(event.get("effective_stop"))
+    if effective_stop is not None:
+        active[pair_id] = (record, factor, _risk_to_stop_usdt(record, effective_stop) * factor)
 
 
 def run_price_band_replay(
@@ -299,6 +377,54 @@ def _print_report(
         )
 
 
+def _print_dynamic_risk_report(
+    records: Sequence[Dict[str, Any]],
+    decisions: Sequence[RiskBudgetDecision],
+    rules: Sequence[RiskBudgetRule],
+    episode_gap_hours: float,
+    detail: bool,
+) -> None:
+    scored = [item for item in records if _score_eligible(item) and _is_real_bot_position(item)]
+    baseline_usdt = sum(_net_usdt(item) or 0.0 for item in scored)
+    print()
+    print("Dynamic risk-budget replay (releases reservation as effective_stop rises):")
+    print(
+        f"{'rule':10} {'changed':>7} {'scaled':>6} {'blocked':>7} {'chgW':>5} "
+        f"{'chgL':>5} {'HS':>4} {'saveL':>9} {'cutW':>9} {'delta':>9} "
+        f"{'hyp_net':>9} {'episodes':>8} {'score +/-/=':>11}"
+    )
+    for rule in rules:
+        selected = [item for item in decisions if item.rule == rule and item.factor < 1 - 1e-12]
+        scored_selected = [item for item in selected if item.scored]
+        saved_losses, cut_winners, delta = _factor_economics(scored_selected)
+        episodes = _risk_episodes(scored_selected, episode_gap_hours)
+        scores = _episode_score([sum(_decision_delta_usdt(item) for item in group) for group in episodes])
+        print(
+            f"{rule.name:10} {len(selected):7d} "
+            f"{sum(0 < item.factor < 1 for item in selected):6d} "
+            f"{sum(item.factor == 0 for item in selected):7d} "
+            f"{sum((_net_usdt(item.record) or 0.0) > 0 for item in scored_selected):5d} "
+            f"{sum((_net_usdt(item.record) or 0.0) < 0 for item in scored_selected):5d} "
+            f"{sum(str(item.record.get('exit_reason') or '') == 'HARD_STOP' for item in scored_selected):4d} "
+            f"{saved_losses:9.4f} {cut_winners:9.4f} {delta:+9.4f} "
+            f"{baseline_usdt + delta:+9.4f} {len(episodes):8d} "
+            f"{scores[0]:3d}/{scores[1]}/{scores[2]:<3d}"
+        )
+    if not detail:
+        return
+    print("Changed dynamic-risk entries:")
+    for item in decisions:
+        if item.factor >= 1 - 1e-12:
+            continue
+        print(
+            f"  {item.rule.name} {_fmt_ts(item.record.get('opened_at'))} "
+            f"pair={item.record.get('pair_id')} factor={item.factor:.3f} "
+            f"risk={item.risk_before_usdt:.4f}->{item.risk_after_usdt:.4f}USDT "
+            f"outcome={item.record.get('exit_reason') or 'OPEN'} "
+            f"delta={_decision_delta_usdt(item):+.4f}USDT scored={'yes' if item.scored else 'no'}"
+        )
+
+
 def _factor_economics(
     decisions: Sequence[RiskBudgetDecision],
 ) -> tuple[float, float, float]:
@@ -325,8 +451,29 @@ def _full_trade_risk_usdt(record: Dict[str, Any]) -> Optional[float]:
     fees_pct = _float(record.get("estimated_fees_pct")) or 0.0
     if entry is None or entry <= 0 or stop is None or notional is None:
         return None
-    gross_loss_pct = max(0.0, (entry - stop) / entry * 100)
-    return notional * (gross_loss_pct + fees_pct) / 100
+    return _risk_to_stop_usdt(record, stop)
+
+
+def _risk_to_stop_usdt(record: Dict[str, Any], stop: float) -> float:
+    entry = _float(record.get("entry_price"))
+    notional = _position_notional(record)
+    fees_pct = _float(record.get("estimated_fees_pct")) or 0.0
+    if entry is None or entry <= 0 or notional is None:
+        return 0.0
+    gross_loss_pct = (entry - stop) / entry * 100
+    return notional * max(0.0, gross_loss_pct + fees_pct) / 100
+
+
+def _timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _entry_distance_pct(candidate: float, existing: Optional[float]) -> float:
@@ -433,6 +580,10 @@ def _parse_args() -> argparse.Namespace:
         description="Replay offline de risco coletivo e concentracao; nunca envia ordens nem altera o bot."
     )
     parser.add_argument("--ledger", action="append", required=True, help="Ledger JSONL; pode ser repetido.")
+    parser.add_argument(
+        "--events", action="append",
+        help="JSONL de eventos de trade; ativa replay dinamico que libera risco conforme effective_stop.",
+    )
     parser.add_argument("--profile", choices=["intraday", "production", "all"], default="intraday")
     parser.add_argument("--risk-budget-pct", action="append", type=float)
     parser.add_argument("--price-band-rule", action="append")
