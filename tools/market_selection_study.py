@@ -838,6 +838,10 @@ def _interval_ms(value: str) -> int:
         return 15 * 60_000
     if value == "1h":
         return HOUR_MS
+    if value == "4h":
+        return 4 * HOUR_MS
+    if value == "1d":
+        return 24 * HOUR_MS
     raise ValueError(f"Unsupported timeframe: {value}")
 
 

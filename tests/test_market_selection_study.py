@@ -8,11 +8,16 @@ from tools.market_selection_study import (
     build_candidate_snapshots,
     forward_outcome,
     missing_candle_ranges,
+    _interval_ms,
     _trimmed_mean,
 )
 
 
 class MarketSelectionStudyTests(unittest.TestCase):
+    def test_interval_supports_4h_and_1d_for_shared_candle_client(self) -> None:
+        self.assertEqual(_interval_ms("4h"), 4 * HOUR_MS)
+        self.assertEqual(_interval_ms("1d"), 24 * HOUR_MS)
+
     def test_ranking_snapshot_uses_only_trailing_data(self) -> None:
         candles = [_candle(index, 100 + index, 1_000_000) for index in range(169)]
 
