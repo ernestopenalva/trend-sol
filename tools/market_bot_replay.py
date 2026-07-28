@@ -243,10 +243,31 @@ def main() -> None:
         f"Historical selector touched {len(selected_markets)} symbols: "
         + ", ".join(item.symbol for item in selected_markets)
     )
-    minute = _load_market_data(
-        client, selected_markets, "1m", data_start_ms, end_ms, cache_dir, args.offline
-    )
     trend_timeframe = str(config["trend"]["timeframe"])
+    entry_timeframe = str(config["entry"]["timeframe"])
+    execution_timeframe = str(args.execution_timeframe or entry_timeframe)
+    execution = _load_market_data(
+        client,
+        selected_markets,
+        execution_timeframe,
+        data_start_ms,
+        end_ms,
+        cache_dir,
+        args.offline,
+    )
+    entry = (
+        execution
+        if execution_timeframe == entry_timeframe
+        else _load_market_data(
+            client,
+            selected_markets,
+            entry_timeframe,
+            data_start_ms,
+            end_ms,
+            cache_dir,
+            args.offline,
+        )
+    )
     trend = _load_market_data(
         client,
         selected_markets,
@@ -256,11 +277,12 @@ def main() -> None:
         cache_dir,
         args.offline,
     )
-    complete_symbols = set(minute) & set(trend)
-    minute = {key: value for key, value in minute.items() if key in complete_symbols}
+    complete_symbols = set(execution) & set(entry) & set(trend)
+    execution = {key: value for key, value in execution.items() if key in complete_symbols}
+    entry = {key: value for key, value in entry.items() if key in complete_symbols}
     trend = {key: value for key, value in trend.items() if key in complete_symbols}
     signals = generate_pipeline_signals(
-        config, minute, trend, replay_start_ms, end_ms
+        config, entry, trend, replay_start_ms, end_ms
     )
     print(
         f"Pipeline approved {len(signals)} signals across "
@@ -281,7 +303,7 @@ def main() -> None:
                     policy=policy,
                     intrabar_path=intrabar_path,
                     signals=signals,
-                    candles_by_symbol=minute,
+                    candles_by_symbol=execution,
                     timeline=timeline,
                     replay_start_ms=replay_start_ms,
                     end_ms=end_ms,
@@ -308,7 +330,7 @@ def main() -> None:
                             policy=policy,
                             intrabar_path=intrabar_path,
                             signals=rearmed,
-                            candles_by_symbol=minute,
+                            candles_by_symbol=execution,
                             timeline=timeline,
                             replay_start_ms=replay_start_ms,
                             end_ms=end_ms,
@@ -326,6 +348,8 @@ def main() -> None:
         round_trip_spread_bps,
         replay_start_ms,
         end_ms,
+        entry_timeframe,
+        execution_timeframe,
     )
     _print_signal_rearm_report(signals, results, rearm_results)
 
@@ -760,13 +784,15 @@ def _print_report(
     spread_bps: float,
     start_ms: int,
     end_ms: int,
+    entry_timeframe: str,
+    execution_timeframe: str,
 ) -> None:
     fees_pct = _round_trip_fees_pct(config)
     print()
     print("TREND-SOL | selected-market full bot replay")
     print(
         f"Period: {_date(start_ms)} to {_date(end_ms)} | {lookback_days}d | "
-        f"selector every {decision_hours}h"
+        f"selector every {decision_hours}h | entry={entry_timeframe} | execution={execution_timeframe}"
     )
     print(
         f"Costs: taker round-trip={fees_pct:.3f}% | modeled spread/slippage="
@@ -991,6 +1017,10 @@ def _parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--lookback-days", type=int)
+    parser.add_argument(
+        "--execution-timeframe",
+        help="Candles used for exit simulation; defaults to the entry timeframe.",
+    )
     parser.add_argument("--market-data-url")
     parser.add_argument("--http-timeout-seconds", type=int, default=15)
     parser.add_argument(
