@@ -704,7 +704,13 @@ def _load_market_data(
     cache_dir: Path,
     offline: bool,
 ) -> Dict[str, list[MarketCandle]]:
-    interval_ms = {"1m": MINUTE_MS, "15m": 15 * MINUTE_MS, "1h": HOUR_MS}[interval]
+    interval_ms = {
+        "1m": MINUTE_MS,
+        "15m": 15 * MINUTE_MS,
+        "1h": HOUR_MS,
+        "4h": 4 * HOUR_MS,
+        "1d": DAY_MS,
+    }[interval]
     output = {}
     for index, market in enumerate(markets, start=1):
         path = cache_dir / f"{market.symbol}_{interval}.jsonl"
