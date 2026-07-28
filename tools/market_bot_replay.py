@@ -195,13 +195,17 @@ def main() -> None:
     client = BinancePublicClient(base_url, int(args.http_timeout_seconds))
     cache_dir = Path(args.cache_dir)
     selection_cache_dir = Path(args.selection_cache_dir)
-    markets = _load_or_fetch_universe(
-        client,
-        Path(args.universe_snapshot),
-        config,
-        min_quote_volume,
-        max_symbols,
-        args.offline,
+    markets = (
+        [CurrentMarket("SOLUSDT", "SOL", 0.0, None, 0.0, None)]
+        if args.sol_only
+        else _load_or_fetch_universe(
+            client,
+            Path(args.universe_snapshot),
+            config,
+            min_quote_volume,
+            max_symbols,
+            args.offline,
+        )
     )
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     end_ms = _floor_ms(now_ms, MINUTE_MS) - 1
@@ -209,40 +213,45 @@ def main() -> None:
     data_start_ms = replay_start_ms - warmup_days * DAY_MS
 
     print("TREND-SOL | selected-market full bot replay")
-    print(
-        f"Preparing {lookback_days}d replay + {warmup_days}d warmup | "
-        f"universe={len(markets)} | Top {top_count}"
-    )
-    hourly = _load_market_data(
-        client,
-        markets,
-        "1h",
-        data_start_ms,
-        end_ms,
-        selection_cache_dir,
-        args.offline,
-    )
-    timeline = build_selection_timeline(
-        hourly,
-        decision_hours,
-        min_quote_volume,
-        top_count,
-        replay_start_ms,
-        end_ms,
-    )
-    selected_symbols = sorted(
-        {
-            symbol
-            for boundary in timeline.boundaries
-            for symbol in timeline.selected(boundary, top_count)
-        }
-        | {"SOLUSDT"}
-    )
-    selected_markets = [item for item in markets if item.symbol in selected_symbols]
-    print(
-        f"Historical selector touched {len(selected_markets)} symbols: "
-        + ", ".join(item.symbol for item in selected_markets)
-    )
+    if args.sol_only:
+        print(f"Preparing SOL-only {lookback_days}d replay + {warmup_days}d warmup")
+        timeline = SelectionTimeline({}, {})
+        selected_markets = markets
+    else:
+        print(
+            f"Preparing {lookback_days}d replay + {warmup_days}d warmup | "
+            f"universe={len(markets)} | Top {top_count}"
+        )
+        hourly = _load_market_data(
+            client,
+            markets,
+            "1h",
+            data_start_ms,
+            end_ms,
+            selection_cache_dir,
+            args.offline,
+        )
+        timeline = build_selection_timeline(
+            hourly,
+            decision_hours,
+            min_quote_volume,
+            top_count,
+            replay_start_ms,
+            end_ms,
+        )
+        selected_symbols = sorted(
+            {
+                symbol
+                for boundary in timeline.boundaries
+                for symbol in timeline.selected(boundary, top_count)
+            }
+            | {"SOLUSDT"}
+        )
+        selected_markets = [item for item in markets if item.symbol in selected_symbols]
+        print(
+            f"Historical selector touched {len(selected_markets)} symbols: "
+            + ", ".join(item.symbol for item in selected_markets)
+        )
     trend_timeframe = str(config["trend"]["timeframe"])
     entry_timeframe = str(config["entry"]["timeframe"])
     execution_timeframe = str(args.execution_timeframe or entry_timeframe)
@@ -289,11 +298,15 @@ def main() -> None:
         f"{len({item.symbol for item in signals})} symbols."
     )
 
-    policies = [
-        ReplayPolicy("SOL_MAX5", 0, 5, sol_only=True),
-        ReplayPolicy("TOP5_ONE_EACH", top_count, 1),
-        ReplayPolicy("TOP5_MAX2", top_count, 2),
-    ]
+    policies = (
+        [ReplayPolicy("SOL_MAX5", 0, 5, sol_only=True)]
+        if args.sol_only
+        else [
+            ReplayPolicy("SOL_MAX5", 0, 5, sol_only=True),
+            ReplayPolicy("TOP5_ONE_EACH", top_count, 1),
+            ReplayPolicy("TOP5_MAX2", top_count, 2),
+        ]
+    )
     results = []
     for intrabar_path in ("LOW_FIRST", "HIGH_FIRST"):
         for policy in policies:
@@ -319,7 +332,7 @@ def main() -> None:
     for quiet_minutes in rearm_quiet_minutes:
         rearmed = filter_signals_by_quiet_period(signals, quiet_minutes)
         for intrabar_path in ("LOW_FIRST", "HIGH_FIRST"):
-            for policy in (policies[0], policies[1]):
+            for policy in policies[:2]:
                 rearm_results.append(
                     RearmReplay(
                         quiet_minutes=quiet_minutes,
@@ -350,6 +363,7 @@ def main() -> None:
         end_ms,
         entry_timeframe,
         execution_timeframe,
+        args.sol_only,
     )
     _print_signal_rearm_report(signals, results, rearm_results)
 
@@ -792,6 +806,7 @@ def _print_report(
     end_ms: int,
     entry_timeframe: str,
     execution_timeframe: str,
+    sol_only: bool,
 ) -> None:
     fees_pct = _round_trip_fees_pct(config)
     print()
@@ -804,12 +819,15 @@ def _print_report(
         f"Costs: taker round-trip={fees_pct:.3f}% | modeled spread/slippage="
         f"{spread_bps:.1f}bp round-trip"
     )
+    if sol_only:
+        print("Selector: disabled (SOL-only replay)")
+    else:
+        print(
+            f"Selector: 24h>0 and 7d>0 | historical quote volume>="
+            f"{min_quote_volume:,.0f} USDT"
+        )
     print(
-        f"Selector: 24h>0 and 7d>0 | historical quote volume>="
-        f"{min_quote_volume:,.0f} USDT"
-    )
-    print(
-        "Fidelity: actual EntryEngine and BotFullExitPosition; 1m OHLC cannot reveal "
+        f"Fidelity: actual EntryEngine and BotFullExitPosition; {execution_timeframe} OHLC cannot reveal "
         "the true high/low order, so both paths are reported."
     )
     print(
@@ -1023,6 +1041,10 @@ def _parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--lookback-days", type=int)
+    parser.add_argument(
+        "--sol-only", action="store_true",
+        help="Reproduz apenas SOLUSDT e desliga a selecao multimercado.",
+    )
     parser.add_argument(
         "--execution-timeframe",
         help="Candles used for exit simulation; defaults to the entry timeframe.",
