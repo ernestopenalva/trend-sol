@@ -6,6 +6,7 @@ import sys
 import types
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -30,6 +31,7 @@ from tools.trades_report import (
     _filter,
     _net_pnl,
     _parse_args,
+    _parse_since,
     _partition_records,
     _print_detail_sections,
     _print_exit_reason_breakdown,
@@ -466,6 +468,14 @@ class BotExitOnlyTests(unittest.TestCase):
 
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0]["run_id"], "r2")
+
+    def test_trades_report_accepts_displayed_brasilia_date_and_time(self) -> None:
+        parsed = _parse_since(
+            "08/08 18:00",
+            reference=datetime(2026, 8, 8, 20, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(parsed, datetime(2026, 8, 8, 21, 0, tzinfo=timezone.utc))
 
     def test_trades_report_labels_be_review_stop_as_breakeven(self) -> None:
         record = {"exit_reason": "REVIEW_STOP", "final_step": "BE"}

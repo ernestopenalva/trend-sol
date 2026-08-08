@@ -508,17 +508,31 @@ def _fmt_profit_factor(values: Iterable[float]) -> str:
     return f"{gains / losses:.2f}"
 
 
-def _parse_since(value: Optional[str]) -> Optional[datetime]:
+def _parse_since(
+    value: Optional[str],
+    reference: Optional[datetime] = None,
+) -> Optional[datetime]:
     if not value:
         return None
     text = value.strip()
+    current = reference or datetime.now(BRASILIA_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=BRASILIA_TZ)
     try:
-        if len(text) == 10:
+        if len(text) == 11 and text[2] == "/" and text[5] == " " and text[8] == ":":
+            parsed = datetime.strptime(
+                f"{text}/{current.astimezone(BRASILIA_TZ).year}",
+                "%d/%m %H:%M/%Y",
+            ).replace(tzinfo=BRASILIA_TZ)
+        elif len(text) == 10:
             parsed = datetime.combine(date.fromisoformat(text), time.min)
         else:
             parsed = datetime.fromisoformat(text.replace(" ", "T"))
     except ValueError:
-        raise SystemExit(f"Invalid --since value: {value}")
+        raise SystemExit(
+            f"Invalid --since value: {value}. "
+            "Use DD/MM HH:MM or an ISO 8601 date/time."
+        )
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=BRASILIA_TZ)
     return parsed.astimezone(timezone.utc)
