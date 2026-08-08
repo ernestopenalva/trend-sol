@@ -42,6 +42,23 @@ class CycleManagerTests(unittest.TestCase):
             self.assertEqual(manager.completed_cycles, 1)
             self.assertEqual(manager.closed_pairs_in_current_cycle, 0)
 
+    def test_continuous_mode_never_becomes_single_cycle_complete(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {
+                "run_control": {"mode": "continuous", "stop_after_cycle_complete": False},
+                "capital": {"operational_balance_usdt": 1000, "trade_size_pct": 5},
+                "cycle": {"pairs_per_cycle": 1, "trades_per_cycle": 1, "prolabore_pct": 5, "stats_min_pairs": 50},
+                "logging": {"console": False, "system_log": "logs/system.log"},
+                "console": {"mode": "human"},
+            }
+            manager = CycleManager(root, config, JsonlLogger(root, config), StateManager(root))
+
+            manager.on_pair_closed([FakePosition("A"), FakePosition("B")])
+
+            self.assertEqual(manager.completed_cycles, 1)
+            self.assertFalse(manager.single_cycle_complete)
+
 
 if __name__ == "__main__":
     unittest.main()

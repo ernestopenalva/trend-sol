@@ -59,25 +59,51 @@ class EntrySignal:
 
 
 class EntryEngine:
-    def __init__(self, symbol: str, config: Dict[str, Any], logger: JsonlLogger) -> None:
+    def __init__(
+        self,
+        symbol: str,
+        config: Dict[str, Any],
+        logger: JsonlLogger,
+        gate1_mode: Optional[str] = None,
+    ) -> None:
         self.symbol = symbol
         self.config = config
         self.logger = logger
         self.trend_timeframe = str(config["trend"]["timeframe"])
         self.entry_timeframe = str(config["entry"]["timeframe"])
+        self.gate1_mode = str(
+            gate1_mode or config.get("trend_gate", {}).get("mode", "legacy_ema")
+        ).lower()
         self.trend_candles: List[Candle] = []
         self.entry_candles: List[Candle] = []
+        self.auxiliary_candles: Dict[str, List[Candle]] = {}
         self.last_evaluated_entry_open_time: Optional[int] = None
         self.last_diagnostic: Dict[str, Any] = self._empty_diagnostic()
+
+    def required_timeframes(self) -> List[str]:
+        timeframes = [self.trend_timeframe, self.entry_timeframe]
+        trend_gate = self.config.get("trend_gate", {})
+        if self.gate1_mode == "ge30":
+            timeframes.append(str(trend_gate["candle_interval"]))
+        observations = self.config.get("ema_observations", {})
+        if bool(observations.get("enabled", False)):
+            for variant in observations.get("variants", []):
+                if isinstance(variant, dict) and variant.get("interval"):
+                    timeframes.append(str(variant["interval"]))
+        return list(dict.fromkeys(timeframes))
 
     def load_history(self, timeframe: str, klines: List[List[Any]], now_ms: int) -> None:
         candles = [Candle.from_rest_kline(kline, now_ms) for kline in klines]
         closed_candles = [candle for candle in candles if candle.closed]
         if timeframe == self.trend_timeframe:
             self.trend_candles = closed_candles[-300:]
-        elif timeframe == self.entry_timeframe:
+        if timeframe == self.entry_timeframe:
             self.entry_candles = closed_candles[-300:]
-        else:
+        if timeframe not in (self.trend_timeframe, self.entry_timeframe):
+            if timeframe not in self.required_timeframes():
+                raise ValueError(f"unsupported timeframe for history: {timeframe}")
+            self.auxiliary_candles[timeframe] = closed_candles[-300:]
+        elif timeframe not in self.required_timeframes():
             raise ValueError(f"unsupported timeframe for history: {timeframe}")
         self.logger.system("historical_candles_loaded", timeframe=timeframe, candles=len(closed_candles))
 
@@ -86,13 +112,12 @@ class EntryEngine:
         if not candle.closed:
             return None
 
-        if stream.endswith(f"@kline_{self.trend_timeframe}"):
-            self._upsert(self.trend_candles, candle)
+        timeframe = stream.rsplit("@kline_", 1)[-1] if "@kline_" in stream else ""
+        if timeframe not in self.required_timeframes():
             return None
-        if not stream.endswith(f"@kline_{self.entry_timeframe}"):
+        self._upsert(self._candles_for(timeframe), candle)
+        if timeframe != self.entry_timeframe:
             return None
-
-        self._upsert(self.entry_candles, candle)
         if self.last_evaluated_entry_open_time == candle.open_time:
             return None
         self.last_evaluated_entry_open_time = candle.open_time
@@ -100,6 +125,19 @@ class EntryEngine:
 
     def evaluate(self) -> Optional[EntrySignal]:
         self.last_diagnostic = self._empty_diagnostic()
+        ema_observations = self._ema_observations()
+        if ema_observations is not None:
+            self.last_diagnostic["ema_observations"] = ema_observations
+            self.logger.decision(
+                {
+                    "ts": now_iso(),
+                    "gate": 0,
+                    "passed": None,
+                    "near_miss": False,
+                    "reason": "ema_observations",
+                    "ema_observations": ema_observations,
+                }
+            )
         if not self._gate_trend():
             return None
         if not self._gate_pullback():
@@ -124,6 +162,7 @@ class EntryEngine:
                 "entry_atr": entry_atr,
                 "atr_timeframe": self.entry_timeframe,
                 "atr_period": atr_period,
+                "ema_observations": ema_observations,
             }
         )
         return EntrySignal(
@@ -142,6 +181,50 @@ class EntryEngine:
         self.last_diagnostic["last_reason"] = reason
 
     def _gate_trend(self) -> bool:
+        if self.gate1_mode == "ge30":
+            return self._gate_ge30()
+        return self._gate_legacy_ema()
+
+    def _gate_ge30(self) -> bool:
+        gate_cfg = self.config["trend_gate"]
+        interval = str(gate_cfg["candle_interval"])
+        lookback = int(gate_cfg["lookback_candles"])
+        candles = self._candles_for(interval)
+        if lookback < 1 or len(candles) < lookback + 1:
+            self._log_gate(
+                1,
+                False,
+                False,
+                "insufficient_ge30_candles",
+                candle_interval=interval,
+                lookback_candles=lookback,
+                candles=len(candles),
+                **{"GE30": "BLOCK"},
+            )
+            return False
+        latest = candles[-1]
+        reference = candles[-1 - lookback]
+        high_passed = latest.high > reference.high
+        low_passed = latest.low > reference.low
+        passed = high_passed and low_passed
+        self._log_gate(
+            1,
+            passed,
+            False,
+            "ge30",
+            candle_interval=interval,
+            lookback_candles=lookback,
+            high_now=latest.high,
+            high_lookback=reference.high,
+            low_now=latest.low,
+            low_lookback=reference.low,
+            high_direction="UP" if high_passed else "DOWN_OR_EQUAL",
+            low_direction="UP" if low_passed else "DOWN_OR_EQUAL",
+            **{"GE30": "PASS" if passed else "BLOCK"},
+        )
+        return passed
+
+    def _gate_legacy_ema(self) -> bool:
         trend_cfg = self.config["trend"]
         near_cfg = self.config["entry"].get("near_miss", {})
         period = int(trend_cfg["ema_period"])
@@ -171,6 +254,50 @@ class EntryEngine:
         )
         self._log_gate(1, passed, near, "ema_slope", ema_current=current, ema_previous=previous)
         return passed
+
+    def _ema_observations(self) -> Optional[Dict[str, Any]]:
+        settings = self.config.get("ema_observations", {})
+        if not bool(settings.get("enabled", False)):
+            return None
+        window_minutes = int(settings["slope_window_minutes"])
+        output: Dict[str, Any] = {}
+        for variant in settings.get("variants", []):
+            if not isinstance(variant, dict):
+                continue
+            period = int(variant["period"])
+            interval = str(variant["interval"])
+            interval_minutes = _interval_minutes(interval)
+            reference_candles = max(1, round(window_minutes / interval_minutes)) if interval_minutes else 0
+            key = f"ema{period}_{interval}"
+            candles = self._candles_for(interval) if interval else []
+            values = ema([candle.close for candle in candles], period) if period > 0 else []
+            current = values[-1] if values else None
+            previous = (
+                values[-1 - reference_candles]
+                if reference_candles > 0 and len(values) > reference_candles
+                else None
+            )
+            slope_pct = (
+                (float(current) / float(previous) - 1) * 100
+                if current is not None and previous not in (None, 0)
+                else None
+            )
+            output[key] = {
+                "period": period,
+                "interval": interval,
+                "slope_window_minutes": window_minutes,
+                "reference_candles": reference_candles,
+                "current": float(current) if current is not None else None,
+                "previous": float(previous) if previous is not None else None,
+                "slope_pct": slope_pct,
+                "direction": (
+                    "UP" if slope_pct is not None and slope_pct > 0 else
+                    "DOWN_OR_EQUAL" if slope_pct is not None else
+                    "UNAVAILABLE"
+                ),
+                "candles": len(candles),
+            }
+        return output
 
     def _gate_pullback(self) -> bool:
         entry_cfg = self.config["entry"]
@@ -322,6 +449,7 @@ class EntryEngine:
             "profile": self.config.get("active_profile", "production"),
             "trend_timeframe": self.trend_timeframe,
             "entry_timeframe": self.entry_timeframe,
+            "gate1_mode": self.gate1_mode,
             "last_reason": "waiting_for_entry_candle",
             "last_rejected_gate": None,
             "gates": {
@@ -332,6 +460,13 @@ class EntryEngine:
             },
         }
 
+    def _candles_for(self, timeframe: str) -> List[Candle]:
+        if timeframe == self.entry_timeframe:
+            return self.entry_candles
+        if timeframe == self.trend_timeframe:
+            return self.trend_candles
+        return self.auxiliary_candles.setdefault(timeframe, [])
+
     @staticmethod
     def _upsert(candles: List[Candle], candle: Candle) -> None:
         if candles and candles[-1].open_time == candle.open_time:
@@ -339,3 +474,17 @@ class EntryEngine:
         else:
             candles.append(candle)
         del candles[:-300]
+
+
+def _interval_minutes(interval: str) -> int:
+    if interval.endswith("m"):
+        try:
+            return int(interval[:-1])
+        except ValueError:
+            return 0
+    if interval.endswith("h"):
+        try:
+            return int(interval[:-1]) * 60
+        except ValueError:
+            return 0
+    return 0

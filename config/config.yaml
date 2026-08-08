@@ -25,6 +25,7 @@ market_data:
     - "solusdt@kline_1d"
   historical_klines_limit:
     "1m": 300
+    "5m": 300
     "15m": 300
     "4h": 120
     "1d": 80
@@ -39,6 +40,24 @@ trend:
   timeframe: "1d"
   ema_period: 50
   ema_slope_lookback: 3
+
+trend_gate:
+  mode: ge30
+  candle_interval: "5m"
+  lookback_candles: 6
+
+ema_observations:
+  enabled: true
+  slope_window_minutes: 30
+  variants:
+    - period: 50
+      interval: "15m"
+    - period: 20
+      interval: "15m"
+    - period: 50
+      interval: "5m"
+    - period: 20
+      interval: "5m"
 
 entry:
   timeframe: "4h"
@@ -332,6 +351,10 @@ instrumentation:
     max_entries_per_selection_epoch: 5
     state_file: "data/state/multi_market_shadow.json"
     ledger_file: "data/trades/trades_shadow_top3.jsonl"
+    ge30_variant:
+      enabled: true
+      state_file: "data/state/multi_market_shadow_ge30.json"
+      ledger_file: "data/trades/trades_shadow_top3_ge30.jsonl"
     excluded_base_assets:
       - USDC
       - FDUSD

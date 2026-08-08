@@ -137,10 +137,12 @@ class ShadowLogger:
         symbol: str,
         telemetry: TelemetryWriter,
         system_logger: JsonlLogger,
+        shadow_kind: str = "TOP3_MARKET",
     ) -> None:
         self.symbol = symbol
         self.telemetry = telemetry
         self.system_logger = system_logger
+        self.shadow_kind = shadow_kind
 
     def decision(self, event: Dict[str, Any]) -> None:
         self._submit("GATE", event)
@@ -155,7 +157,7 @@ class ShadowLogger:
         payload = {
             "ts": event.get("ts") or now_iso(),
             "event_type": event_type,
-            "shadow_kind": "TOP3_MARKET",
+            "shadow_kind": self.shadow_kind,
             "symbol": self.symbol,
             **event,
         }
@@ -176,6 +178,10 @@ class MultiMarketShadow:
         logger: JsonlLogger,
         telemetry: TelemetryWriter,
         on_streams_changed: Optional[Callable[[], None]] = None,
+        shadow_kind: str = "TOP3_MARKET",
+        gate1_mode: str = "legacy_ema",
+        settings_override: Optional[Dict[str, Any]] = None,
+        selection_source: Optional["MultiMarketShadow"] = None,
     ) -> None:
         instrumentation = (
             config.get("instrumentation")
@@ -183,7 +189,8 @@ class MultiMarketShadow:
             else {}
         )
         settings = instrumentation.get("multi_market_shadow")
-        self.settings = settings if isinstance(settings, dict) else {}
+        base_settings = settings if isinstance(settings, dict) else {}
+        self.settings = {**base_settings, **(settings_override or {})}
         self.enabled = bool(
             instrumentation.get("enabled", False)
             and self.settings.get("enabled", False)
@@ -194,6 +201,9 @@ class MultiMarketShadow:
         self.logger = logger
         self.telemetry = telemetry
         self.on_streams_changed = on_streams_changed
+        self.shadow_kind = shadow_kind
+        self.gate1_mode = gate1_mode
+        self.selection_source = selection_source
         self.selector = ShadowMarketSelector(market_client, self.settings)
         self.state_path = project_root / str(
             self.settings.get(
@@ -235,6 +245,7 @@ class MultiMarketShadow:
         self._evaluate_selection("STARTUP", now_ms, reset_epoch=reset_epoch)
         self.logger.system(
             "multi_market_shadow_started",
+            shadow_kind=self.shadow_kind,
             selected=sorted(self.selected),
             open_positions=self.open_position_count,
             streams=self.required_streams(),
@@ -256,8 +267,6 @@ class MultiMarketShadow:
     def required_streams(self) -> list[str]:
         if not self.enabled:
             return []
-        entry_timeframe = str(self.config["entry"]["timeframe"])
-        trend_timeframe = str(self.config["trend"]["timeframe"])
         open_symbols = {
             symbol
             for symbol, positions in self.positions.items()
@@ -269,12 +278,9 @@ class MultiMarketShadow:
             lower = symbol.lower()
             streams.append(f"{lower}@aggTrade")
             if symbol in self.selected:
-                streams.extend(
-                    [
-                        f"{lower}@kline_{entry_timeframe}",
-                        f"{lower}@kline_{trend_timeframe}",
-                    ]
-                )
+                engine = self.engines.get(symbol)
+                timeframes = engine.required_timeframes() if engine else []
+                streams.extend(f"{lower}@kline_{timeframe}" for timeframe in timeframes)
         return streams
 
     def on_ws_event(self, stream: str, payload: Dict[str, Any]) -> None:
@@ -285,9 +291,23 @@ class MultiMarketShadow:
         except Exception as exc:
             self.logger.system(
                 "multi_market_shadow_event_failed",
+                shadow_kind=self.shadow_kind,
                 stream=stream,
                 error=str(exc),
             )
+
+    def sync_selection_from_source(self, boundary_ms: int) -> None:
+        if not self.enabled or self.selection_source is None:
+            return
+        same_selection = self.selected == self.selection_source.selected
+        same_epoch = self.epoch_started_ms == self.selection_source.epoch_started_ms
+        if same_selection and same_epoch:
+            return
+        self._evaluate_selection(
+            "SOURCE_SYNC",
+            boundary_ms,
+            reset_epoch=not same_epoch,
+        )
 
     def _dispatch_ws_event(self, stream: str, payload: Dict[str, Any]) -> None:
         symbol = _stream_symbol(stream)
@@ -317,6 +337,7 @@ class MultiMarketShadow:
             return
         data = {
             "updated_at": now_iso(),
+            "shadow_kind": self.shadow_kind,
             "selected": [item.to_dict() for item in self.selected.values()],
             "epoch_started_ms": self.epoch_started_ms,
             "last_scheduled_boundary_ms": self.last_scheduled_boundary_ms,
@@ -356,10 +377,15 @@ class MultiMarketShadow:
         reset_epoch: bool,
     ) -> None:
         try:
-            selected = self.selector.select()
+            selected = (
+                list(self.selection_source.selected.values())
+                if self.selection_source is not None
+                else self.selector.select()
+            )
         except Exception as exc:
             self.logger.system(
                 "multi_market_shadow_selection_failed",
+                shadow_kind=self.shadow_kind,
                 reason=reason,
                 error=str(exc),
             )
@@ -377,6 +403,7 @@ class MultiMarketShadow:
                 except Exception as exc:
                     self.logger.system(
                         "multi_market_shadow_history_failed",
+                        shadow_kind=self.shadow_kind,
                         symbol=symbol,
                         reason=reason,
                         error=str(exc),
@@ -415,14 +442,16 @@ class MultiMarketShadow:
             self.on_streams_changed()
 
     def _load_engine(self, symbol: str) -> None:
-        shadow_logger = ShadowLogger(symbol, self.telemetry, self.logger)
-        engine = EntryEngine(symbol, self.config, shadow_logger)  # type: ignore[arg-type]
+        shadow_logger = ShadowLogger(symbol, self.telemetry, self.logger, self.shadow_kind)
+        engine = EntryEngine(
+            symbol,
+            self.config,
+            shadow_logger,  # type: ignore[arg-type]
+            gate1_mode=self.gate1_mode,
+        )
         limits = self.config.get("market_data", {}).get("historical_klines_limit", {})
         now_ms = _now_ms()
-        for timeframe in (
-            str(self.config["trend"]["timeframe"]),
-            str(self.config["entry"]["timeframe"]),
-        ):
+        for timeframe in engine.required_timeframes():
             klines = self.market_client.klines(
                 symbol,
                 timeframe,
@@ -502,8 +531,9 @@ class MultiMarketShadow:
         )
         quantity = notional / float(signal.price)
         client = self.clients.setdefault(symbol, PhantomExecutionClient())
+        pair_prefix = "ms" if self.shadow_kind == "TOP3_MARKET" else "ms-ge30"
         position = BotFullExitPosition(
-            pair_id=f"ms-{uuid.uuid4().hex[:12]}",
+            pair_id=f"{pair_prefix}-{uuid.uuid4().hex[:12]}",
             symbol=symbol,
             entry_price=float(signal.price),
             quantity=quantity,
@@ -511,7 +541,7 @@ class MultiMarketShadow:
             open_ts=signal.ts,
             config=_bot_exit_config(self.config),
             client=client,  # type: ignore[arg-type]
-            logger=ShadowLogger(symbol, self.telemetry, self.logger),  # type: ignore[arg-type]
+            logger=ShadowLogger(symbol, self.telemetry, self.logger, self.shadow_kind),  # type: ignore[arg-type]
             entry_atr=signal.entry_atr,
             atr_timeframe=signal.atr_timeframe,
             atr_period=signal.atr_period,
@@ -521,7 +551,7 @@ class MultiMarketShadow:
         )
         position.phantom = True
         position.phantom_id = position.pair_id
-        position.shadow_kind = "TOP3_MARKET"
+        position.shadow_kind = self.shadow_kind
         position.shadow_selection_epoch_ms = self.epoch_started_ms
         position.shadow_selection_rank = self.selected[symbol].rank
         position.shadow_selection_snapshot = self.selected[symbol].to_dict()
@@ -531,7 +561,7 @@ class MultiMarketShadow:
             self.entries_by_candle[symbol].get(signal.source_candle_open_time, 0) + 1
         )
         self.epoch_entries[symbol] = self.epoch_entries.get(symbol, 0) + 1
-        ShadowLogger(symbol, self.telemetry, self.logger).trade(
+        ShadowLogger(symbol, self.telemetry, self.logger, self.shadow_kind).trade(
             position._trade_event(
                 "OPEN",
                 position.entry_price,
@@ -639,7 +669,7 @@ class MultiMarketShadow:
             {
                 "ts": now_iso(),
                 "event_type": event,
-                "shadow_kind": "TOP3_MARKET",
+                "shadow_kind": self.shadow_kind,
                 **fields,
             },
         )
@@ -680,7 +710,7 @@ class MultiMarketShadow:
                 state,
                 _bot_exit_config(self.config),
                 client,  # type: ignore[arg-type]
-                ShadowLogger(symbol, self.telemetry, self.logger),  # type: ignore[arg-type]
+                ShadowLogger(symbol, self.telemetry, self.logger, self.shadow_kind),  # type: ignore[arg-type]
             )
             position.phantom = True
             position.phantom_id = str(state.get("phantom_id") or position.pair_id)

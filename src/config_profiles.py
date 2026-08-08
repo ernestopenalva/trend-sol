@@ -21,16 +21,53 @@ def effective_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
     symbol = str(config["symbol"]).lower()
     trend_timeframe = str(config["trend"]["timeframe"])
     entry_timeframe = str(config["entry"]["timeframe"])
+    _validate_trend_observations(config)
+    timeframes = [entry_timeframe, trend_timeframe]
+    trend_gate = config.get("trend_gate")
+    if isinstance(trend_gate, dict) and str(trend_gate.get("mode", "")).lower() == "ge30":
+        timeframes.append(str(trend_gate["candle_interval"]))
+    observations = config.get("ema_observations")
+    if isinstance(observations, dict) and bool(observations.get("enabled", False)):
+        for variant in observations.get("variants", []):
+            if isinstance(variant, dict) and variant.get("interval"):
+                timeframes.append(str(variant["interval"]))
     config.setdefault("market_data", {})
     config["market_data"]["kline_streams"] = [
-        f"{symbol}@kline_{entry_timeframe}",
-        f"{symbol}@kline_{trend_timeframe}",
+        f"{symbol}@kline_{timeframe}"
+        for timeframe in dict.fromkeys(timeframes)
     ]
     _validate_hard_stop(config)
     _validate_profit_lock_shadow(config)
     _validate_phantoms(config)
     _validate_multi_market_shadow(config)
     return config
+
+
+def _validate_trend_observations(config: Dict[str, Any]) -> None:
+    gate = config.get("trend_gate")
+    if isinstance(gate, dict) and str(gate.get("mode", "")).lower() == "ge30":
+        if not str(gate.get("candle_interval", "")):
+            raise ValueError("trend_gate.candle_interval is required for GE30")
+        lookback = gate.get("lookback_candles")
+        if isinstance(lookback, bool) or not isinstance(lookback, int) or lookback <= 0:
+            raise ValueError("trend_gate.lookback_candles must be a positive integer")
+    observations = config.get("ema_observations")
+    if not isinstance(observations, dict) or not bool(observations.get("enabled", False)):
+        return
+    window = observations.get("slope_window_minutes")
+    if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+        raise ValueError("ema_observations.slope_window_minutes must be a positive integer")
+    variants = observations.get("variants")
+    if not isinstance(variants, list) or not variants:
+        raise ValueError("ema_observations.variants must be a non-empty list")
+    for variant in variants:
+        if not isinstance(variant, dict):
+            raise ValueError("ema_observations variants must be mappings")
+        period = variant.get("period")
+        if isinstance(period, bool) or not isinstance(period, int) or period <= 0:
+            raise ValueError("ema_observations variant period must be a positive integer")
+        if not str(variant.get("interval", "")):
+            raise ValueError("ema_observations variant interval is required")
 
 
 def _validate_hard_stop(config: Dict[str, Any]) -> None:
@@ -120,3 +157,16 @@ def _validate_multi_market_shadow(config: Dict[str, Any]) -> None:
             "instrumentation.multi_market_shadow.max_entries_per_selection_epoch "
             "must be greater than or equal to max_open_positions_per_symbol"
         )
+    ge30 = shadow.get("ge30_variant")
+    if isinstance(ge30, dict) and bool(ge30.get("enabled", False)):
+        for field in ("state_file", "ledger_file"):
+            value = str(ge30.get(field, ""))
+            if not value:
+                raise ValueError(
+                    f"instrumentation.multi_market_shadow.ge30_variant.{field} is required"
+                )
+            if value == str(shadow.get(field, "")):
+                raise ValueError(
+                    f"instrumentation.multi_market_shadow.ge30_variant.{field} "
+                    "must be independent from legacy"
+                )

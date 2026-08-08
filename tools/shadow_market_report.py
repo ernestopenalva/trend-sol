@@ -20,19 +20,38 @@ BRASILIA_TZ = ZoneInfo("America/Sao_Paulo")
 def main() -> None:
     args = _arguments()
     config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    settings = config.get("instrumentation", {}).get("multi_market_shadow", {})
-    ledger_path = PROJECT_ROOT / str(
-        args.ledger
-        or settings.get("ledger_file", "data/trades/trades_shadow_top3.jsonl")
-    )
-    state_path = PROJECT_ROOT / str(
-        args.state
-        or settings.get("state_file", "data/state/multi_market_shadow.json")
-    )
+    base_settings = config.get("instrumentation", {}).get("multi_market_shadow", {})
+    ge30_settings = {**base_settings, **base_settings.get("ge30_variant", {})}
+    variants = {
+        "legacy": ("LEGACY", base_settings),
+        "ge30": ("GE30", ge30_settings),
+    }
+    selected_variants = variants.items() if args.variant == "both" else [(args.variant, variants[args.variant])]
+    for index, (_, (label, settings)) in enumerate(selected_variants):
+        if index:
+            print("\n" + "=" * 78 + "\n")
+        ledger_path = PROJECT_ROOT / str(
+            args.ledger
+            or settings.get("ledger_file", "data/trades/trades_shadow_top3.jsonl")
+        )
+        state_path = PROJECT_ROOT / str(
+            args.state
+            or settings.get("state_file", "data/state/multi_market_shadow.json")
+        )
+        _print_variant(label, settings, ledger_path, state_path, args.limit)
+
+
+def _print_variant(
+    label: str,
+    settings: dict[str, Any],
+    ledger_path: Path,
+    state_path: Path,
+    limit: int,
+) -> None:
     records = _load_jsonl(ledger_path)
     state = _load_json(state_path)
 
-    print("TREND-SOL | Top 3 multi-market shadow")
+    print(f"TREND-SOL | Top 3 multi-market shadow | {label}")
     selected = sorted(
         state.get("selected", []),
         key=lambda item: item.get("rank", 999),
@@ -60,6 +79,14 @@ def main() -> None:
     print(f"Open virtual positions: {open_text or 'none'}")
     print(f"Closed virtual trades: {len(records)}")
     _print_sample_net_pnl(records)
+    gross = sum(_num(item.get("gross_pnl_pct")) for item in records)
+    net = sum(_num(item.get("net_pnl_pct")) for item in records)
+    hard_stops = sum(item.get("exit_reason") == "HARD_STOP" for item in records)
+    avg_net = net / len(records) if records else 0.0
+    print(
+        f"Overall: hard stops={hard_stops} | gross={gross:+.2f}% | "
+        f"net={net:+.2f}% | avg net={avg_net:+.2f}% | PF={_profit_factor(records)}"
+    )
 
     print("\nBy market:")
     print("symbol       trades  hard_stop    gross       net   avg net       PF")
@@ -81,7 +108,7 @@ def main() -> None:
 
     print("\nRecent trades:")
     print("symbol       opened       closed       entry     exit      net  reason")
-    for record in records[-max(0, args.limit) :]:
+    for record in records[-max(0, limit) :]:
         print(
             f"{str(record.get('symbol') or ''):<12} "
             f"{_format_brasilia(record.get('opened_at')):<12} "
@@ -99,6 +126,12 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--ledger", help="Ledger path relative to the project root.")
     parser.add_argument("--state", help="State path relative to the project root.")
+    parser.add_argument(
+        "--variant",
+        choices=("legacy", "ge30", "both"),
+        default="both",
+        help="Shadow variant to report (default: both).",
+    )
     parser.add_argument("--limit", type=int, default=20)
     return parser.parse_args()
 

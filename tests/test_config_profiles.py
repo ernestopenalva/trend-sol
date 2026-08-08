@@ -51,6 +51,30 @@ class ConfigProfileTests(unittest.TestCase):
             ["solusdt@kline_1m", "solusdt@kline_15m"],
         )
 
+    def test_ge30_and_ema_observations_add_only_required_streams(self) -> None:
+        config = self.base_config()
+        config["active_profile"] = "intraday"
+        config["trend_gate"] = {
+            "mode": "ge30",
+            "candle_interval": "5m",
+            "lookback_candles": 6,
+        }
+        config["ema_observations"] = {
+            "enabled": True,
+            "slope_window_minutes": 30,
+            "variants": [
+                {"period": 50, "interval": "15m"},
+                {"period": 20, "interval": "5m"},
+            ],
+        }
+
+        effective = effective_config(config)
+
+        self.assertEqual(
+            effective["market_data"]["kline_streams"],
+            ["solusdt@kline_1m", "solusdt@kline_15m", "solusdt@kline_5m"],
+        )
+
     def test_enabled_hard_stop_requires_valid_percentage(self) -> None:
         config = self.base_config()
         config["risk"] = {"hard_stop": {"enabled": True, "stop_pct": 0}}
@@ -100,6 +124,32 @@ class ConfigProfileTests(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(ValueError, "max_entries_per_selection_epoch"):
+            effective_config(config)
+
+    def test_ge30_shadow_requires_independent_state_and_ledger(self) -> None:
+        config = self.base_config()
+        config["instrumentation"] = {
+            "enabled": True,
+            "multi_market_shadow": {
+                "enabled": True,
+                "top_count": 3,
+                "reevaluate_hours": 4,
+                "max_universe_symbols": 50,
+                "max_open_positions_per_symbol": 5,
+                "max_entries_per_selection_epoch": 5,
+                "min_quote_volume_usdt": 10_000_000,
+                "max_spread_bps": 10,
+                "state_file": "same.json",
+                "ledger_file": "same.jsonl",
+                "ge30_variant": {
+                    "enabled": True,
+                    "state_file": "same.json",
+                    "ledger_file": "same.jsonl",
+                },
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "must be independent from legacy"):
             effective_config(config)
 
 

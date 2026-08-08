@@ -84,6 +84,26 @@ class Monitor:
             self.logger,
             self.telemetry_writer,
             on_streams_changed=self._refresh_market_streams,
+            shadow_kind="TOP3_MARKET",
+            gate1_mode="legacy_ema",
+        )
+        shadow_settings = self.config.get("instrumentation", {}).get("multi_market_shadow", {})
+        ge30_settings = (
+            shadow_settings.get("ge30_variant", {})
+            if isinstance(shadow_settings, dict)
+            else {}
+        )
+        self.market_shadow_ge30 = MultiMarketShadow(
+            self.project_root,
+            self.config,
+            self.market_data_client,
+            self.logger,
+            self.telemetry_writer,
+            on_streams_changed=self._refresh_market_streams,
+            shadow_kind="TOP3_MARKET_GE30",
+            gate1_mode="ge30",
+            settings_override=ge30_settings,
+            selection_source=self.market_shadow,
         )
         self.logger.set_entry_console_context(self._entry_console_context)
 
@@ -94,6 +114,7 @@ class Monitor:
             self._validate_startup()
             self._load_historical_candles()
             self.market_shadow.start()
+            self.market_shadow_ge30.start()
             market_cfg = self.config["market_data"]
             streams = self._market_streams()
             self.ws_manager = WSManager(
@@ -123,6 +144,7 @@ class Monitor:
             if self.status_reporter:
                 self.status_reporter.stop()
             self.market_shadow.stop()
+            self.market_shadow_ge30.stop()
             self.telemetry_writer.stop()
 
     def _validate_startup(self) -> None:
@@ -139,7 +161,7 @@ class Monitor:
         limits = market_cfg.get("historical_klines_limit", {})
         symbol = str(self.config["symbol"])
         self.logger.system("loading_historical_candles", symbol=symbol)
-        for timeframe in (str(self.config["trend"]["timeframe"]), str(self.config["entry"]["timeframe"])):
+        for timeframe in self.entry_engine.required_timeframes():
             klines = self.market_data_client.klines(
                 symbol=symbol,
                 interval=timeframe,
@@ -154,6 +176,14 @@ class Monitor:
 
     def _on_ws_event(self, stream: str, payload: Dict[str, Any]) -> None:
         self.market_shadow.on_ws_event(stream, payload)
+        market_shadow_ge30 = getattr(self, "market_shadow_ge30", None)
+        if market_shadow_ge30:
+            kline = payload.get("k") if isinstance(payload.get("k"), dict) else {}
+            boundary_ms = int(kline.get("T", payload.get("T", payload.get("E", 0)))) + (
+                1 if kline else 0
+            )
+            market_shadow_ge30.sync_selection_from_source(boundary_ms)
+            market_shadow_ge30.on_ws_event(stream, payload)
         live_symbol = str(self.config["symbol"]).lower()
         if stream == f"{live_symbol}@aggTrade":
             import time
@@ -177,10 +207,12 @@ class Monitor:
 
     def _market_streams(self) -> list[str]:
         market_cfg = self.config["market_data"]
+        market_shadow_ge30 = getattr(self, "market_shadow_ge30", None)
         streams = [
             market_cfg["trade_stream"],
             *market_cfg["kline_streams"],
             *self.market_shadow.required_streams(),
+            *(market_shadow_ge30.required_streams() if market_shadow_ge30 else []),
         ]
         return list(dict.fromkeys(str(stream) for stream in streams))
 

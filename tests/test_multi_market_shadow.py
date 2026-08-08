@@ -193,8 +193,68 @@ class MultiMarketShadowTests(unittest.TestCase):
         monitor.registry.on_tick.assert_not_called()
         self.assertIsNone(monitor.last_price)
 
+    def test_ge30_shadow_shares_selection_but_keeps_positions_and_files_independent(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy, _ = _shadow(root)
+            legacy.selected = {
+                "AAAUSDT": SelectedMarket("AAAUSDT", "AAA", 1, 8, 12, 50_000_000, 2)
+            }
+            legacy.epoch_started_ms = 1_000
+            legacy.epoch_entries = {"AAAUSDT": 0}
+            ge30, _ = _shadow(
+                root,
+                shadow_kind="TOP3_MARKET_GE30",
+                gate1_mode="ge30",
+                settings_override={
+                    "state_file": "state_ge30.json",
+                    "ledger_file": "ledger_ge30.jsonl",
+                },
+                selection_source=legacy,
+            )
 
-def _shadow(root: Path):
+            ge30._evaluate_selection("TEST", 1_000, reset_epoch=True)
+            legacy._admit_signal(
+                "AAAUSDT",
+                EntrySignal("AAAUSDT", 100, "2026-07-25T00:00:00+00:00", 1, 0.1, "1m", 14),
+                1_000,
+            )
+
+            self.assertEqual(set(ge30.selected), set(legacy.selected))
+            self.assertEqual(legacy.open_position_count, 1)
+            self.assertEqual(ge30.open_position_count, 0)
+            self.assertNotEqual(legacy.state_path, ge30.state_path)
+            self.assertEqual(ge30.engines["AAAUSDT"].gate1_mode, "ge30")
+            self.assertEqual(legacy.settings["ledger_file"], "ledger.jsonl")
+            self.assertEqual(ge30.settings["ledger_file"], "ledger_ge30.jsonl")
+
+            ge30._admit_signal(
+                "AAAUSDT",
+                EntrySignal("AAAUSDT", 101, "2026-07-25T00:01:00+00:00", 2, 0.1, "1m", 14),
+                1_001,
+            )
+            self.assertEqual(legacy.open_position_count, 1)
+            self.assertEqual(ge30.open_position_count, 1)
+            self.assertEqual(
+                ge30.positions["AAAUSDT"][0].shadow_kind,
+                "TOP3_MARKET_GE30",
+            )
+
+            legacy.selected = {
+                "BBBUSDT": SelectedMarket("BBBUSDT", "BBB", 1, 9, 13, 40_000_000, 2)
+            }
+            ge30.sync_selection_from_source(2_000)
+            self.assertEqual(set(ge30.selected), {"BBBUSDT"})
+            self.assertEqual(ge30.epoch_started_ms, legacy.epoch_started_ms)
+
+
+def _shadow(
+    root: Path,
+    shadow_kind: str = "TOP3_MARKET",
+    gate1_mode: str = "legacy_ema",
+    settings_override=None,
+    selection_source=None,
+):
     project_root = Path(__file__).resolve().parents[1]
     config = yaml.safe_load((project_root / "config/config.yaml").read_text(encoding="utf-8"))
     config["active_profile"] = "intraday"
@@ -212,6 +272,10 @@ def _shadow(root: Path):
             FakeMarketClient(),
             logger,
             telemetry,  # type: ignore[arg-type]
+            shadow_kind=shadow_kind,
+            gate1_mode=gate1_mode,
+            settings_override=settings_override,
+            selection_source=selection_source,
         ),
         telemetry,
     )
