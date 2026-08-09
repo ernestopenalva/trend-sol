@@ -582,8 +582,8 @@ class BotExitOnlyTests(unittest.TestCase):
 
         text = output.getvalue()
         self.assertIn("By exit reason:", text)
-        self.assertIn("BREAKEVEN           2    +0.70%    +0.30%    +0.15%", text)
-        self.assertIn("HARD_STOP           1    -2.00%    -2.20%    -2.20%", text)
+        self.assertIn("BREAKEVEN | 2 | +0.70% | +0.30% | +0.15%", text)
+        self.assertIn("HARD_STOP | 1 | -2.00% | -2.20% | -2.20%", text)
 
     def test_list_positions_omits_a_in_bot_exit_only(self) -> None:
         config = _config()
@@ -647,7 +647,7 @@ class BotExitOnlyTests(unittest.TestCase):
             _print_trades(records, {"fees": {"enabled": False}})
 
         text = output.getvalue()
-        self.assertIn("peak               trough", text)
+        self.assertIn("peak | trough", text)
         self.assertIn("101.0000 (+1.00%)", text)
         self.assertIn("98.5000* (-1.50%)", text)
         self.assertIn("giveback", text)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,10 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
 BRASILIA_TZ = ZoneInfo("America/Sao_Paulo")
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from tools.trades_report import _parse_since, _parse_ts
 
 
 def main() -> None:
@@ -38,7 +43,15 @@ def main() -> None:
             args.state
             or settings.get("state_file", "data/state/multi_market_shadow.json")
         )
-        _print_variant(label, settings, ledger_path, state_path, args.limit)
+        _print_variant(
+            label,
+            settings,
+            ledger_path,
+            state_path,
+            args.limit,
+            since=args.since,
+            since_field=args.since_field,
+        )
 
 
 def _print_variant(
@@ -47,11 +60,18 @@ def _print_variant(
     ledger_path: Path,
     state_path: Path,
     limit: int,
+    since: str | None = None,
+    since_field: str = "closed_at",
 ) -> None:
-    records = _load_jsonl(ledger_path)
+    records = _filter_since(
+        _load_jsonl(ledger_path),
+        _parse_since(since),
+        since_field,
+    )
     state = _load_json(state_path)
 
     print(f"TREND-SOL | Top 3 multi-market shadow | {label}")
+    print(f"Filter: since={since or 'all'} | since_field={since_field}")
     selected = sorted(
         state.get("selected", []),
         key=lambda item: item.get("rank", 999),
@@ -89,33 +109,33 @@ def _print_variant(
     )
 
     print("\nBy market:")
-    print("symbol       trades  hard_stop    gross       net   avg net       PF")
+    print("symbol | trades | hard_stop | gross | net | avg net | PF")
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         grouped[str(record.get("symbol") or "UNKNOWN")].append(record)
     if not grouped:
-        print("none              0          0   +0.00%    +0.00%    +0.00%      n/a")
+        print("none | 0 | 0 | +0.00% | +0.00% | +0.00% | n/a")
     for symbol, items in sorted(grouped.items()):
         gross = sum(_num(item.get("gross_pnl_pct")) for item in items)
         net = sum(_num(item.get("net_pnl_pct")) for item in items)
         hard_stops = sum(item.get("exit_reason") == "HARD_STOP" for item in items)
         avg_net = net / len(items) if items else 0.0
         print(
-            f"{symbol:<12} {len(items):>6} {hard_stops:>10} "
-            f"{gross:>+8.2f}% {net:>+8.2f}% {avg_net:>+8.2f}% "
-            f"{_profit_factor(items):>8}"
+            f"{symbol} | {len(items)} | {hard_stops} | "
+            f"{gross:+.2f}% | {net:+.2f}% | {avg_net:+.2f}% | "
+            f"{_profit_factor(items)}"
         )
 
     print("\nRecent trades:")
-    print("symbol       opened       closed       entry     exit      net  reason")
+    print("symbol | opened | closed | entry | exit | net | reason")
     for record in records[-max(0, limit) :]:
         print(
-            f"{str(record.get('symbol') or ''):<12} "
-            f"{_format_brasilia(record.get('opened_at')):<12} "
-            f"{_format_brasilia(record.get('closed_at')):<12} "
-            f"{_num(record.get('entry_price')):>8.4f} "
-            f"{_num(record.get('exit_price')):>8.4f} "
-            f"{_num(record.get('net_pnl_pct')):>+7.2f}% "
+            f"{str(record.get('symbol') or '')} | "
+            f"{_format_brasilia(record.get('opened_at'))} | "
+            f"{_format_brasilia(record.get('closed_at'))} | "
+            f"{_num(record.get('entry_price')):.4f} | "
+            f"{_num(record.get('exit_price')):.4f} | "
+            f"{_num(record.get('net_pnl_pct')):+.2f}% | "
             f"{record.get('exit_reason') or 'n/a'}"
         )
 
@@ -126,6 +146,13 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--ledger", help="Ledger path relative to the project root.")
     parser.add_argument("--state", help="State path relative to the project root.")
+    parser.add_argument("--since", help="Filter trades from DD/MM HH:MM or ISO 8601.")
+    parser.add_argument(
+        "--since-field",
+        choices=("opened_at", "closed_at"),
+        default="closed_at",
+        help="Timestamp field used by --since (default: closed_at).",
+    )
     parser.add_argument(
         "--variant",
         choices=("legacy", "ge30", "both"),
@@ -148,6 +175,21 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         if isinstance(value, dict):
             records.append(value)
     return records
+
+
+def _filter_since(
+    records: list[dict[str, Any]],
+    since: datetime | None,
+    since_field: str,
+) -> list[dict[str, Any]]:
+    if since is None:
+        return records
+    output = []
+    for record in records:
+        timestamp = _parse_ts(record.get(since_field))
+        if timestamp is not None and timestamp >= since:
+            output.append(record)
+    return output
 
 
 def _load_json(path: Path) -> dict[str, Any]:

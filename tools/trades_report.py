@@ -186,12 +186,12 @@ def _print_inline_counts(title: str, counts: Counter[str]) -> None:
 
 def _print_exit_reason_breakdown(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
     print("By exit reason:")
-    print(f"{'reason':14} {'trades':>6} {'gross':>9} {'net':>9} {'avg net':>9}")
+    print("reason | trades | gross | net | avg net")
     grouped: Dict[str, list[Dict[str, Any]]] = {}
     for record in records:
         grouped.setdefault(_exit_reason(record), []).append(record)
     if not grouped:
-        print(f"{'none':14} {0:6d} {_fmt_signed_pct(0):>9} {_fmt_signed_pct(0):>9} {_fmt_signed_pct(0):>9}")
+        print("none | 0 | +0.00% | +0.00% | +0.00%")
         return
     for reason, items in sorted(grouped.items()):
         gross_values = [value for value in (_gross_pnl(item) for item in items) if value is not None]
@@ -200,29 +200,26 @@ def _print_exit_reason_breakdown(records: list[Dict[str, Any]], config: Dict[str
         net_total = sum(net_values)
         avg_net = net_total / len(net_values) if net_values else 0.0
         print(
-            f"{reason:14} {len(items):6d} {_fmt_signed_pct(gross_total):>9} "
-            f"{_fmt_signed_pct(net_total):>9} {_fmt_signed_pct(avg_net):>9}"
+            f"{reason} | {len(items)} | {_fmt_signed_pct(gross_total)} | "
+            f"{_fmt_signed_pct(net_total)} | {_fmt_signed_pct(avg_net)}"
         )
 
 
 def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
     print("Trades:")
-    print(
-        f"{'opened':11} {'closed':11} {'age':6} {'entry':8} {'peak':18} {'trough':18} "
-        f"{'exit':8} {'giveback':19} {'gross':7} {'net':7} reason"
-    )
+    print("opened | closed | age | entry | peak | trough | exit | giveback | gross | net | reason")
     for record in records:
         print(
-            f"{_short_time(record.get('opened_at')):11} "
-            f"{_short_time(record.get('closed_at')):11} "
-            f"{_fmt_duration(_float(record.get('age_seconds')) or 0):6} "
-            f"{_fmt_price(record.get('entry_price')):8} "
-            f"{_peak_cell(record):18} "
-            f"{_trough_cell(record):18} "
-            f"{_fmt_price(record.get('exit_price')):8} "
-            f"{_giveback_cell(record):19} "
-            f"{_fmt_signed_pct(_gross_pnl(record)):7} "
-            f"{_fmt_signed_pct(_net_pnl(record, config)):7} "
+            f"{_short_time(record.get('opened_at'))} | "
+            f"{_short_time(record.get('closed_at'))} | "
+            f"{_fmt_duration(_float(record.get('age_seconds')) or 0)} | "
+            f"{_fmt_price(record.get('entry_price'))} | "
+            f"{_peak_cell(record)} | "
+            f"{_trough_cell(record)} | "
+            f"{_fmt_price(record.get('exit_price'))} | "
+            f"{_giveback_cell(record)} | "
+            f"{_fmt_signed_pct(_gross_pnl(record))} | "
+            f"{_fmt_signed_pct(_net_pnl(record, config))} | "
             f"{_exit_reason(record)}"
         )
     if any(record.get("trough_price") is not None and record.get("trough_tracking_complete") is False for record in records):
@@ -232,36 +229,52 @@ def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None
 def _print_detail(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
     print("Trades detail:")
     for record in records:
-        print(
-            f"{record.get('pair_id')} qty={_fmt_number(record.get('qty'))} "
-            f"entry_atr={_fmt_number(record.get('entry_atr'))} stop_hit={_fmt_price(record.get('stop_hit'))} "
-            f"exit={_fmt_price(record.get('exit_price'))} slip={_fmt_signed_pct(record.get('exit_slippage_pct'))} "
-            f"exit_source={record.get('exit_price_source') or 'n/a'} "
-            f"trigger={_fmt_price(record.get('exit_trigger_price'))} trigger_source={record.get('exit_trigger_price_source') or 'n/a'} "
-            f"gross={_fmt_signed_pct(_gross_pnl(record))} fees={_fmt_signed_pct(-(_float(record.get('estimated_fees_pct')) or 0))} "
-            f"net={_fmt_signed_pct(_net_pnl(record, config))} giveback={_giveback_cell(record)} "
-            f"hard_stop={_fmt_price(record.get('hard_stop_price'))} hard_stop_pct={_fmt_loss_pct(record.get('hard_stop_pct'))} "
-            f"hard_stop_on_restore={record.get('hard_stop_applied_on_restore')} "
-            f"be_stop={_fmt_price(record.get('be_stop'))} be_net={_fmt_price(record.get('be_net_floor'))} "
-            f"be_activation={_fmt_price(record.get('be_activation_price'))} be_source={record.get('be_floor_source') or 'n/a'} "
-            f"be_absorbed={record.get('be_floor_absorbed_atr_stop')} "
-            f"pl_shadow={record.get('pl_shadow_status') or 'n/a'} pl_shadow_step={record.get('pl_shadow_step') or 'n/a'} "
-            f"pl_shadow_raw={_fmt_price(record.get('pl_shadow_raw_stop'))} "
-            f"pl_shadow_floor={_fmt_price(record.get('pl_shadow_net_floor'))} "
-            f"pl_shadow_stop={_fmt_price(record.get('pl_shadow_stop'))} "
-            f"pl_shadow_activation={_fmt_price(record.get('pl_shadow_activation_price'))} "
-            f"pl_shadow_absorbed={record.get('pl_shadow_floor_absorbed')} "
-            f"pl_shadow_active_step={record.get('pl_shadow_active_step') or 'n/a'} "
-            f"pl_shadow_active_stop={_fmt_price(record.get('pl_shadow_active_stop'))} "
-            f"pl_shadow_censored={record.get('pl_shadow_censored_by_real_exit')} "
-            f"peak={_fmt_price(record.get('peak_price'))} pnl_abs={_fmt_number(record.get('realized_pnl_abs'))} "
-            f"trough={_fmt_price(record.get('trough_price'))} trough_pct={_fmt_signed_pct(record.get('trough_pct'))} "
-            f"trough_atr={_fmt_signed_number(record.get('trough_atr'))} trough_at={record.get('trough_at') or 'n/a'} "
-            f"time_to_trough={_fmt_optional_duration(record.get('time_to_trough_seconds'))} "
-            f"trough_complete={record.get('trough_tracking_complete')} "
-            f"run_id={record.get('run_id')} strategy={record.get('strategy_version')} "
-            f"opened_at={record.get('opened_at')} closed_at={record.get('closed_at')}"
-        )
+        fields = [
+            str(record.get("pair_id")),
+            f"qty={_fmt_number(record.get('qty'))}",
+            f"entry_atr={_fmt_number(record.get('entry_atr'))}",
+            f"stop_hit={_fmt_price(record.get('stop_hit'))}",
+            f"exit={_fmt_price(record.get('exit_price'))}",
+            f"slip={_fmt_signed_pct(record.get('exit_slippage_pct'))}",
+            f"exit_source={record.get('exit_price_source') or 'n/a'}",
+            f"trigger={_fmt_price(record.get('exit_trigger_price'))}",
+            f"trigger_source={record.get('exit_trigger_price_source') or 'n/a'}",
+            f"gross={_fmt_signed_pct(_gross_pnl(record))}",
+            f"fees={_fmt_signed_pct(-(_float(record.get('estimated_fees_pct')) or 0))}",
+            f"net={_fmt_signed_pct(_net_pnl(record, config))}",
+            f"giveback={_giveback_cell(record)}",
+            f"hard_stop={_fmt_price(record.get('hard_stop_price'))}",
+            f"hard_stop_pct={_fmt_loss_pct(record.get('hard_stop_pct'))}",
+            f"hard_stop_on_restore={record.get('hard_stop_applied_on_restore')}",
+            f"be_stop={_fmt_price(record.get('be_stop'))}",
+            f"be_net={_fmt_price(record.get('be_net_floor'))}",
+            f"be_activation={_fmt_price(record.get('be_activation_price'))}",
+            f"be_source={record.get('be_floor_source') or 'n/a'}",
+            f"be_absorbed={record.get('be_floor_absorbed_atr_stop')}",
+            f"pl_shadow={record.get('pl_shadow_status') or 'n/a'}",
+            f"pl_shadow_step={record.get('pl_shadow_step') or 'n/a'}",
+            f"pl_shadow_raw={_fmt_price(record.get('pl_shadow_raw_stop'))}",
+            f"pl_shadow_floor={_fmt_price(record.get('pl_shadow_net_floor'))}",
+            f"pl_shadow_stop={_fmt_price(record.get('pl_shadow_stop'))}",
+            f"pl_shadow_activation={_fmt_price(record.get('pl_shadow_activation_price'))}",
+            f"pl_shadow_absorbed={record.get('pl_shadow_floor_absorbed')}",
+            f"pl_shadow_active_step={record.get('pl_shadow_active_step') or 'n/a'}",
+            f"pl_shadow_active_stop={_fmt_price(record.get('pl_shadow_active_stop'))}",
+            f"pl_shadow_censored={record.get('pl_shadow_censored_by_real_exit')}",
+            f"peak={_fmt_price(record.get('peak_price'))}",
+            f"pnl_abs={_fmt_number(record.get('realized_pnl_abs'))}",
+            f"trough={_fmt_price(record.get('trough_price'))}",
+            f"trough_pct={_fmt_signed_pct(record.get('trough_pct'))}",
+            f"trough_atr={_fmt_signed_number(record.get('trough_atr'))}",
+            f"trough_at={record.get('trough_at') or 'n/a'}",
+            f"time_to_trough={_fmt_optional_duration(record.get('time_to_trough_seconds'))}",
+            f"trough_complete={record.get('trough_tracking_complete')}",
+            f"run_id={record.get('run_id')}",
+            f"strategy={record.get('strategy_version')}",
+            f"opened_at={record.get('opened_at')}",
+            f"closed_at={record.get('closed_at')}",
+        ]
+        print(" | ".join(fields))
 
 
 def _write_csv(records: list[Dict[str, Any]], path: Path) -> None:
