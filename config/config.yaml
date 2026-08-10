@@ -138,9 +138,12 @@ risk:
   profit_lock:
     mode: atr
     net_floor_shadow:
-      enabled: true
+      enabled: false
       net_margin_pct: 0.05
       activation_buffer_atr: 0.5
+    economic_floor:
+      enabled: true
+      net_margin_pct: 0.05
     steps:
       - trigger_atr: 5
         lock_atr: 1.5

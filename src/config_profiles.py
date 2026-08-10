@@ -38,6 +38,7 @@ def effective_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
     ]
     _validate_hard_stop(config)
     _validate_profit_lock_shadow(config)
+    _validate_profit_lock_economic_floor(config)
     _validate_phantoms(config)
     _validate_multi_market_shadow(config)
     return config
@@ -98,6 +99,25 @@ def _validate_profit_lock_shadow(config: Dict[str, Any]) -> None:
             raise ValueError(f"risk.profit_lock.net_floor_shadow.{field} must be greater than or equal to 0") from None
         if isinstance(value, bool) or number < 0:
             raise ValueError(f"risk.profit_lock.net_floor_shadow.{field} must be greater than or equal to 0")
+
+
+def _validate_profit_lock_economic_floor(config: Dict[str, Any]) -> None:
+    risk = config.get("risk") if isinstance(config.get("risk"), dict) else {}
+    profit_lock = risk.get("profit_lock") if isinstance(risk.get("profit_lock"), dict) else {}
+    floor = profit_lock.get("economic_floor") if isinstance(profit_lock.get("economic_floor"), dict) else {}
+    if not bool(floor.get("enabled", False)):
+        return
+    value = floor.get("net_margin_pct")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "risk.profit_lock.economic_floor.net_margin_pct must be greater than or equal to 0"
+        ) from None
+    if isinstance(value, bool) or number < 0:
+        raise ValueError(
+            "risk.profit_lock.economic_floor.net_margin_pct must be greater than or equal to 0"
+        )
 
 
 def _validate_phantoms(config: Dict[str, Any]) -> None:

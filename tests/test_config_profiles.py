@@ -107,6 +107,20 @@ class ConfigProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "net_floor_shadow.activation_buffer_atr"):
             effective_config(config)
 
+    def test_profit_lock_economic_floor_requires_non_negative_margin(self) -> None:
+        config = self.base_config()
+        config["risk"] = {
+            "profit_lock": {
+                "economic_floor": {
+                    "enabled": True,
+                    "net_margin_pct": -0.01,
+                }
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "economic_floor.net_margin_pct"):
+            effective_config(config)
+
     def test_multi_market_shadow_requires_epoch_cap_to_cover_slots(self) -> None:
         config = self.base_config()
         config["instrumentation"] = {

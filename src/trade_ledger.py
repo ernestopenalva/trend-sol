@@ -128,6 +128,20 @@ class TradeLedger:
             "exit_slippage_pct": _float_or_none(getattr(position, "exit_slippage_pct", None)),
             "exit_reason": position.exit_reason,
             "final_step": _final_step(position),
+            "profit_lock_step": getattr(position, "profit_lock_step", None),
+            "profit_lock_raw_stop": _float_or_none(getattr(position, "profit_lock_raw_stop", None)),
+            "profit_lock_economic_floor": _float_or_none(
+                getattr(position, "profit_lock_economic_floor", None)
+            ),
+            "profit_lock_floor_sufficient": getattr(position, "profit_lock_floor_sufficient", None),
+            "profit_lock_action": getattr(position, "profit_lock_action", None),
+            "profit_lock_trigger_atr": _float_or_none(
+                getattr(position, "profit_lock_trigger_atr", None)
+            ),
+            "profit_lock_lock_atr": _float_or_none(getattr(position, "profit_lock_lock_atr", None)),
+            "profit_lock_net_margin_pct": _float_or_none(
+                getattr(position, "profit_lock_net_margin_pct", None)
+            ),
             "be_atr_stop": _float_or_none(getattr(position, "be_atr_stop", None)),
             "be_net_floor": _float_or_none(getattr(position, "be_net_floor", None)),
             "be_stop": _float_or_none(getattr(position, "be_stop", None)),

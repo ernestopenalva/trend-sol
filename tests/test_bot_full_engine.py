@@ -9,8 +9,9 @@ from src.position.bot_full_engine import BotFullExitPosition
 
 
 class FakeClient:
-    def __init__(self) -> None:
+    def __init__(self, fill_price: float = 106.0) -> None:
         self.sells = []
+        self.fill_price = fill_price
 
     def market_sell(self, symbol: str, quantity: float, client_order_id: str):
         self.sells.append((symbol, quantity, client_order_id))
@@ -18,8 +19,8 @@ class FakeClient:
             "orderId": 123,
             "clientOrderId": client_order_id,
             "executedQty": str(quantity),
-            "cummulativeQuoteQty": str(quantity * 106),
-            "fills": [{"price": "106", "qty": str(quantity), "commission": "0.01"}],
+            "cummulativeQuoteQty": str(quantity * self.fill_price),
+            "fills": [{"price": str(self.fill_price), "qty": str(quantity), "commission": "0.01"}],
         }
 
 
@@ -85,6 +86,144 @@ class BotFullEngineTests(unittest.TestCase):
         self.assertAlmostEqual(position.profit_lock_stop, 100.30)
         self.assertEqual(position.stop_type, "profit_lock")
         self.assertAlmostEqual(position.effective_stop, 100.30)
+
+    def test_profit_lock_arms_when_raw_stop_is_above_economic_floor(self) -> None:
+        client = FakeClient(fill_price=101.0)
+        position = self._economic_floor_position(entry_atr=0.20, client=client)
+
+        event = position.on_tick(101.0)
+
+        self.assertIsNone(event)
+        self.assertEqual(client.sells, [])
+        self.assertAlmostEqual(position.profit_lock_stop or 0, 100.30)
+        self.assertAlmostEqual(position.profit_lock_economic_floor or 0, 100.25)
+        self.assertTrue(position.profit_lock_floor_sufficient)
+        self.assertEqual(position.profit_lock_action, "ARMED")
+
+    def test_profit_lock_arms_when_raw_stop_equals_economic_floor(self) -> None:
+        position = self._economic_floor_position(
+            entry_atr=0.20,
+            economic_margin_pct=0.10,
+        )
+
+        event = position.on_tick(101.0)
+
+        self.assertIsNone(event)
+        self.assertAlmostEqual(position.profit_lock_stop or 0, 100.30)
+        self.assertAlmostEqual(position.profit_lock_economic_floor or 0, 100.30)
+        self.assertTrue(position.profit_lock_floor_sufficient)
+        self.assertEqual(position.profit_lock_action, "ARMED")
+
+    def test_profit_lock_exits_immediately_when_raw_stop_is_below_economic_floor(self) -> None:
+        client = FakeClient(fill_price=100.25)
+        position = self._economic_floor_position(entry_atr=0.05, client=client)
+
+        event = position.on_tick(100.25)
+
+        self.assertIsNotNone(event)
+        self.assertEqual(position.status, "CLOSED")
+        self.assertEqual(position.exit_reason, "PROFIT_LOCK_ECONOMIC_EXIT")
+        self.assertIsNone(position.profit_lock_stop)
+        self.assertEqual(position.profit_lock_step, "PL1")
+        self.assertAlmostEqual(position.profit_lock_raw_stop or 0, 100.075)
+        self.assertAlmostEqual(position.profit_lock_economic_floor or 0, 100.25)
+        self.assertFalse(position.profit_lock_floor_sufficient)
+        self.assertEqual(position.profit_lock_action, "ECONOMIC_EXIT")
+        self.assertEqual(event["exit_reason"], "PROFIT_LOCK_ECONOMIC_EXIT")
+        self.assertEqual(event["profit_lock_step"], "PL1")
+        self.assertEqual(event["profit_lock_action"], "ECONOMIC_EXIT")
+        self.assertAlmostEqual(event["trigger_atr"], 5.0)
+        self.assertAlmostEqual(event["lock_atr"], 1.5)
+        self.assertAlmostEqual(event["estimated_fees_pct"], 0.20)
+        self.assertAlmostEqual(event["net_margin_pct"], 0.05)
+        self.assertAlmostEqual(event["trigger_price"], 100.25)
+        self.assertAlmostEqual(event["price"], 100.25)
+        self.assertAlmostEqual(event["net_pnl_pct"], 0.05)
+        self.assertAlmostEqual(event["exit_slippage_pct"], 0.0)
+
+    def test_profit_lock_economic_floor_applies_to_restored_pl2_and_pl3(self) -> None:
+        pl2 = self._economic_floor_position(entry_atr=0.05, client=FakeClient(fill_price=100.40))
+        pl2.applied_steps.add("atr:1")
+
+        event_pl2 = pl2.on_tick(100.40)
+
+        self.assertIsNotNone(event_pl2)
+        self.assertEqual(pl2.profit_lock_step, "PL2")
+        self.assertEqual(pl2.exit_reason, "PROFIT_LOCK_ECONOMIC_EXIT")
+
+        pl3 = self._economic_floor_position(entry_atr=0.03, client=FakeClient(fill_price=100.36))
+        pl3.applied_steps.update({"atr:1", "atr:2"})
+
+        event_pl3 = pl3.on_tick(100.36)
+
+        self.assertIsNotNone(event_pl3)
+        self.assertEqual(pl3.profit_lock_step, "PL3")
+        self.assertEqual(pl3.exit_reason, "PROFIT_LOCK_ECONOMIC_EXIT")
+
+    def test_profit_lock_economic_floor_does_not_change_multi_market_shadow(self) -> None:
+        client = FakeClient(fill_price=100.25)
+        position = self._economic_floor_position(entry_atr=0.05, client=client)
+        position.shadow_kind = "TOP3_MARKET"
+
+        event = position.on_tick(100.25)
+
+        self.assertIsNone(event)
+        self.assertEqual(client.sells, [])
+        self.assertAlmostEqual(position.profit_lock_stop or 0, 100.075)
+        self.assertIsNone(position.profit_lock_economic_floor)
+
+    def test_profit_lock_economic_floor_uses_effective_bnb_discount(self) -> None:
+        position = self._economic_floor_position(entry_atr=0.15)
+        position.config["fees"]["use_bnb_discount"] = True
+
+        event = position.on_tick(100.75)
+
+        self.assertIsNone(event)
+        self.assertAlmostEqual(position.profit_lock_raw_stop or 0, 100.225)
+        self.assertAlmostEqual(position.profit_lock_economic_floor or 0, 100.20)
+        self.assertEqual(position.profit_lock_action, "ARMED")
+
+    def test_trailing_remains_active_with_sufficient_economic_profit_lock(self) -> None:
+        position = self._economic_floor_position(entry_atr=0.20)
+
+        event = position.on_tick(102.0)
+
+        self.assertIsNone(event)
+        self.assertTrue(position.trailing_active)
+        self.assertAlmostEqual(position.trailing_stop or 0, 101.0)
+        self.assertAlmostEqual(position.effective_stop, 101.0)
+        self.assertEqual(position.stop_type, "trailing")
+
+    def test_breakeven_and_hard_stop_remain_independent_of_economic_floor(self) -> None:
+        breakeven = self._atr_position(
+            config_overrides={
+                "fees": {"enabled": True, "taker_fee_pct": 0.10, "use_bnb_discount": False},
+                "profit_lock": {
+                    "mode": "atr",
+                    "economic_floor": {"enabled": True, "net_margin_pct": 0.05},
+                    "steps": [
+                        {"trigger_atr": 5, "lock_atr": 1.5},
+                        {"trigger_atr": 8, "lock_atr": 3},
+                        {"trigger_atr": 12, "lock_atr": 6},
+                    ],
+                },
+            }
+        )
+
+        self.assertIsNone(breakeven.on_tick(100.70))
+        self.assertIsNotNone(breakeven.breakeven_stop)
+        self.assertIsNone(breakeven.profit_lock_stop)
+
+        hard_stop = self._economic_floor_position(entry_atr=0.20, client=FakeClient(fill_price=97.0))
+        hard_stop.hard_stop_enabled = True
+        hard_stop.hard_stop_pct = 3.0
+        hard_stop.hard_stop_price = 97.0
+        hard_stop._refresh_effective_stop()
+
+        event = hard_stop.on_tick(97.0)
+
+        self.assertIsNotNone(event)
+        self.assertEqual(hard_stop.exit_reason, "HARD_STOP")
 
     def test_profit_lock_net_floor_shadow_observes_without_changing_live_stop(self) -> None:
         client = FakeClient()
@@ -416,6 +555,41 @@ class BotFullEngineTests(unittest.TestCase):
             entry_atr=entry_atr,
             atr_timeframe="1m",
             atr_period=14,
+        )
+
+    def _economic_floor_position(
+        self,
+        entry_atr: float,
+        client=None,
+        economic_margin_pct: float = 0.05,
+    ) -> BotFullExitPosition:
+        return self._atr_position(
+            entry_atr=entry_atr,
+            client=client,
+            config_overrides={
+                "fees": {
+                    "enabled": True,
+                    "taker_fee_pct": 0.10,
+                    "use_bnb_discount": False,
+                },
+                "breakeven": {
+                    "mode": "atr",
+                    "trigger_atr": 100,
+                    "offset_atr": 0.1,
+                },
+                "profit_lock": {
+                    "mode": "atr",
+                    "economic_floor": {
+                        "enabled": True,
+                        "net_margin_pct": economic_margin_pct,
+                    },
+                    "steps": [
+                        {"trigger_atr": 5, "lock_atr": 1.5},
+                        {"trigger_atr": 8, "lock_atr": 3},
+                        {"trigger_atr": 12, "lock_atr": 6},
+                    ],
+                },
+            },
         )
 
 

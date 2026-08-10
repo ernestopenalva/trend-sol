@@ -83,6 +83,20 @@ class BotFullExitPosition(PositionBase):
             profit_lock_cfg.get("steps", config.get("profit_lock_atr", [])),
             key=lambda item: item["trigger_atr"],
         )
+        economic_floor_cfg = (
+            profit_lock_cfg.get("economic_floor")
+            if isinstance(profit_lock_cfg.get("economic_floor"), dict)
+            else {}
+        )
+        self.profit_lock_economic_floor_enabled = bool(economic_floor_cfg.get("enabled", False))
+        self.profit_lock_net_margin_pct = _float_or_zero(economic_floor_cfg.get("net_margin_pct"))
+        self.profit_lock_step: Optional[str] = None
+        self.profit_lock_raw_stop: Optional[float] = None
+        self.profit_lock_economic_floor: Optional[float] = None
+        self.profit_lock_floor_sufficient: Optional[bool] = None
+        self.profit_lock_action: Optional[str] = None
+        self.profit_lock_trigger_atr: Optional[float] = None
+        self.profit_lock_lock_atr: Optional[float] = None
         pl_shadow_cfg = (
             profit_lock_cfg.get("net_floor_shadow")
             if isinstance(profit_lock_cfg.get("net_floor_shadow"), dict)
@@ -188,6 +202,23 @@ class BotFullExitPosition(PositionBase):
             "be_floor_absorbed_atr_stop", position.be_floor_absorbed_atr_stop
         )
         position.profit_lock_stop = _optional_float(state.get("profit_lock_stop", position.profit_lock_stop))
+        position.profit_lock_step = state.get("profit_lock_step", position.profit_lock_step)
+        position.profit_lock_raw_stop = _optional_float(
+            state.get("profit_lock_raw_stop", position.profit_lock_raw_stop)
+        )
+        position.profit_lock_economic_floor = _optional_float(
+            state.get("profit_lock_economic_floor", position.profit_lock_economic_floor)
+        )
+        position.profit_lock_floor_sufficient = state.get(
+            "profit_lock_floor_sufficient", position.profit_lock_floor_sufficient
+        )
+        position.profit_lock_action = state.get("profit_lock_action", position.profit_lock_action)
+        position.profit_lock_trigger_atr = _optional_float(
+            state.get("profit_lock_trigger_atr", position.profit_lock_trigger_atr)
+        )
+        position.profit_lock_lock_atr = _optional_float(
+            state.get("profit_lock_lock_atr", position.profit_lock_lock_atr)
+        )
         position.pl_shadow_status = str(state.get("pl_shadow_status", position.pl_shadow_status))
         position.pl_shadow_applied_steps = {str(item) for item in state.get("pl_shadow_applied_steps", [])}
         position.pl_shadow_step = state.get("pl_shadow_step", position.pl_shadow_step)
@@ -260,9 +291,28 @@ class BotFullExitPosition(PositionBase):
         pnl_atr = self.pnl_atr(price)
         self._apply_breakeven(pnl_pct, pnl_atr, price)
         self._observe_profit_lock_shadow(price, pnl_pct, pnl_atr, market_ts or ts)
-        for index, new_stop in self._profit_lock_candidates(pnl_pct, pnl_atr):
+        for plan in self._profit_lock_candidates(pnl_pct, pnl_atr):
+            index = int(plan["index"])
+            new_stop = float(plan["raw_stop"])
             step_key = f"{self.profit_lock_mode}:{index}"
             if step_key not in self.applied_steps:
+                economic_floor = self._active_profit_lock_economic_floor()
+                floor_sufficient = economic_floor is None or new_stop >= economic_floor
+                self.profit_lock_step = f"PL{index}"
+                self.profit_lock_raw_stop = new_stop
+                self.profit_lock_economic_floor = economic_floor
+                self.profit_lock_floor_sufficient = floor_sufficient
+                self.profit_lock_trigger_atr = _optional_float(plan.get("trigger_atr"))
+                self.profit_lock_lock_atr = _optional_float(plan.get("lock_atr"))
+                if not floor_sufficient:
+                    self.profit_lock_action = "ECONOMIC_EXIT"
+                    return self._close_at_market(
+                        price,
+                        "PROFIT_LOCK_ECONOMIC_EXIT",
+                        ts,
+                        trigger_reference=price,
+                    )
+                self.profit_lock_action = "ARMED"
                 if self.profit_lock_stop is None or new_stop > self.profit_lock_stop:
                     self.profit_lock_stop = new_stop
                 self.applied_steps.add(step_key)
@@ -310,15 +360,27 @@ class BotFullExitPosition(PositionBase):
         if reason is None:
             return None
 
+        return self._close_at_market(
+            price,
+            reason,
+            ts,
+            trigger_reference=self.effective_stop,
+        )
+
+    def _close_at_market(
+        self,
+        price: float,
+        reason: str,
+        ts: str,
+        trigger_reference: float,
+    ) -> Dict[str, Any]:
         client_order_id = f"ts-{self.pair_id}-B-close"
         self.validate_sell_quantity(self.reserved_qty)
-        trigger_price = price
-        trigger_stop = self.effective_stop
         order = self.client.market_sell(self.symbol, self.reserved_qty, client_order_id)
         executed_price = _average_fill_price(order) or price
-        self.exit_trigger_price = trigger_price
+        self.exit_trigger_price = price
         self.exit_trigger_price_source = "aggTrade"
-        self.exit_slippage_pct = _slippage_pct(executed_price, trigger_stop)
+        self.exit_slippage_pct = _slippage_pct(executed_price, trigger_reference)
         self.mark_closed(executed_price, reason, ts, order)
         exit_price_source = "phantom_tick" if self.phantom else "market_fill"
         event = self._trade_event(
@@ -328,8 +390,9 @@ class BotFullExitPosition(PositionBase):
             reason,
             order,
             price_source=exit_price_source,
-            trigger_price=trigger_price,
+            trigger_price=price,
             trigger_price_source="aggTrade",
+            stop_hit=trigger_reference,
         )
         self.logger.trade(event)
         return event
@@ -344,10 +407,15 @@ class BotFullExitPosition(PositionBase):
         price_source: str = "aggTrade",
         trigger_price: Optional[float] = None,
         trigger_price_source: Optional[str] = None,
+        stop_hit: Optional[float] = None,
     ) -> Dict[str, Any]:
         order = order or {}
         estimated_fees_pct = self._estimated_round_trip_fees_pct()
-        stop_hit = self.effective_stop if event == "CLOSE" else None
+        recorded_stop_hit = (
+            (self.effective_stop if stop_hit is None else stop_hit)
+            if event == "CLOSE"
+            else None
+        )
         return {
             "ts": now_iso(),
             "pair_id": self.pair_id,
@@ -374,6 +442,14 @@ class BotFullExitPosition(PositionBase):
             "hard_stop_price": self.hard_stop_price,
             "hard_stop_applied_on_restore": self.hard_stop_applied_on_restore,
             "profit_lock_mode": self.profit_lock_mode,
+            "profit_lock_step": self.profit_lock_step,
+            "profit_lock_raw_stop": self.profit_lock_raw_stop,
+            "profit_lock_economic_floor": self.profit_lock_economic_floor,
+            "profit_lock_floor_sufficient": self.profit_lock_floor_sufficient,
+            "profit_lock_action": self.profit_lock_action,
+            "trigger_atr": self.profit_lock_trigger_atr,
+            "lock_atr": self.profit_lock_lock_atr,
+            "net_margin_pct": self.profit_lock_net_margin_pct,
             "trailing_mode": self.trailing_mode,
             "breakeven_stop": self.breakeven_stop,
             "be_atr_stop": self.be_atr_stop,
@@ -401,7 +477,7 @@ class BotFullExitPosition(PositionBase):
             "pl_shadow_closed_at": self.pl_shadow_closed_at,
             "trailing_stop": self.trailing_stop,
             "effective_stop": self.effective_stop,
-            "stop_hit": stop_hit,
+            "stop_hit": recorded_stop_hit,
             "exit_slippage_pct": self.exit_slippage_pct if event == "CLOSE" else None,
             "stop_type": self.stop_type,
             "exit_reason": exit_reason,
@@ -465,20 +541,55 @@ class BotFullExitPosition(PositionBase):
             "trough_at": self.trough_at,
         }
 
-    def _profit_lock_candidates(self, pnl_pct: float, pnl_atr: Optional[float]) -> list[tuple[int, float]]:
-        candidates: list[tuple[int, float]] = []
+    def _profit_lock_candidates(
+        self,
+        pnl_pct: float,
+        pnl_atr: Optional[float],
+    ) -> list[Dict[str, float | int | None]]:
+        candidates: list[Dict[str, float | int | None]] = []
         if self.profit_lock_mode == "atr":
             if pnl_atr is None:
                 return candidates
             for index, step in enumerate(self.profit_lock_atr_steps, start=1):
                 if _gte(pnl_atr, float(step["trigger_atr"])):
-                    candidates.append((index, self.entry_price + float(step["lock_atr"]) * float(self.entry_atr)))
+                    candidates.append(
+                        {
+                            "index": index,
+                            "raw_stop": self.entry_price
+                            + float(step["lock_atr"]) * float(self.entry_atr),
+                            "trigger_atr": float(step["trigger_atr"]),
+                            "lock_atr": float(step["lock_atr"]),
+                        }
+                    )
             return candidates
 
         for index, step in enumerate(self.profit_lock_pct_steps, start=1):
             if _gte(pnl_pct, float(step["trigger_pct"])):
-                candidates.append((index, self.entry_price * (1 + float(step["stop_to_pct"]) / 100)))
+                candidates.append(
+                    {
+                        "index": index,
+                        "raw_stop": self.entry_price * (1 + float(step["stop_to_pct"]) / 100),
+                        "trigger_atr": None,
+                        "lock_atr": None,
+                    }
+                )
         return candidates
+
+    def _active_profit_lock_economic_floor(self) -> Optional[float]:
+        if (
+            not self.profit_lock_economic_floor_enabled
+            or self.profit_lock_mode != "atr"
+            or getattr(self, "shadow_kind", None) is not None
+        ):
+            return None
+        return self.entry_price * (
+            1
+            + (
+                self._estimated_round_trip_fees_pct()
+                + self.profit_lock_net_margin_pct
+            )
+            / 100
+        )
 
     def _observe_profit_lock_shadow(
         self,
@@ -749,6 +860,13 @@ class BotFullExitPosition(PositionBase):
                 "be_floor_source": self.be_floor_source,
                 "be_floor_absorbed_atr_stop": self.be_floor_absorbed_atr_stop,
                 "profit_lock_stop": self.profit_lock_stop,
+                "profit_lock_step": self.profit_lock_step,
+                "profit_lock_raw_stop": self.profit_lock_raw_stop,
+                "profit_lock_economic_floor": self.profit_lock_economic_floor,
+                "profit_lock_floor_sufficient": self.profit_lock_floor_sufficient,
+                "profit_lock_action": self.profit_lock_action,
+                "profit_lock_trigger_atr": self.profit_lock_trigger_atr,
+                "profit_lock_lock_atr": self.profit_lock_lock_atr,
                 "pl_shadow_enabled": self.pl_shadow_enabled,
                 "pl_shadow_status": self.pl_shadow_status,
                 "pl_shadow_applied_steps": sorted(self.pl_shadow_applied_steps),
