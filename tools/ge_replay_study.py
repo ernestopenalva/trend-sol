@@ -342,7 +342,14 @@ def load_ge_market_data(
     downloaded = [
         candle
         for range_start, range_end in missing
-        for candle in client.klines(symbol, interval, range_start, range_end)
+        for candle in fetch_ge_klines(
+            client,
+            symbol,
+            interval,
+            range_start,
+            range_end,
+            interval_ms,
+        )
     ]
     candles = merge_candles(cached, downloaded)
     if downloaded:
@@ -359,6 +366,63 @@ def load_ge_market_data(
         if candle.open_time_ms >= _floor_ms(start_ms, interval_ms)
         and candle.close_time_ms <= end_ms
     ]
+
+
+def fetch_ge_klines(
+    client: BinancePublicClient,
+    symbol: str,
+    interval: str,
+    start_ms: int,
+    end_ms: int,
+    interval_ms: int,
+) -> list[MarketCandle]:
+    cursor = _floor_ms(start_ms, interval_ms)
+    indexed: Dict[int, MarketCandle] = {}
+    while cursor <= end_ms:
+        data = client.get(
+            "/api/v3/klines",
+            {
+                "symbol": symbol,
+                "interval": interval,
+                "startTime": cursor,
+                "endTime": end_ms,
+                "limit": 1000,
+            },
+        )
+        if not isinstance(data, list):
+            raise RuntimeError(f"Unexpected kline response for {symbol}/{interval}")
+        page = [ge_candle_from_binance(item) for item in data if isinstance(item, list)]
+        if not page:
+            break
+        for candle in page:
+            indexed[candle.open_time_ms] = candle
+        next_cursor = max(candle.open_time_ms for candle in page) + interval_ms
+        if next_cursor <= cursor:
+            raise RuntimeError(f"Kline pagination did not advance for {symbol}/{interval}")
+        cursor = next_cursor
+        if len(page) < 1000:
+            break
+    return [
+        indexed[key]
+        for key in sorted(indexed)
+        if indexed[key].open_time_ms >= _floor_ms(start_ms, interval_ms)
+        and indexed[key].close_time_ms <= end_ms
+    ]
+
+
+def ge_candle_from_binance(value: Sequence[Any]) -> MarketCandle:
+    if len(value) < 9:
+        raise ValueError("Binance kline must have at least 9 fields")
+    return MarketCandle(
+        open_time_ms=int(value[0]),
+        close_time_ms=int(value[6]),
+        open=float(value[1]),
+        high=float(value[2]),
+        low=float(value[3]),
+        close=float(value[4]),
+        quote_volume=float(value[7]),
+        trades=int(value[8]),
+    )
 
 
 def ge_variant_config(config: Dict[str, Any], lookback_candles: int) -> Dict[str, Any]:

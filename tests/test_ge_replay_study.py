@@ -125,17 +125,20 @@ class GeReplayStudyTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.calls = 0
 
-            def klines(self, symbol: str, interval: str, start_ms: int, end_ms: int):
+            def get(self, path: str, params: dict):
                 self.calls += 1
-                self.assertions = (symbol, interval)
+                self.assertions = (path, params["symbol"], params["interval"])
+                duration = 5 * MINUTE
                 return [
-                    MarketCandle(
-                        open_time_ms=open_ms,
-                        close_time_ms=open_ms + 5 * MINUTE - 1,
-                        open=100, high=101, low=99, close=100,
-                        quote_volume=1000, trades=10,
+                    [
+                        open_ms, "100", "101", "99", "100", "10",
+                        open_ms + duration - 1, "1000", 10,
+                    ]
+                    for open_ms in range(
+                        int(params["startTime"]),
+                        int(params["endTime"]) + 1,
+                        duration,
                     )
-                    for open_ms in range(start_ms, end_ms + 1, 5 * MINUTE)
                 ]
 
         with tempfile.TemporaryDirectory() as directory:
@@ -146,7 +149,7 @@ class GeReplayStudyTests(unittest.TestCase):
             )
             self.assertEqual(len(candles), 3)
             self.assertEqual(client.calls, 1)
-            self.assertEqual(client.assertions, ("SOLUSDT", "5m"))
+            self.assertEqual(client.assertions, ("/api/v3/klines", "SOLUSDT", "5m"))
             cached = load_ge_market_data(
                 client, "SOLUSDT", "5m", 0, 15 * MINUTE - 1,
                 Path(directory), offline=True,  # type: ignore[arg-type]
