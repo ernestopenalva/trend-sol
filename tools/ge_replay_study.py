@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import math
 import statistics
 import sys
 from collections import Counter
-from contextlib import redirect_stdout
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
@@ -31,11 +29,18 @@ from tools.market_bot_replay import (
     _bot_exit_config,
     _deduplicate,
     _kline_payload,
-    _load_market_data,
     _passes_spacing,
     _round_trip_fees_pct,
 )
-from tools.market_selection_study import CurrentMarket, MarketCandle, BinancePublicClient, _floor_ms
+from tools.market_selection_study import (
+    BinancePublicClient,
+    MarketCandle,
+    _floor_ms,
+    load_candle_cache,
+    merge_candles,
+    missing_candle_ranges,
+    save_candle_cache,
+)
 
 
 MATCH_TOLERANCE_MS = 90_000
@@ -231,24 +236,19 @@ def main() -> None:
     data_start_ms = actual_start_ms - warmup_ms
     base_url = str(args.market_data_url or config.get("market_data", {}).get("rest_url") or "https://api.binance.com")
     client = BinancePublicClient(base_url, int(args.http_timeout_seconds))
-    market = [CurrentMarket(str(config.get("symbol") or "SOLUSDT"), "SOL", 0, None, 0, None)]
+    symbol = str(config.get("symbol") or "SOLUSDT")
     cache_dir = Path(args.cache_dir)
     candles: Dict[str, list[MarketCandle]] = {}
     for interval in ("1m", "5m", "15m"):
-        with redirect_stdout(io.StringIO()):
-            loaded = _load_market_data(
-                client,
-                market,
-                interval,
-                data_start_ms,
-                end_ms,
-                cache_dir,
-                bool(args.offline),
-            )
-        symbol = str(config.get("symbol") or "SOLUSDT")
-        if symbol not in loaded:
-            raise SystemExit(f"Complete historical candles unavailable for {symbol}/{interval}")
-        candles[interval] = loaded[symbol]
+        candles[interval] = load_ge_market_data(
+            client,
+            symbol,
+            interval,
+            data_start_ms,
+            end_ms,
+            cache_dir,
+            bool(args.offline),
+        )
 
     variant_configs = {
         lookback: ge_variant_config(config, lookback)
@@ -313,6 +313,52 @@ def main() -> None:
         detail=bool(args.detail),
         decision_detail=bool(args.decision_detail),
     )
+
+
+def load_ge_market_data(
+    client: BinancePublicClient,
+    symbol: str,
+    interval: str,
+    start_ms: int,
+    end_ms: int,
+    cache_dir: Path,
+    offline: bool,
+) -> list[MarketCandle]:
+    interval_sizes = {
+        "1m": MINUTE_MS,
+        "5m": 5 * MINUTE_MS,
+        "15m": 15 * MINUTE_MS,
+    }
+    if interval not in interval_sizes:
+        raise ValueError(f"Unsupported GE replay interval: {interval}")
+    interval_ms = interval_sizes[interval]
+    path = cache_dir / f"{symbol}_{interval}.jsonl"
+    cached = load_candle_cache(path)
+    missing = missing_candle_ranges(cached, start_ms, end_ms, interval_ms)
+    if missing and offline:
+        raise SystemExit(
+            f"Offline cache incomplete for {symbol}/{interval}: {len(missing)} missing range(s)"
+        )
+    downloaded = [
+        candle
+        for range_start, range_end in missing
+        for candle in client.klines(symbol, interval, range_start, range_end)
+    ]
+    candles = merge_candles(cached, downloaded)
+    if downloaded:
+        save_candle_cache(path, candles)
+    remaining = missing_candle_ranges(candles, start_ms, end_ms, interval_ms)
+    if remaining:
+        raise SystemExit(
+            f"Complete historical candles unavailable for {symbol}/{interval}: "
+            f"{len(remaining)} missing range(s)"
+        )
+    return [
+        candle
+        for candle in candles
+        if candle.open_time_ms >= _floor_ms(start_ms, interval_ms)
+        and candle.close_time_ms <= end_ms
+    ]
 
 
 def ge_variant_config(config: Dict[str, Any], lookback_candles: int) -> Dict[str, Any]:
