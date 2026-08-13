@@ -585,6 +585,21 @@ class BotExitOnlyTests(unittest.TestCase):
         self.assertIn("BREAKEVEN | 2 | +0.70% | +0.30% | +0.15%", text)
         self.assertIn("HARD_STOP | 1 | -2.00% | -2.20% | -2.20%", text)
 
+    def test_trades_report_keeps_historical_economic_exit_reason(self) -> None:
+        records = [
+            {
+                "exit_reason": "PROFIT_LOCK_ECONOMIC_EXIT",
+                "gross_pnl_pct": 0.25,
+                "net_pnl_pct": 0.05,
+            }
+        ]
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            _print_exit_reason_breakdown(records, {"fees": {"enabled": False}})
+
+        self.assertIn("PROFIT_LOCK_ECONOMIC_EXIT | 1 | +0.25% | +0.05% | +0.05%", output.getvalue())
+
     def test_list_positions_omits_a_in_bot_exit_only(self) -> None:
         config = _config()
         state = [

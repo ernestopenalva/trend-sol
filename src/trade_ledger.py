@@ -139,6 +139,13 @@ class TradeLedger:
                 getattr(position, "profit_lock_trigger_atr", None)
             ),
             "profit_lock_lock_atr": _float_or_none(getattr(position, "profit_lock_lock_atr", None)),
+            "profit_lock_raw_trigger": _float_or_none(
+                getattr(position, "profit_lock_raw_trigger", None)
+            ),
+            "profit_lock_effective_trigger": _float_or_none(
+                getattr(position, "profit_lock_effective_trigger", None)
+            ),
+            "profit_lock_floor_absorbed": getattr(position, "profit_lock_floor_absorbed", None),
             "profit_lock_net_margin_pct": _float_or_none(
                 getattr(position, "profit_lock_net_margin_pct", None)
             ),

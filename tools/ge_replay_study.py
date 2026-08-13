@@ -770,9 +770,9 @@ def _print_report(
     fee_pct = _round_trip_fees_pct(config)
     economic = config.get("risk", {}).get("profit_lock", {}).get("economic_floor", {})
     economic_text = (
-        f"PROFIT_LOCK_ECONOMIC_EXIT enabled, net margin={float(economic.get('net_margin_pct', 0)):.3f}%"
+        f"adaptive Profit Lock economic floor, net margin={float(economic.get('net_margin_pct', 0)):.3f}%"
         if bool(economic.get("enabled", False))
-        else "standard Profit Lock (economic exit disabled)"
+        else "standard Profit Lock (economic floor disabled)"
     )
     print("TREND-SOL | GE counterfactual replay")
     print(f"Requested period: {_stamp(requested_start_ms)} to {_stamp(end_ms)}")

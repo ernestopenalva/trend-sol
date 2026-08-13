@@ -114,51 +114,61 @@ class BotFullEngineTests(unittest.TestCase):
         self.assertTrue(position.profit_lock_floor_sufficient)
         self.assertEqual(position.profit_lock_action, "ARMED")
 
-    def test_profit_lock_exits_immediately_when_raw_stop_is_below_economic_floor(self) -> None:
-        client = FakeClient(fill_price=100.25)
+    def test_profit_lock_waits_for_adaptive_trigger_and_arms_economic_floor(self) -> None:
+        client = FakeClient(fill_price=100.425)
         position = self._economic_floor_position(entry_atr=0.05, client=client)
 
-        event = position.on_tick(100.25)
-
-        self.assertIsNotNone(event)
-        self.assertEqual(position.status, "CLOSED")
-        self.assertEqual(position.exit_reason, "PROFIT_LOCK_ECONOMIC_EXIT")
+        self.assertIsNone(position.on_tick(100.25))
         self.assertIsNone(position.profit_lock_stop)
+        self.assertEqual(position.status, "OPEN")
+
+        event = position.on_tick(100.425)
+
+        self.assertIsNone(event)
+        self.assertEqual(client.sells, [])
+        self.assertEqual(position.status, "OPEN")
+        self.assertAlmostEqual(position.profit_lock_stop or 0, 100.25)
         self.assertEqual(position.profit_lock_step, "PL1")
         self.assertAlmostEqual(position.profit_lock_raw_stop or 0, 100.075)
         self.assertAlmostEqual(position.profit_lock_economic_floor or 0, 100.25)
         self.assertFalse(position.profit_lock_floor_sufficient)
-        self.assertEqual(position.profit_lock_action, "ECONOMIC_EXIT")
-        self.assertEqual(event["exit_reason"], "PROFIT_LOCK_ECONOMIC_EXIT")
-        self.assertEqual(event["profit_lock_step"], "PL1")
-        self.assertEqual(event["profit_lock_action"], "ECONOMIC_EXIT")
-        self.assertAlmostEqual(event["trigger_atr"], 5.0)
-        self.assertAlmostEqual(event["lock_atr"], 1.5)
-        self.assertAlmostEqual(event["estimated_fees_pct"], 0.20)
-        self.assertAlmostEqual(event["net_margin_pct"], 0.05)
-        self.assertAlmostEqual(event["trigger_price"], 100.25)
-        self.assertAlmostEqual(event["price"], 100.25)
-        self.assertAlmostEqual(event["net_pnl_pct"], 0.05)
-        self.assertAlmostEqual(event["exit_slippage_pct"], 0.0)
+        self.assertTrue(position.profit_lock_floor_absorbed)
+        self.assertEqual(position.profit_lock_action, "ARMED")
+        self.assertAlmostEqual(position.profit_lock_raw_trigger or 0, 100.25)
+        self.assertAlmostEqual(position.profit_lock_effective_trigger or 0, 100.425)
 
-    def test_profit_lock_economic_floor_applies_to_restored_pl2_and_pl3(self) -> None:
-        pl2 = self._economic_floor_position(entry_atr=0.05, client=FakeClient(fill_price=100.40))
+    def test_profit_lock_adaptive_geometry_applies_to_pl2_and_pl3(self) -> None:
+        pl2 = self._economic_floor_position(entry_atr=0.05)
         pl2.applied_steps.add("atr:1")
-
-        event_pl2 = pl2.on_tick(100.40)
-
-        self.assertIsNotNone(event_pl2)
+        self.assertIsNone(pl2.on_tick(100.499))
+        self.assertIsNone(pl2.profit_lock_stop)
+        self.assertIsNone(pl2.on_tick(100.50))
         self.assertEqual(pl2.profit_lock_step, "PL2")
-        self.assertEqual(pl2.exit_reason, "PROFIT_LOCK_ECONOMIC_EXIT")
+        self.assertAlmostEqual(pl2.profit_lock_stop or 0, 100.25)
+        self.assertAlmostEqual(
+            (pl2.profit_lock_effective_trigger or 0) - (pl2.profit_lock_stop or 0), 5 * 0.05
+        )
 
-        pl3 = self._economic_floor_position(entry_atr=0.03, client=FakeClient(fill_price=100.36))
+        pl3 = self._economic_floor_position(entry_atr=0.03)
         pl3.applied_steps.update({"atr:1", "atr:2"})
-
-        event_pl3 = pl3.on_tick(100.36)
-
-        self.assertIsNotNone(event_pl3)
+        self.assertIsNone(pl3.on_tick(100.429))
+        self.assertIsNone(pl3.profit_lock_stop)
+        self.assertIsNone(pl3.on_tick(100.43))
         self.assertEqual(pl3.profit_lock_step, "PL3")
-        self.assertEqual(pl3.exit_reason, "PROFIT_LOCK_ECONOMIC_EXIT")
+        self.assertAlmostEqual(pl3.profit_lock_stop or 0, 100.25)
+        self.assertAlmostEqual(
+            (pl3.profit_lock_effective_trigger or 0) - (pl3.profit_lock_stop or 0), 6 * 0.03
+        )
+
+    def test_profit_lock_original_geometry_when_technical_lock_dominates(self) -> None:
+        position = self._economic_floor_position(entry_atr=0.20)
+        plans = position._profit_lock_candidates(2.4, 12.0)
+
+        self.assertEqual(len(plans), 3)
+        expected = ((1.5, 5.0), (3.0, 8.0), (6.0, 12.0))
+        for plan, (lock_atr, trigger_atr) in zip(plans, expected):
+            self.assertAlmostEqual((float(plan["effective_stop"]) - 100) / 0.20, lock_atr)
+            self.assertAlmostEqual((float(plan["effective_trigger"]) - 100) / 0.20, trigger_atr)
 
     def test_profit_lock_economic_floor_does_not_change_multi_market_shadow(self) -> None:
         client = FakeClient(fill_price=100.25)
@@ -176,6 +186,7 @@ class BotFullEngineTests(unittest.TestCase):
         position = self._economic_floor_position(entry_atr=0.15)
         position.config["fees"]["use_bnb_discount"] = True
 
+        self.assertIsNone(position.on_tick(100.749))
         event = position.on_tick(100.75)
 
         self.assertIsNone(event)
@@ -439,22 +450,37 @@ class BotFullEngineTests(unittest.TestCase):
         client = FakeClient()
         position = self._atr_position(
             client=client,
-            config_overrides={"hard_stop": {"enabled": True, "stop_pct": 3.0}},
+            config_overrides={"hard_stop": {"enabled": True, "stop_pct": 1.5}},
         )
 
-        self.assertAlmostEqual(position.hard_stop_price or 0, 97.0)
+        self.assertAlmostEqual(position.hard_stop_price or 0, 98.5)
         self.assertEqual(position.stop_type, "hard_stop")
         self.assertFalse(position.hard_stop_applied_on_restore)
-        self.assertIsNone(position.on_tick(97.01))
+        self.assertIsNone(position.on_tick(98.51))
 
-        event = position.on_tick(97.0)
+        event = position.on_tick(98.5)
 
         self.assertIsNotNone(event)
         self.assertEqual(position.exit_reason, "HARD_STOP")
         self.assertEqual(event["exit_reason"], "HARD_STOP")
-        self.assertAlmostEqual(event["stop_hit"], 97.0)
-        self.assertAlmostEqual(event["trigger_price"], 97.0)
+        self.assertAlmostEqual(event["stop_hit"], 98.5)
+        self.assertAlmostEqual(event["trigger_price"], 98.5)
         self.assertEqual(client.sells[0][1], 1.0)
+
+    def test_restored_position_preserves_persisted_hard_stop(self) -> None:
+        original = self._atr_position(
+            config_overrides={"hard_stop": {"enabled": True, "stop_pct": 2.0}},
+        )
+        new_config = dict(original.config)
+        new_config["hard_stop"] = {"enabled": True, "stop_pct": 1.5}
+
+        restored = BotFullExitPosition.from_state(
+            original.to_state(), new_config, original.client, original.logger
+        )
+
+        self.assertAlmostEqual(restored.hard_stop_pct or 0, 2.0)
+        self.assertAlmostEqual(restored.hard_stop_price or 0, 98.0)
+        self.assertFalse(restored.hard_stop_applied_on_restore)
 
     def test_restored_position_adopts_new_hard_stop_from_config(self) -> None:
         position = self._atr_position(

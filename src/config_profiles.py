@@ -48,7 +48,7 @@ def _validate_trend_observations(config: Dict[str, Any]) -> None:
     gate = config.get("trend_gate")
     if isinstance(gate, dict) and str(gate.get("mode", "")).lower() == "ge30":
         if not str(gate.get("candle_interval", "")):
-            raise ValueError("trend_gate.candle_interval is required for GE30")
+            raise ValueError("trend_gate.candle_interval is required for the GE structural gate")
         lookback = gate.get("lookback_candles")
         if isinstance(lookback, bool) or not isinstance(lookback, int) or lookback <= 0:
             raise ValueError("trend_gate.lookback_candles must be a positive integer")

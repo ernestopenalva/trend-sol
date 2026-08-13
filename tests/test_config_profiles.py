@@ -1,11 +1,25 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+
+import yaml
 
 from src.config_profiles import effective_config
 
 
 class ConfigProfileTests(unittest.TestCase):
+    def test_runtime_intraday_config_resolves_ge15_and_hard_stop_15(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        config = yaml.safe_load((project_root / "config/config.yaml").read_text(encoding="utf-8"))
+        effective = effective_config(config)
+
+        self.assertEqual(effective["trend_gate"]["candle_interval"], "5m")
+        self.assertEqual(effective["trend_gate"]["lookback_candles"], 3)
+        self.assertEqual(effective["risk"]["hard_stop"]["stop_pct"], 1.5)
+        self.assertEqual(effective["entry"]["timeframe"], "1m")
+        self.assertEqual(effective["entry"]["atr_period"], 14)
+
     def base_config(self):
         return {
             "symbol": "SOLUSDT",

@@ -189,17 +189,22 @@ class EntryEngine:
         gate_cfg = self.config["trend_gate"]
         interval = str(gate_cfg["candle_interval"])
         lookback = int(gate_cfg["lookback_candles"])
+        interval_minutes = _interval_minutes(interval)
+        lookback_minutes = interval_minutes * lookback
+        ge_label = f"GE{lookback_minutes}"
         candles = self._candles_for(interval)
         if lookback < 1 or len(candles) < lookback + 1:
             self._log_gate(
                 1,
                 False,
                 False,
-                "insufficient_ge30_candles",
+                "insufficient_ge_candles",
                 candle_interval=interval,
                 lookback_candles=lookback,
+                lookback_minutes=lookback_minutes,
+                ge_label=ge_label,
                 candles=len(candles),
-                **{"GE30": "BLOCK"},
+                **{ge_label: "BLOCK"},
             )
             return False
         latest = candles[-1]
@@ -211,16 +216,18 @@ class EntryEngine:
             1,
             passed,
             False,
-            "ge30",
+            "ge_structure",
             candle_interval=interval,
             lookback_candles=lookback,
+            lookback_minutes=lookback_minutes,
+            ge_label=ge_label,
             high_now=latest.high,
             high_lookback=reference.high,
             low_now=latest.low,
             low_lookback=reference.low,
             high_direction="UP" if high_passed else "DOWN_OR_EQUAL",
             low_direction="UP" if low_passed else "DOWN_OR_EQUAL",
-            **{"GE30": "PASS" if passed else "BLOCK"},
+            **{ge_label: "PASS" if passed else "BLOCK"},
         )
         return passed
 

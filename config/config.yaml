@@ -1,7 +1,7 @@
 symbol: SOLUSDT
 active_profile: intraday
 position_mode: bot_exit_only
-strategy_version: "b_atr_v1.3"
+strategy_version: "b_atr_v1.4"
 
 fees:
   enabled: true
@@ -42,9 +42,10 @@ trend:
   ema_slope_lookback: 3
 
 trend_gate:
+  # Identificador legado do gate estrutural; a janela efetiva vem do lookback abaixo.
   mode: ge30
   candle_interval: "5m"
-  lookback_candles: 6
+  lookback_candles: 3
 
 ema_observations:
   enabled: true
@@ -129,7 +130,7 @@ risk:
   # BE, profit lock e trailing usam entry_atr, nao ATR recalculado ao vivo.
   hard_stop:
     enabled: true
-    stop_pct: 2.0
+    stop_pct: 1.5
   review_stop_pct: 30
   breakeven:
     mode: atr

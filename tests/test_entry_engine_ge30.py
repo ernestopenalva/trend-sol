@@ -35,7 +35,7 @@ def config() -> dict:
     return {
         "active_profile": "intraday",
         "trend": {"timeframe": "15m", "ema_period": 50, "ema_slope_lookback": 3},
-        "trend_gate": {"mode": "ge30", "candle_interval": "5m", "lookback_candles": 6},
+        "trend_gate": {"mode": "ge30", "candle_interval": "5m", "lookback_candles": 3},
         "ema_observations": {
             "enabled": True,
             "slope_window_minutes": 30,
@@ -60,12 +60,13 @@ def config() -> dict:
     }
 
 
-class EntryEngineGe30Tests(unittest.TestCase):
-    def test_ge30_compares_last_closed_candle_with_exactly_six_candles_back(self) -> None:
+class EntryEngineGe15Tests(unittest.TestCase):
+    def test_ge15_compares_last_closed_candle_with_exactly_three_intervals_back(self) -> None:
         logger = FakeLogger()
         engine = EntryEngine("SOLUSDT", config(), logger)  # type: ignore[arg-type]
-        bars = [candle(index, 10, 5, 7) for index in range(7)]
-        bars[-1] = candle(6, 11, 6, 8)
+        bars = [candle(index, 10, 5, 7) for index in range(4)]
+        bars[1] = candle(1, 99, 1, 7)  # Prova que nao usa o item anterior errado.
+        bars[-1] = candle(3, 11, 6, 8)
         engine.auxiliary_candles["5m"] = bars
 
         self.assertTrue(engine._gate_trend())
@@ -75,14 +76,16 @@ class EntryEngineGe30Tests(unittest.TestCase):
         self.assertEqual(event["high_lookback"], 10)
         self.assertEqual(event["low_now"], 6)
         self.assertEqual(event["low_lookback"], 5)
-        self.assertEqual(event["lookback_candles"], 6)
-        self.assertEqual(event["GE30"], "PASS")
+        self.assertEqual(event["lookback_candles"], 3)
+        self.assertEqual(event["lookback_minutes"], 15)
+        self.assertEqual(event["ge_label"], "GE15")
+        self.assertEqual(event["GE15"], "PASS")
 
-    def test_ge30_blocks_when_only_high_is_higher(self) -> None:
+    def test_ge15_requires_strictly_higher_high_and_low(self) -> None:
         logger = FakeLogger()
         engine = EntryEngine("SOLUSDT", config(), logger)  # type: ignore[arg-type]
-        bars = [candle(index, 10, 5, 7) for index in range(7)]
-        bars[-1] = candle(6, 11, 5, 8)
+        bars = [candle(index, 10, 5, 7) for index in range(4)]
+        bars[-1] = candle(3, 11, 5, 8)
         engine.auxiliary_candles["5m"] = bars
 
         self.assertFalse(engine._gate_trend())
@@ -90,7 +93,14 @@ class EntryEngineGe30Tests(unittest.TestCase):
         event = logger.decisions[-1]
         self.assertEqual(event["high_direction"], "UP")
         self.assertEqual(event["low_direction"], "DOWN_OR_EQUAL")
-        self.assertEqual(event["GE30"], "BLOCK")
+        self.assertEqual(event["GE15"], "BLOCK")
+
+        logger = FakeLogger()
+        engine = EntryEngine("SOLUSDT", config(), logger)  # type: ignore[arg-type]
+        bars[-1] = candle(3, 10, 6, 8)
+        engine.auxiliary_candles["5m"] = bars
+        self.assertFalse(engine._gate_trend())
+        self.assertEqual(logger.decisions[-1]["GE15"], "BLOCK")
 
     def test_four_ema_variants_are_observation_only_with_30_minute_references(self) -> None:
         logger = FakeLogger()
