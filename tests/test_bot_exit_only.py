@@ -148,8 +148,8 @@ class BotExitOnlyTests(unittest.TestCase):
                 TradeLedger(root),
             )
 
-            registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", 1, 0.2, "1m", 14))
-            registry.open_pair(EntrySignal("SOLUSDT", 101, "ts", 2, 0.2, "1m", 14))
+            registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", 0, 0.2, "1m", 14))
+            registry.open_pair(EntrySignal("SOLUSDT", 101, "ts", 300_000, 0.2, "1m", 14))
 
             self.assertEqual(client.buy_quotes, [20.0, 20.0])
             self.assertEqual([position.position_id for position in registry.positions], [1, 2])
@@ -174,8 +174,8 @@ class BotExitOnlyTests(unittest.TestCase):
                 state,
                 ledger,
             )
-            for candle in range(1, 6):
-                registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", candle, 0.2, "1m", 14))
+            for candle in range(5):
+                registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", candle * 300_000, 0.2, "1m", 14))
 
             registry.on_tick(96.9, market_ts="2026-07-13T22:00:00+00:00")
 
@@ -207,8 +207,8 @@ class BotExitOnlyTests(unittest.TestCase):
                 state,
                 ledger,
             )
-            for candle in range(1, 4):
-                registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", candle, 0.2, "1m", 14))
+            for candle in range(3):
+                registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", candle * 300_000, 0.2, "1m", 14))
 
             registry.on_tick(96.9, market_ts="2026-07-13T22:00:00+00:00")
 
@@ -240,7 +240,7 @@ class BotExitOnlyTests(unittest.TestCase):
             registry.open_pair(EntrySignal("SOLUSDT", 101, "ts", 1, 0.2, "1m", 14))
 
             self.assertEqual(len(registry.positions), 1)
-            self.assertEqual(_last_decision_reason(root), "BLOCKED_CANDLE_LIMIT")
+            self.assertEqual(_last_decision_reason(root), "ENTRY_BLOCKED_SAME_5M_CANDLE")
 
     def test_admission_spacing_uses_new_signal_atr(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -259,8 +259,8 @@ class BotExitOnlyTests(unittest.TestCase):
                 TradeLedger(root),
             )
 
-            registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", 1, 0.2, "1m", 14))
-            registry.open_pair(EntrySignal("SOLUSDT", 100.90, "ts", 2, 1.0, "1m", 14))
+            registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", 0, 0.2, "1m", 14))
+            registry.open_pair(EntrySignal("SOLUSDT", 100.90, "ts", 300_000, 1.0, "1m", 14))
 
             self.assertEqual(len(registry.positions), 1)
             self.assertEqual(_last_decision_reason(root), "BLOCKED_SPACING")

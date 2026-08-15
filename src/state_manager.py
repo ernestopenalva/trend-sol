@@ -11,6 +11,7 @@ class StateManager:
         self.state_dir = project_root / "data" / "state"
         self.open_positions_file = self.state_dir / "open_positions.json"
         self.cycle_state_file = self.state_dir / "cycle_state.json"
+        self.admission_state_file = self.state_dir / "admission_state.json"
 
     def load_open_positions(self) -> List[Dict[str, Any]]:
         data = self._load_json(self.open_positions_file, [])
@@ -25,6 +26,13 @@ class StateManager:
 
     def save_cycle_state(self, state: Dict[str, Any]) -> None:
         self._atomic_json(self.cycle_state_file, state)
+
+    def load_admission_state(self) -> Dict[str, Any]:
+        data = self._load_json(self.admission_state_file, {})
+        return data if isinstance(data, dict) else {}
+
+    def save_admission_state(self, state: Dict[str, Any]) -> None:
+        self._atomic_json(self.admission_state_file, state)
 
     @staticmethod
     def _load_json(path: Path, default: Any) -> Any:

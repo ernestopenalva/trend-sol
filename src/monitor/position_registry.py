@@ -9,6 +9,7 @@ from src.exchange.binance_client import BinanceClient, BinanceClientError
 from src.logging_utils import JsonlLogger, now_iso
 from src.monitor.cycle_manager import CycleManager
 from src.monitor.entry_engine import EntrySignal
+from src.no_progress import resolved_no_progress_tolerance
 from src.position.bot_full_engine import BotFullExitPosition
 from src.position.phantom_execution import PhantomExecutionClient
 from src.position.position_base import PositionBase
@@ -44,13 +45,15 @@ class PositionRegistry:
         self._blocked_candles: set[int] = set()
         self._last_entry_candle_open_time: Optional[int] = None
         self._entries_by_candle: dict[int, int] = {}
+        self._entries_by_admission_bucket: dict[int, int] = {}
         self._last_admission_details: Dict[str, Any] = {}
         self._next_position_id = 1
         self._last_snapshot_hour: Optional[str] = None
         self.load_state()
+        self._load_admission_state()
         self.reconcile_with_binance()
 
-    def open_pair(self, signal: EntrySignal) -> None:
+    def open_pair(self, signal: EntrySignal, market_context: Optional[Dict[str, Any]] = None) -> None:
         blocked_reason = self._admission_block_reason(signal)
         if blocked_reason:
             self._log_blocked_signal(signal, blocked_reason)
@@ -67,6 +70,7 @@ class PositionRegistry:
         )
         pair_id = uuid.uuid4().hex[:12]
         opened: List[PositionBase] = []
+        no_progress = self._current_no_progress_tolerance()
 
         for label in self._position_labels():
             position_id = self._allocate_position_id()
@@ -112,7 +116,23 @@ class PositionRegistry:
                     position_id=position_id,
                     source_candle_open_time=signal.source_candle_open_time,
                     position_notional_usdt=quote_per_position,
+                    no_progress_enabled=bool(no_progress.get("enabled", False)),
+                    no_progress_tolerance_seconds=no_progress.get("seconds"),
+                    no_progress_tolerance_source=no_progress.get("source"),
                 )
+                position.market_context_entry = deepcopy(market_context)
+                if market_context:
+                    self._submit_telemetry(
+                        "market_context",
+                        {
+                            "ts": market_context.get("captured_at"),
+                            "strategy": "REAL_A",
+                            "historical_label": "B",
+                            "pair_id": pair_id,
+                            "phase": "ENTRY",
+                            "market_context": market_context,
+                        },
+                    )
                 self.logger.trade(
                     position._trade_event(
                         "OPEN",
@@ -132,6 +152,10 @@ class PositionRegistry:
         self._entries_by_candle[signal.source_candle_open_time] = (
             self._entries_by_candle.get(signal.source_candle_open_time, 0) + 1
         )
+        admission_bucket = self._admission_bucket(signal.source_candle_open_time)
+        self._entries_by_admission_bucket[admission_bucket] = (
+            self._entries_by_admission_bucket.get(admission_bucket, 0) + 1
+        )
         if len(opened) == 2:
             slippage_pp = abs(opened[0].entry_price - opened[1].entry_price) / opened[0].entry_price * 100
             self.logger.system(
@@ -144,6 +168,7 @@ class PositionRegistry:
         else:
             self.logger.system("bot_position_opened", pair_id=pair_id, entry=opened[0].entry_price)
         self.save_state()
+        self._save_admission_state()
 
     def on_tick(self, price: float, market_ts: Optional[str] = None) -> None:
         observed_at = market_ts or now_iso()
@@ -173,8 +198,28 @@ class PositionRegistry:
                 event = None
             if event:
                 if self._bot_exit_only and isinstance(position, BotFullExitPosition):
+                    position.market_context_exit = deepcopy(getattr(self, "_latest_market_context", None))
+                    if position.market_context_exit:
+                        self._submit_telemetry(
+                            "market_context",
+                            {
+                                "ts": position.close_ts,
+                                "strategy": "REAL_A",
+                                "historical_label": "B",
+                                "pair_id": position.pair_id,
+                                "phase": "EXIT",
+                                "market_context": position.market_context_exit,
+                            },
+                        )
                     if self.trade_ledger:
                         self.trade_ledger.append_closed_bot_trade(position, self.config)
+                    next_tolerance = self._current_no_progress_tolerance()
+                    self.logger.system(
+                        "no_progress_tolerance_recalculated",
+                        strategy="REAL_A",
+                        closed_pair_id=position.pair_id,
+                        **{key: value for key, value in next_tolerance.items() if key != "enabled"},
+                    )
                     self.cycle_manager.on_position_closed(position)
                     self.save_state()
                     continue
@@ -189,6 +234,25 @@ class PositionRegistry:
         self._process_phantoms(price, observed_at)
         self._record_hourly_snapshots(price, observed_at)
         self.save_state()
+
+    def record_market_context(self, snapshot: Optional[Dict[str, Any]]) -> None:
+        if not snapshot:
+            return
+        self._latest_market_context = deepcopy(snapshot)
+        for position in self.positions:
+            if not isinstance(position, BotFullExitPosition) or position.status != "OPEN":
+                continue
+            self._submit_telemetry(
+                "market_context",
+                {
+                    "ts": snapshot.get("captured_at"),
+                    "strategy": "REAL_A",
+                    "historical_label": position.label,
+                    "pair_id": position.pair_id,
+                    "phase": "DURING",
+                    "market_context": snapshot,
+                },
+            )
 
     def load_state(self) -> None:
         restored: List[PositionBase] = []
@@ -264,6 +328,38 @@ class PositionRegistry:
         real_state = [position.to_state() for position in self.positions]
         phantom_state = [position.to_state() for position in self.phantoms if position.status == "OPEN"]
         self.state_manager.save_open_positions([*real_state, *phantom_state])
+
+    def _load_admission_state(self) -> None:
+        state = self.state_manager.load_admission_state()
+        raw = state.get("real_a_entries_by_5m_bucket")
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                try:
+                    self._entries_by_admission_bucket[int(key)] = int(value)
+                except (TypeError, ValueError):
+                    continue
+        # Compatibility/bootstrap: restored positions still protect their own bucket.
+        for position in self.positions:
+            if position.source_candle_open_time is None:
+                continue
+            bucket = self._admission_bucket(position.source_candle_open_time)
+            self._entries_by_admission_bucket[bucket] = max(
+                1, self._entries_by_admission_bucket.get(bucket, 0)
+            )
+
+    def _save_admission_state(self) -> None:
+        if not self._entries_by_admission_bucket:
+            return
+        latest = max(self._entries_by_admission_bucket)
+        cutoff = latest - 24 * 60 * 60 * 1000
+        compact = {
+            str(key): value
+            for key, value in self._entries_by_admission_bucket.items()
+            if key >= cutoff
+        }
+        self.state_manager.save_admission_state(
+            {"real_a_entries_by_5m_bucket": compact, "updated_at": now_iso()}
+        )
 
     def reconcile_with_binance(self) -> None:
         try:
@@ -400,12 +496,18 @@ class PositionRegistry:
         self._last_admission_details = {}
         if self.open_pair_count >= self.max_open_positions:
             return "BLOCKED_MAX_POSITIONS"
-        max_entries = int(self.config.get("entry", {}).get("max_entries_per_candle", 1))
+        entry_cfg = self.config.get("entry", {})
+        max_entries = int(entry_cfg.get("max_entries_per_candle", 1))
         if max_entries <= 0:
             return "BLOCKED_CANDLE_LIMIT"
-        entries_this_candle = self._entries_by_candle.get(signal.source_candle_open_time, 0)
+        admission_bucket = self._admission_bucket(signal.source_candle_open_time)
+        entries_this_candle = self._entries_by_admission_bucket.get(admission_bucket, 0)
         if entries_this_candle >= max_entries:
-            return "BLOCKED_CANDLE_LIMIT"
+            self._last_admission_details = {
+                "admission_candle_interval": str(entry_cfg.get("admission_candle_interval", "5m")),
+                "admission_bucket_open_time": admission_bucket,
+            }
+            return "ENTRY_BLOCKED_SAME_5M_CANDLE"
         spacing_atr = float(self.config.get("entry", {}).get("entry_spacing_atr", 0))
         if spacing_atr <= 0:
             return None
@@ -428,6 +530,30 @@ class PositionRegistry:
                 }
                 return "BLOCKED_SPACING"
         return None
+
+    def _admission_bucket(self, timestamp_ms: int) -> int:
+        interval = str(self.config.get("entry", {}).get("admission_candle_interval", "5m"))
+        interval_ms = {"1m": 60_000, "5m": 300_000, "15m": 900_000}.get(interval)
+        if interval_ms is None:
+            raise ValueError(f"Unsupported admission candle interval: {interval}")
+        value = int(timestamp_ms)
+        return value - (value % interval_ms)
+
+    def _current_no_progress_tolerance(self) -> Dict[str, Any]:
+        settings = self.config.get("risk", {}).get("no_progress", {})
+        if not isinstance(settings, dict) or not bool(settings.get("enabled", False)):
+            return {"enabled": False, "seconds": None, "source": "DISABLED"}
+        records = []
+        if self.trade_ledger:
+            records = [
+                item
+                for item in self.trade_ledger.load()
+                if not bool(item.get("phantom", False))
+                and str(item.get("position_type")) == "BOT_EXIT"
+            ]
+        resolved = resolved_no_progress_tolerance(records, settings)
+        resolved["enabled"] = True
+        return resolved
 
     def _log_blocked_signal(self, signal: EntrySignal, reason: str) -> None:
         if signal.source_candle_open_time in self._blocked_candles:

@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 *.txt
+!runtime_change_history.txt
 !requirements.txt
 *.log
 *.zip

@@ -21,6 +21,8 @@ from src.exchange.binance_market_data import BinanceMarketDataClient
 from src.logging_utils import JsonlLogger
 from src.monitor.cycle_manager import CycleManager
 from src.monitor.entry_engine import EntryEngine
+from src.monitor.gcr_shadow import GcrShadowRegistry
+from src.monitor.market_context import MarketContextEngine
 from src.monitor.human_console_reporter import HumanConsoleReporter
 from src.monitor.multi_market_shadow import MultiMarketShadow
 from src.monitor.position_registry import PositionRegistry
@@ -77,6 +79,31 @@ class Monitor:
             self.telemetry_writer,
         )
         self.entry_engine = EntryEngine(str(self.config["symbol"]), self.config, self.logger)
+        self.gcr_shadow = GcrShadowRegistry(
+            self.project_root, self.config, self.logger, self.telemetry_writer
+        )
+        self.market_context = MarketContextEngine(self.entry_engine, self.config)
+        no_progress = self.config.get("risk", {}).get("no_progress", {})
+        context_settings = self.config.get("instrumentation", {}).get("market_context", {})
+        self.logger.system(
+            "coordinated_package_resolved",
+            real_logic="REAL_A",
+            historical_runtime_label="B",
+            ge_label="GE15",
+            max_entries_per_5m_candle=self.config.get("entry", {}).get("max_entries_per_candle"),
+            admission_candle_interval=self.config.get("entry", {}).get("admission_candle_interval"),
+            hard_stop_pct=self.config.get("risk", {}).get("hard_stop", {}).get("stop_pct"),
+            no_progress_default_hours=no_progress.get("default_hours"),
+            no_progress_rolling_window=no_progress.get("rolling_window"),
+            no_progress_min_be_samples=no_progress.get("min_be_samples"),
+            no_progress_statistic=no_progress.get("statistic"),
+            no_progress_tolerance_buffer_pct=no_progress.get("tolerance_buffer_pct"),
+            gcr_shadow="GCR_SHADOW_B",
+            gcr_previous_must_arm_be=True,
+            market_context_telemetry_only=True,
+            market_context_timeframes=context_settings.get("timeframes"),
+            market_context_indicators=["EMA20", "EMA50", "EMA20_SLOPE", "EMA50_SLOPE", "ADX14", "+DI14", "-DI14", "RSI14", "RVOL", "GE15"],
+        )
         self.market_shadow = MultiMarketShadow(
             self.project_root,
             self.config,
@@ -113,6 +140,9 @@ class Monitor:
             self.logger.system("validating_startup")
             self._validate_startup()
             self._load_historical_candles()
+            initial_context = self._safe_refresh_market_context()
+            self.registry.record_market_context(initial_context)
+            self.gcr_shadow.record_market_context(initial_context)
             self.market_shadow.start()
             self.market_shadow_ge30.start()
             market_cfg = self.config["market_data"]
@@ -192,6 +222,10 @@ class Monitor:
             self.last_price = price
             self.last_tick_monotonic = time.monotonic()
             self.registry.on_tick(price, market_ts=_market_timestamp(payload))
+            try:
+                self.gcr_shadow.on_tick(price, _market_timestamp(payload))
+            except Exception as exc:
+                self.logger.system("gcr_shadow_tick_failed", price=price, error=str(exc))
             self._stop_after_cycle_if_needed()
             return
 
@@ -199,11 +233,32 @@ class Monitor:
             if self._entry_should_pause(stream, payload):
                 return
             signal = self.entry_engine.on_kline(stream, payload)
+            kline = payload.get("k") if isinstance(payload.get("k"), dict) else {}
+            timeframe = stream.rsplit("@kline_", 1)[-1]
+            if bool(kline.get("x")) and timeframe in ("5m", "15m"):
+                snapshot = self._safe_refresh_market_context()
+                if timeframe == "5m":
+                    self.registry.record_market_context(snapshot)
+                    self.gcr_shadow.record_market_context(snapshot)
             if signal is not None:
                 try:
-                    self.registry.open_pair(signal)
+                    snapshot = self.market_context.latest or self._safe_refresh_market_context()
+                    try:
+                        self.gcr_shadow.on_signal(signal, snapshot)
+                    except Exception as exc:
+                        self.logger.system(
+                            "gcr_shadow_signal_failed", signal_price=signal.price, error=str(exc)
+                        )
+                    self.registry.open_pair(signal, snapshot)
                 except BinanceClientError as exc:
                     self.logger.system("order_rejected", error=str(exc), signal_price=signal.price)
+
+    def _safe_refresh_market_context(self) -> Dict[str, Any] | None:
+        try:
+            return self.market_context.refresh()
+        except Exception as exc:
+            self.logger.system("market_context_refresh_failed", error=str(exc))
+            return self.market_context.latest
 
     def _market_streams(self) -> list[str]:
         market_cfg = self.config["market_data"]

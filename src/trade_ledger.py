@@ -25,6 +25,13 @@ class TradeLedger:
     ) -> bool:
         return self._append_closed(position, config, "MARKET_SHADOW")
 
+    def append_closed_gcr_shadow_trade(
+        self,
+        position: BotFullExitPosition,
+        config: Dict[str, Any],
+    ) -> bool:
+        return self._append_closed(position, config, "GCR_SHADOW")
+
     def _append_closed(
         self,
         position: BotFullExitPosition,
@@ -156,6 +163,15 @@ class TradeLedger:
             "be_activation_buffer_atr": _float_or_none(getattr(position, "be_activation_buffer_atr", None)),
             "be_floor_source": getattr(position, "be_floor_source", None),
             "be_floor_absorbed_atr_stop": getattr(position, "be_floor_absorbed_atr_stop", None),
+            "be_armed_at": getattr(position, "be_armed_at", None),
+            "time_to_be_seconds": _float_or_none(getattr(position, "time_to_be_seconds", None)),
+            "no_progress_enabled": bool(getattr(position, "no_progress_enabled", False)),
+            "no_progress_tolerance_seconds": _float_or_none(
+                getattr(position, "no_progress_tolerance_seconds", None)
+            ),
+            "no_progress_tolerance_source": getattr(position, "no_progress_tolerance_source", None),
+            "market_context_entry": getattr(position, "market_context_entry", None),
+            "market_context_exit": getattr(position, "market_context_exit", None),
             "pl_shadow_enabled": getattr(position, "pl_shadow_enabled", False),
             "pl_shadow_status": getattr(position, "pl_shadow_status", None),
             "pl_shadow_step": getattr(position, "pl_shadow_step", None),

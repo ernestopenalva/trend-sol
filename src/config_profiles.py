@@ -31,6 +31,9 @@ def effective_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         for variant in observations.get("variants", []):
             if isinstance(variant, dict) and variant.get("interval"):
                 timeframes.append(str(variant["interval"]))
+    market_context = config.get("instrumentation", {}).get("market_context", {})
+    if isinstance(market_context, dict) and bool(market_context.get("enabled", False)):
+        timeframes.extend(str(value) for value in market_context.get("timeframes", ("5m", "15m")))
     config.setdefault("market_data", {})
     config["market_data"]["kline_streams"] = [
         f"{symbol}@kline_{timeframe}"
@@ -41,7 +44,48 @@ def effective_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
     _validate_profit_lock_economic_floor(config)
     _validate_phantoms(config)
     _validate_multi_market_shadow(config)
+    _validate_no_progress(config)
+    _validate_market_context(config)
     return config
+
+
+def _validate_no_progress(config: Dict[str, Any]) -> None:
+    settings = config.get("risk", {}).get("no_progress", {})
+    if not isinstance(settings, dict) or not bool(settings.get("enabled", False)):
+        return
+    if str(settings.get("statistic", "median")) != "median":
+        raise ValueError("risk.no_progress.statistic must be median")
+    for field in ("default_hours", "rolling_window", "min_be_samples"):
+        try:
+            value = float(settings.get(field))
+        except (TypeError, ValueError):
+            raise ValueError(f"risk.no_progress.{field} must be greater than 0") from None
+        if value <= 0:
+            raise ValueError(f"risk.no_progress.{field} must be greater than 0")
+    if int(settings["min_be_samples"]) > int(settings["rolling_window"]):
+        raise ValueError("risk.no_progress.min_be_samples cannot exceed rolling_window")
+    try:
+        buffer_pct = float(settings.get("tolerance_buffer_pct"))
+    except (TypeError, ValueError):
+        raise ValueError("risk.no_progress.tolerance_buffer_pct must be non-negative") from None
+    if buffer_pct < 0:
+        raise ValueError("risk.no_progress.tolerance_buffer_pct must be non-negative")
+
+
+def _validate_market_context(config: Dict[str, Any]) -> None:
+    settings = config.get("instrumentation", {}).get("market_context", {})
+    if not isinstance(settings, dict) or not bool(settings.get("enabled", False)):
+        return
+    timeframes = [str(value) for value in settings.get("timeframes", [])]
+    if timeframes != ["5m", "15m"]:
+        raise ValueError("instrumentation.market_context.timeframes must be exactly [5m, 15m]")
+    for field in (
+        "ema_fast_period", "ema_slow_period", "slope_lookback_candles",
+        "adx_period", "rsi_period", "relative_volume_period",
+    ):
+        value = settings.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"instrumentation.market_context.{field} must be a positive integer")
 
 
 def _validate_trend_observations(config: Dict[str, Any]) -> None:

@@ -28,6 +28,9 @@ class BotFullExitPosition(PositionBase):
         position_id: Optional[int] = None,
         source_candle_open_time: Optional[int] = None,
         position_notional_usdt: Optional[float] = None,
+        no_progress_enabled: bool = False,
+        no_progress_tolerance_seconds: Optional[float] = None,
+        no_progress_tolerance_source: Optional[str] = None,
     ) -> None:
         super().__init__(
             pair_id=pair_id,
@@ -151,6 +154,14 @@ class BotFullExitPosition(PositionBase):
         self.last_trough_event: Optional[Dict[str, Any]] = None
         self.phantom = False
         self.phantom_id: Optional[str] = None
+        self.no_progress_enabled = bool(no_progress_enabled)
+        self.no_progress_tolerance_seconds = _optional_float(no_progress_tolerance_seconds)
+        self.no_progress_tolerance_source = no_progress_tolerance_source
+        self.be_armed_at: Optional[str] = None
+        self.time_to_be_seconds: Optional[float] = None
+        self.market_context_entry: Optional[Dict[str, Any]] = None
+        self.market_context_exit: Optional[Dict[str, Any]] = None
+        self.shadow_kind: Optional[str] = None
 
     @classmethod
     def from_state(
@@ -277,6 +288,17 @@ class BotFullExitPosition(PositionBase):
         )
         position.phantom = bool(state.get("phantom", False))
         position.phantom_id = str(state["phantom_id"]) if state.get("phantom_id") else None
+        # Missing key means that the position predates this rule and is grandfathered.
+        position.no_progress_enabled = bool(state.get("no_progress_enabled", False))
+        position.no_progress_tolerance_seconds = _optional_float(
+            state.get("no_progress_tolerance_seconds")
+        )
+        position.no_progress_tolerance_source = state.get("no_progress_tolerance_source")
+        position.be_armed_at = state.get("be_armed_at")
+        position.time_to_be_seconds = _optional_float(state.get("time_to_be_seconds"))
+        position.market_context_entry = state.get("market_context_entry")
+        position.market_context_exit = state.get("market_context_exit")
+        position.shadow_kind = state.get("shadow_kind")
         position._refresh_effective_stop()
         return position
 
@@ -303,7 +325,8 @@ class BotFullExitPosition(PositionBase):
 
         pnl_pct = self.pnl_pct(price)
         pnl_atr = self.pnl_atr(price)
-        self._apply_breakeven(pnl_pct, pnl_atr, price)
+        observed_at = market_ts or ts
+        self._apply_breakeven(pnl_pct, pnl_atr, price, observed_at)
         self._observe_profit_lock_shadow(price, pnl_pct, pnl_atr, market_ts or ts)
         for plan in self._profit_lock_candidates(pnl_pct, pnl_atr):
             index = int(plan["index"])
@@ -365,6 +388,13 @@ class BotFullExitPosition(PositionBase):
             )
 
         if reason is None:
+            if self._no_progress_due(observed_at):
+                return self._close_at_market(
+                    price,
+                    "NO_PROGRESS_EXIT",
+                    ts,
+                    trigger_reference=price,
+                )
             return None
 
         return self._close_at_market(
@@ -443,6 +473,12 @@ class BotFullExitPosition(PositionBase):
             "net_pnl_pct": pnl_pct - estimated_fees_pct,
             "pnl_atr": self.pnl_atr(price),
             "entry_atr": self.entry_atr,
+            "be_armed_at": self.be_armed_at,
+            "time_to_be_seconds": self.time_to_be_seconds,
+            "no_progress_enabled": self.no_progress_enabled,
+            "no_progress_tolerance_seconds": self.no_progress_tolerance_seconds,
+            "no_progress_tolerance_source": self.no_progress_tolerance_source,
+            "shadow_kind": self.shadow_kind,
             "breakeven_mode": self.breakeven_mode,
             "hard_stop_enabled": self.hard_stop_enabled,
             "hard_stop_pct": self.hard_stop_pct,
@@ -727,7 +763,13 @@ class BotFullExitPosition(PositionBase):
             1 + ((2 * taker_fee_pct + self.pl_shadow_net_margin_pct) / 100)
         )
 
-    def _apply_breakeven(self, pnl_pct: float, pnl_atr: Optional[float], price: float) -> None:
+    def _apply_breakeven(
+        self,
+        pnl_pct: float,
+        pnl_atr: Optional[float],
+        price: float,
+        observed_at: str,
+    ) -> None:
         plan = self._breakeven_plan()
         if plan is None:
             return
@@ -737,6 +779,12 @@ class BotFullExitPosition(PositionBase):
             return
         if self.breakeven_stop is None or new_stop > self.breakeven_stop:
             self.breakeven_stop = new_stop
+            if self.be_armed_at is None:
+                self.be_armed_at = observed_at
+                opened = _parse_ts(self.open_ts)
+                armed = _parse_ts(observed_at)
+                if opened is not None and armed is not None:
+                    self.time_to_be_seconds = max(0.0, (armed - opened).total_seconds())
             self.applied_steps.add(f"breakeven:{self.breakeven_mode}")
             self._refresh_effective_stop()
             self.logger.trade(
@@ -747,6 +795,17 @@ class BotFullExitPosition(PositionBase):
                     exit_reason=None,
                 )
             )
+
+    def _no_progress_due(self, observed_at: str) -> bool:
+        if not self.no_progress_enabled or self.be_armed_at is not None or self.breakeven_stop is not None:
+            return False
+        if self.no_progress_tolerance_seconds is None or self.no_progress_tolerance_seconds <= 0:
+            return False
+        opened = _parse_ts(self.open_ts)
+        observed = _parse_ts(observed_at)
+        if opened is None or observed is None:
+            return False
+        return (observed - opened).total_seconds() >= self.no_progress_tolerance_seconds
 
     def _should_activate_trailing(self, pnl_pct: float, pnl_atr: Optional[float]) -> bool:
         if self.trailing_mode == "atr":
@@ -928,6 +987,14 @@ class BotFullExitPosition(PositionBase):
                 "trough_tracking_started_at": self.trough_tracking_started_at,
                 "phantom": self.phantom,
                 "phantom_id": self.phantom_id,
+                "be_armed_at": self.be_armed_at,
+                "time_to_be_seconds": self.time_to_be_seconds,
+                "no_progress_enabled": self.no_progress_enabled,
+                "no_progress_tolerance_seconds": self.no_progress_tolerance_seconds,
+                "no_progress_tolerance_source": self.no_progress_tolerance_source,
+                "market_context_entry": self.market_context_entry,
+                "market_context_exit": self.market_context_exit,
+                "shadow_kind": self.shadow_kind,
             }
         )
         return state

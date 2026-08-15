@@ -90,6 +90,9 @@ class EntryEngine:
             for variant in observations.get("variants", []):
                 if isinstance(variant, dict) and variant.get("interval"):
                     timeframes.append(str(variant["interval"]))
+        market_context = self.config.get("instrumentation", {}).get("market_context", {})
+        if isinstance(market_context, dict) and bool(market_context.get("enabled", False)):
+            timeframes.extend(str(value) for value in market_context.get("timeframes", ("5m", "15m")))
         return list(dict.fromkeys(timeframes))
 
     def load_history(self, timeframe: str, klines: List[List[Any]], now_ms: int) -> None:

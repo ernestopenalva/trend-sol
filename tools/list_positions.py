@@ -137,6 +137,10 @@ def _normalize_position(item: Dict[str, Any], current_price: Optional[float], co
         "raw": item,
         "ladder": _ladder_state(item, current_price, config),
         "binance_trail_pct": _binance_trail_pct(item, config),
+        "be_armed_at": item.get("be_armed_at"),
+        "no_progress_enabled": bool(item.get("no_progress_enabled", False)),
+        "no_progress_tolerance_seconds": _optional_float(item.get("no_progress_tolerance_seconds")),
+        "no_progress_tolerance_source": item.get("no_progress_tolerance_source"),
     }
 
 
@@ -236,6 +240,16 @@ def _print_position_b(
                     f"{_fmt_price(trail.get('activation_price'))} "
                     f"{_fmt_pct_atr(trail.get('activation_pct'), trail.get('activation_atr'))}"
                 )
+        if position.get("be_armed_at"):
+            print(f"  progress: BE armed at {_short_time(_parse_dt(position.get('be_armed_at'))) or 'n/a'}; time abandonment disabled")
+        elif position.get("no_progress_enabled"):
+            tolerance = position.get("no_progress_tolerance_seconds")
+            print(
+                f"  progress: awaiting BE | abandonment at {_fmt_duration_seconds(tolerance)} "
+                f"({position.get('no_progress_tolerance_source') or 'n/a'}, frozen at entry)"
+            )
+        else:
+            print("  progress: no-progress rule exempt/disabled")
         return
 
     print(f"  entry:    {_fmt_price(position.get('entry'))}")
@@ -429,6 +443,15 @@ def _effective_stop_text(position: Dict[str, Any]) -> str:
         pct = _optional_float(position.get("hard_stop_pct"))
         return f"hard stop {price} (-{_fmt_plain_pct(pct)})"
     return f"stop {price}"
+
+
+def _fmt_duration_seconds(value: Any) -> str:
+    seconds = _optional_float(value)
+    if seconds is None:
+        return "n/a"
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    return f"{hours}h{minutes:02d}m"
 
 
 def _trough_tracking_note(position: Dict[str, Any]) -> str:

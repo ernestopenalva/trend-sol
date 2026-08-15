@@ -77,6 +77,7 @@ entry:
     rsi_margin: 3
     reversal_min_position: 0.58
   max_entries_per_candle: 1
+  admission_candle_interval: "5m"
   entry_spacing_atr: 1.0
 
 profiles:
@@ -131,6 +132,15 @@ risk:
   hard_stop:
     enabled: true
     stop_pct: 1.5
+  no_progress:
+    enabled: true
+    default_hours: 2
+    rolling_window: 20
+    min_be_samples: 4
+    tolerance_buffer_pct: 25
+    statistic: median
+    freeze_at_entry: true
+    grandfather_restored_positions: true
   review_stop_pct: 30
   breakeven:
     mode: atr
@@ -177,6 +187,21 @@ logging:
 instrumentation:
   enabled: true
   queue_max_size: 10000
+  gcr_shadow:
+    enabled: true
+    max_open_positions: 5
+    state_file: "data/state/gcr_shadow.json"
+    ledger_file: "data/trades/trades_gcr_shadow.jsonl"
+  market_context:
+    enabled: true
+    timeframes: ["5m", "15m"]
+    ema_fast_period: 20
+    ema_slow_period: 50
+    slope_lookback_candles: 3
+    adx_period: 14
+    rsi_period: 14
+    relative_volume_period: 20
+    relative_volume_baseline: "mean_previous_closed_candles"
   cohort_guard_study:
     episode_gap_hours: 6
     rules:
@@ -383,6 +408,8 @@ instrumentation:
   position_snapshots_file: "data/telemetry/position_snapshots.jsonl"
   rejected_signals_file: "data/telemetry/rejected_signals.jsonl"
   market_shadow_events_file: "data/telemetry/market_shadow_events.jsonl"
+  gcr_shadow_events_file: "data/telemetry/gcr_shadow_events.jsonl"
+  market_context_events_file: "data/telemetry/market_context_events.jsonl"
 
 console:
   mode: human

@@ -16,8 +16,8 @@ O monitor usa dados reais da Binance via WebSocket e executa ordens na Spot Test
 
 ## Risco e PL shadow
 
-O hard stop percentual e configurado em `risk.hard_stop`. O experimento
-`b_atr_v1.3` usa `2%` e mantem o desconto de BNB desativado.
+O hard stop percentual e configurado em `risk.hard_stop`; o perfil atual usa
+`1,5%` e mantem o desconto de BNB desativado.
 
 `risk.profit_lock.net_floor_shadow` calcula, para todos os degraus PL, um piso que
 cobre as duas taxas taker mais a margem liquida configurada. A ativacao tambem exige
@@ -189,3 +189,30 @@ python tools/shadow_market_report.py --limit 50
 O estado fica em `data/state/multi_market_shadow.json`, os fechamentos em
 `data/trades/trades_shadow_top3.jsonl` e a auditoria completa em
 `data/telemetry/market_shadow_events.jsonl`.
+
+## REAL_A, abandono e GCR_SHADOW_B
+
+Nos relatorios novos, `REAL_A` e apenas um alias conceitual para o runtime real
+historicamente gravado como Bot `B`; o ledger antigo nao foi renomeado. Novas
+entradas reais sao limitadas a uma por candle de 5m. A tolerancia de
+`NO_PROGRESS_EXIT` e congelada na entrada: usa 2h enquanto houver menos de quatro
+`time_to_BE` validos nos ultimos 20 fechamentos e, depois, mediana vezes 1,25.
+Posicoes restauradas sem os novos campos ficam isentas.
+
+`GCR_SHADOW_B` tem estado, slots e ledger sinteticos proprios. Sua unica diferenca
+conceitual de `REAL_A` e bloquear uma entrada enquanto sua posicao anterior ainda
+nao armou BE. Ele nunca envia ordens nem reserva saldo.
+
+O market context e somente telemetria. Em 5m e 15m registra, sempre com candles
+fechados, EMA20/50, slopes percentuais, ADX14, +DI14, -DI14, RSI14 e RVOL contra a
+media dos 20 candles fechados anteriores, alem do GE15 estrutural.
+
+```bash
+python tools/trades_report.py --since "15/08 21:30" --since-field opened_at --detail
+python tools/market_context_report.py --strategy A --since "15/08 21:30" --profile intraday
+python tools/market_context_report.py --strategy B --since "15/08 21:30" --profile intraday
+python tools/logic_comparison_report.py --since "15/08 21:30" --profile intraday
+python tools/logic_comparison_report.py --strategy B --since "15/08 21:30" --profile intraday
+python tools/indicator_ranking.py --strategy A
+python tools/indicator_ranking.py --strategy B
+```
