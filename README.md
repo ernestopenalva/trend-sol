@@ -216,3 +216,19 @@ python tools/logic_comparison_report.py --strategy B --since "15/08 21:30" --pro
 python tools/indicator_ranking.py --strategy A
 python tools/indicator_ranking.py --strategy B
 ```
+
+Para auditar apenas a precisao mecanica do GE15 nas entradas reais, incluindo os
+dois candles efetivamente usados, reproducao de maxima/minima e frescor do candle
+5m em fronteiras de fechamento:
+
+```bash
+python tools/ge_entry_audit.py \
+  --since "15/08 18:58" \
+  --until "16/08 06:30" \
+  --profile intraday \
+  --detail
+```
+
+A ferramenta e estritamente read-only e nao consulta a Binance. Ela separa
+inconsistencia aritmetica de uso de candle 5m atrasado por ordem de chegada dos
+streams.
