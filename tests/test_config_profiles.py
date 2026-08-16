@@ -16,6 +16,8 @@ class ConfigProfileTests(unittest.TestCase):
 
         self.assertEqual(effective["trend_gate"]["candle_interval"], "5m")
         self.assertEqual(effective["trend_gate"]["lookback_candles"], 3)
+        self.assertTrue(effective["trend_gate"]["sync"]["enabled"])
+        self.assertEqual(effective["trend_gate"]["sync"]["timeout_seconds"], 15)
         self.assertEqual(effective["risk"]["hard_stop"]["stop_pct"], 1.5)
         self.assertEqual(effective["entry"]["timeframe"], "1m")
         self.assertEqual(effective["entry"]["atr_period"], 14)
@@ -94,6 +96,28 @@ class ConfigProfileTests(unittest.TestCase):
         config["risk"] = {"hard_stop": {"enabled": True, "stop_pct": 0}}
 
         with self.assertRaisesRegex(ValueError, "hard_stop.stop_pct"):
+            effective_config(config)
+
+    def test_ge_sync_requires_positive_timeout_and_skip_action(self) -> None:
+        config = self.base_config()
+        config["active_profile"] = "intraday"
+        config["trend_gate"] = {
+            "mode": "ge30",
+            "candle_interval": "5m",
+            "lookback_candles": 3,
+            "sync": {
+                "enabled": True,
+                "timeout_seconds": 0,
+                "expire_on_next_entry_candle": True,
+                "timeout_action": "SKIP",
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "sync.timeout_seconds"):
+            effective_config(config)
+
+        config["trend_gate"]["sync"]["timeout_seconds"] = 15
+        config["trend_gate"]["sync"]["timeout_action"] = "USE_STALE"
+        with self.assertRaisesRegex(ValueError, "sync.timeout_action"):
             effective_config(config)
 
     def test_enabled_phantoms_require_explicit_positive_limits(self) -> None:

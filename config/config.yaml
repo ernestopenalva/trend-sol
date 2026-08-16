@@ -46,6 +46,11 @@ trend_gate:
   mode: ge30
   candle_interval: "5m"
   lookback_candles: 3
+  sync:
+    enabled: true
+    timeout_seconds: 15
+    expire_on_next_entry_candle: true
+    timeout_action: SKIP
 
 ema_observations:
   enabled: true

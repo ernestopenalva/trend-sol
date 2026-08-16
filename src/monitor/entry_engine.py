@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from src.indicators.indicators import atr, ema, rsi, volume_ma
 from src.logging_utils import JsonlLogger, now_iso
@@ -58,6 +59,13 @@ class EntrySignal:
     atr_period: int
 
 
+@dataclass(frozen=True)
+class PendingGeEvaluation:
+    source_candle_open_time: int
+    expected_ge_close_time: int
+    started_monotonic: float
+
+
 class EntryEngine:
     def __init__(
         self,
@@ -65,6 +73,7 @@ class EntryEngine:
         config: Dict[str, Any],
         logger: JsonlLogger,
         gate1_mode: Optional[str] = None,
+        monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.symbol = symbol
         self.config = config
@@ -78,6 +87,17 @@ class EntryEngine:
         self.entry_candles: List[Candle] = []
         self.auxiliary_candles: Dict[str, List[Candle]] = {}
         self.last_evaluated_entry_open_time: Optional[int] = None
+        self._monotonic_clock = monotonic_clock
+        self.pending_ge_evaluation: Optional[PendingGeEvaluation] = None
+        self.ge_sync_counters: Dict[str, int] = {
+            "fresh": 0,
+            "waiting": 0,
+            "released": 0,
+            "timeout": 0,
+            "expired_next_entry_candle": 0,
+            "future_candle": 0,
+            "duplicate_ignored": 0,
+        }
         self.last_diagnostic: Dict[str, Any] = self._empty_diagnostic()
 
     def required_timeframes(self) -> List[str]:
@@ -119,12 +139,176 @@ class EntryEngine:
         if timeframe not in self.required_timeframes():
             return None
         self._upsert(self._candles_for(timeframe), candle)
-        if timeframe != self.entry_timeframe:
-            return None
+        if not self._ge_sync_enabled():
+            if timeframe != self.entry_timeframe:
+                return None
+            if self.last_evaluated_entry_open_time == candle.open_time:
+                return None
+            self.last_evaluated_entry_open_time = candle.open_time
+            return self.evaluate()
+        if timeframe == self.entry_timeframe:
+            return self._on_entry_candle_for_ge_sync(candle)
+        if timeframe == self._ge_interval():
+            return self._release_pending_ge(candle)
+        return None
+
+    def _on_entry_candle_for_ge_sync(self, candle: Candle) -> Optional[EntrySignal]:
         if self.last_evaluated_entry_open_time == candle.open_time:
+            self.ge_sync_counters["duplicate_ignored"] += 1
             return None
-        self.last_evaluated_entry_open_time = candle.open_time
+        pending = self.pending_ge_evaluation
+        if pending is not None:
+            if pending.source_candle_open_time == candle.open_time:
+                self.ge_sync_counters["duplicate_ignored"] += 1
+                return None
+            self._discard_pending_ge("next_entry_candle")
+
+        interval_ms = _interval_minutes(self._ge_interval()) * 60_000
+        expected_close = ((candle.close_time + 1) // interval_ms) * interval_ms - 1
+        ge_candles = self._candles_for(self._ge_interval())
+        actual_close = ge_candles[-1].close_time if ge_candles else None
+        if actual_close == expected_close:
+            self.last_evaluated_entry_open_time = candle.open_time
+            self.ge_sync_counters["fresh"] += 1
+            self._log_ge_sync(
+                "GE_CANDLE_FRESH",
+                "ge_candle_fresh",
+                source_candle_open_time=candle.open_time,
+                expected_ge_close_time=expected_close,
+                actual_ge_close_time=actual_close,
+                waited_seconds=0.0,
+            )
+            return self.evaluate()
+        if actual_close is not None and actual_close > expected_close:
+            self.last_evaluated_entry_open_time = candle.open_time
+            self.ge_sync_counters["future_candle"] += 1
+            self._log_ge_sync(
+                "GE_CANDLE_FUTURE",
+                "ge_candle_future",
+                source_candle_open_time=candle.open_time,
+                expected_ge_close_time=expected_close,
+                actual_ge_close_time=actual_close,
+            )
+            return None
+
+        self.pending_ge_evaluation = PendingGeEvaluation(
+            source_candle_open_time=candle.open_time,
+            expected_ge_close_time=expected_close,
+            started_monotonic=self._monotonic_clock(),
+        )
+        self.ge_sync_counters["waiting"] += 1
+        self._log_ge_sync(
+            "GE_CANDLE_WAITING",
+            "ge_candle_waiting",
+            source_candle_open_time=candle.open_time,
+            expected_ge_close_time=expected_close,
+            actual_ge_close_time=actual_close,
+            timeout_seconds=self._ge_sync_timeout_seconds(),
+        )
+        return None
+
+    def _release_pending_ge(self, candle: Candle) -> Optional[EntrySignal]:
+        pending = self.pending_ge_evaluation
+        if pending is None:
+            return None
+        if candle.close_time < pending.expected_ge_close_time:
+            return None
+        elapsed = max(0.0, self._monotonic_clock() - pending.started_monotonic)
+        if elapsed > self._ge_sync_timeout_seconds():
+            self._discard_pending_ge("timeout", waited_seconds=elapsed)
+            return None
+        if candle.close_time > pending.expected_ge_close_time:
+            self._discard_pending_ge(
+                "future_candle",
+                waited_seconds=elapsed,
+                actual_ge_close_time=candle.close_time,
+            )
+            return None
+        if not self.entry_candles or self.entry_candles[-1].open_time != pending.source_candle_open_time:
+            self._discard_pending_ge("next_entry_candle", waited_seconds=elapsed)
+            return None
+
+        self.pending_ge_evaluation = None
+        self.last_evaluated_entry_open_time = pending.source_candle_open_time
+        self.ge_sync_counters["released"] += 1
+        self._log_ge_sync(
+            "GE_CANDLE_READY",
+            "ge_candle_ready",
+            source_candle_open_time=pending.source_candle_open_time,
+            expected_ge_close_time=pending.expected_ge_close_time,
+            actual_ge_close_time=candle.close_time,
+            waited_seconds=elapsed,
+        )
         return self.evaluate()
+
+    def _discard_pending_ge(
+        self,
+        cause: str,
+        *,
+        waited_seconds: Optional[float] = None,
+        actual_ge_close_time: Optional[int] = None,
+    ) -> None:
+        pending = self.pending_ge_evaluation
+        if pending is None:
+            return
+        elapsed = (
+            max(0.0, self._monotonic_clock() - pending.started_monotonic)
+            if waited_seconds is None
+            else waited_seconds
+        )
+        if cause == "next_entry_candle" and elapsed > self._ge_sync_timeout_seconds():
+            cause = "timeout"
+        event, reason, counter = {
+            "timeout": ("GE_CANDLE_TIMEOUT", "ge_candle_timeout", "timeout"),
+            "next_entry_candle": (
+                "GE_CANDLE_EXPIRED_NEXT_1M",
+                "ge_candle_expired_next_1m",
+                "expired_next_entry_candle",
+            ),
+            "future_candle": ("GE_CANDLE_FUTURE", "ge_candle_future", "future_candle"),
+        }[cause]
+        self.pending_ge_evaluation = None
+        self.last_evaluated_entry_open_time = pending.source_candle_open_time
+        self.ge_sync_counters[counter] += 1
+        self._log_ge_sync(
+            event,
+            reason,
+            source_candle_open_time=pending.source_candle_open_time,
+            expected_ge_close_time=pending.expected_ge_close_time,
+            actual_ge_close_time=actual_ge_close_time,
+            waited_seconds=elapsed,
+            timeout_seconds=self._ge_sync_timeout_seconds(),
+            action="SKIP",
+        )
+
+    def _log_ge_sync(self, event: str, reason: str, **fields: Any) -> None:
+        self.logger.decision(
+            {
+                "ts": now_iso(),
+                "event": event,
+                "gate": 1,
+                "passed": None,
+                "near_miss": False,
+                "reason": reason,
+                "ge_sync_counters": dict(self.ge_sync_counters),
+                **fields,
+            }
+        )
+
+    def _ge_sync_enabled(self) -> bool:
+        settings = self.config.get("trend_gate", {}).get("sync", {})
+        return (
+            self.gate1_mode == "ge30"
+            and self._ge_interval() != self.entry_timeframe
+            and isinstance(settings, dict)
+            and bool(settings.get("enabled", False))
+        )
+
+    def _ge_interval(self) -> str:
+        return str(self.config.get("trend_gate", {}).get("candle_interval", ""))
+
+    def _ge_sync_timeout_seconds(self) -> float:
+        return float(self.config.get("trend_gate", {}).get("sync", {}).get("timeout_seconds", 15))
 
     def evaluate(self) -> Optional[EntrySignal]:
         self.last_diagnostic = self._empty_diagnostic()

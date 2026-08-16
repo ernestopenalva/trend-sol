@@ -8,6 +8,7 @@ from tools.ge_entry_audit import (
     classify_freshness,
     expected_latest_5m_close,
     select_real_trades,
+    select_sync_events,
 )
 
 
@@ -79,6 +80,22 @@ class GeEntryAuditTests(unittest.TestCase):
             {"position_type": "BOT_EXIT", "phantom": False, "profile": "production", "opened_at": "2026-08-15T00:00:00+00:00"},
         ]
         self.assertEqual(len(select_real_trades(records, args)), 1)
+
+    def test_sync_event_selection_uses_report_time_window(self) -> None:
+        args = argparse.Namespace(
+            since="15/08 18:58",
+            until="15/08 19:10",
+            since_field="opened_at",
+            profile="intraday",
+        )
+        decisions = [
+            {"ts": "2026-08-15T21:57:59+00:00", "event": "GE_CANDLE_FRESH"},
+            {"ts": "2026-08-15T22:00:00+00:00", "event": "GE_CANDLE_WAITING"},
+            {"ts": "2026-08-15T22:00:03+00:00", "event": "GE_CANDLE_READY"},
+            {"ts": "2026-08-15T22:00:03+00:00", "reason": "ge_structure"},
+        ]
+        selected = select_sync_events(decisions, args)
+        self.assertEqual([item["event"] for item in selected], ["GE_CANDLE_WAITING", "GE_CANDLE_READY"])
 
 
 if __name__ == "__main__":

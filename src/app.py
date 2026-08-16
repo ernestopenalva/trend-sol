@@ -85,11 +85,16 @@ class Monitor:
         self.market_context = MarketContextEngine(self.entry_engine, self.config)
         no_progress = self.config.get("risk", {}).get("no_progress", {})
         context_settings = self.config.get("instrumentation", {}).get("market_context", {})
+        ge_sync = self.config.get("trend_gate", {}).get("sync", {})
         self.logger.system(
             "coordinated_package_resolved",
             real_logic="REAL_A",
             historical_runtime_label="B",
             ge_label="GE15",
+            ge_sync_enabled=ge_sync.get("enabled"),
+            ge_sync_timeout_seconds=ge_sync.get("timeout_seconds"),
+            ge_sync_timeout_action=ge_sync.get("timeout_action"),
+            ge_sync_expire_on_next_entry_candle=ge_sync.get("expire_on_next_entry_candle"),
             max_entries_per_5m_candle=self.config.get("entry", {}).get("max_entries_per_candle"),
             admission_candle_interval=self.config.get("entry", {}).get("admission_candle_interval"),
             hard_stop_pct=self.config.get("risk", {}).get("hard_stop", {}).get("stop_pct"),
@@ -240,6 +245,8 @@ class Monitor:
                 if timeframe == "5m":
                     self.registry.record_market_context(snapshot)
                     self.gcr_shadow.record_market_context(snapshot)
+            if signal is not None and self._entry_operational_pause_reason() is not None:
+                signal = None
             if signal is not None:
                 try:
                     snapshot = self.market_context.latest or self._safe_refresh_market_context()
@@ -295,21 +302,24 @@ class Monitor:
         kline = payload.get("k") or {}
         if not bool(kline.get("x")):
             return True
+        return self._entry_operational_pause_reason() is not None
+
+    def _entry_operational_pause_reason(self) -> str | None:
         if self.cycle_manager.single_cycle_complete:
             self.entry_engine.set_paused("PAUSED_CYCLE_COMPLETE")
-            return True
+            return "PAUSED_CYCLE_COMPLETE"
         if self.registry.review_required:
             self.entry_engine.set_paused("PAUSED_NEEDS_REVIEW")
-            return True
+            return "PAUSED_NEEDS_REVIEW"
         if self.ws_manager and self.ws_manager.status != "connected":
             self.entry_engine.set_paused("PAUSED_WEBSOCKET")
-            return True
+            return "PAUSED_WEBSOCKET"
         age = self._last_tick_age_seconds()
         max_age = int(self.config["market_data"].get("max_market_data_age_seconds", 60))
         if age is not None and age > max_age:
             self.entry_engine.set_paused("PAUSED_MARKET_DATA_STALE")
-            return True
-        return False
+            return "PAUSED_MARKET_DATA_STALE"
+        return None
 
     def _entry_console_context(self) -> Dict[str, Any]:
         cycle_total = self.cycle_manager.pairs_per_cycle

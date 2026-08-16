@@ -231,4 +231,10 @@ python tools/ge_entry_audit.py \
 
 A ferramenta e estritamente read-only e nao consulta a Binance. Ela separa
 inconsistencia aritmetica de uso de candle 5m atrasado por ordem de chegada dos
-streams.
+streams e resume os eventos de sincronizacao do runtime (`GE_CANDLE_FRESH`,
+`WAITING`, `READY`, `TIMEOUT`, `EXPIRED_NEXT_1M` e `FUTURE`).
+
+Na fronteira exata de 5 minutos, o runtime espera por ate 15 segundos pelo candle
+5m correto. Se ele nao chegar nesse prazo (ou antes do proximo candle de entrada),
+o sinal e descartado; o candle estrutural anterior nunca e usado como fallback e
+nao ha consulta REST para completar a avaliacao.

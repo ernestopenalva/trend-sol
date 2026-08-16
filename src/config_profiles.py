@@ -96,6 +96,15 @@ def _validate_trend_observations(config: Dict[str, Any]) -> None:
         lookback = gate.get("lookback_candles")
         if isinstance(lookback, bool) or not isinstance(lookback, int) or lookback <= 0:
             raise ValueError("trend_gate.lookback_candles must be a positive integer")
+        sync = gate.get("sync", {})
+        if isinstance(sync, dict) and bool(sync.get("enabled", False)):
+            timeout = sync.get("timeout_seconds")
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+                raise ValueError("trend_gate.sync.timeout_seconds must be greater than 0")
+            if str(sync.get("timeout_action", "SKIP")).upper() != "SKIP":
+                raise ValueError("trend_gate.sync.timeout_action must be SKIP")
+            if not bool(sync.get("expire_on_next_entry_candle", True)):
+                raise ValueError("trend_gate.sync.expire_on_next_entry_candle must be true")
     observations = config.get("ema_observations")
     if not isinstance(observations, dict) or not bool(observations.get("enabled", False)):
         return

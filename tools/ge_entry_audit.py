@@ -33,9 +33,10 @@ def main() -> None:
     records = select_real_trades(TradeLedger(PROJECT_ROOT).load(), args)
     decisions = read_jsonl(PROJECT_ROOT / "logs" / "decisions.jsonl")
     audits = audit_entries(records, decisions, max_match_seconds=args.match_window_seconds)
+    sync_events = select_sync_events(decisions, args)
     if args.limit:
         audits = audits[-args.limit :]
-    print_report(audits, args)
+    print_report(audits, args, sync_events)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -77,6 +78,24 @@ def select_real_trades(records: Iterable[Dict[str, Any]], args: argparse.Namespa
             continue
         output.append(record)
     return sorted(output, key=lambda item: str(item.get("opened_at") or ""))
+
+
+def select_sync_events(
+    decisions: Iterable[Dict[str, Any]], args: argparse.Namespace
+) -> list[Dict[str, Any]]:
+    since = parse_local_time(args.since)
+    until = parse_local_time(args.until)
+    output = []
+    for event in decisions:
+        if not str(event.get("event") or "").startswith("GE_CANDLE_"):
+            continue
+        event_time = parse_ts(event.get("ts"))
+        if since is not None and (event_time is None or event_time < since):
+            continue
+        if until is not None and (event_time is None or event_time > until):
+            continue
+        output.append(event)
+    return output
 
 
 def audit_entries(
@@ -257,7 +276,12 @@ def classify_freshness(
     return "MISALIGNED", None
 
 
-def print_report(audits: list[Dict[str, Any]], args: argparse.Namespace) -> None:
+def print_report(
+    audits: list[Dict[str, Any]],
+    args: argparse.Namespace,
+    sync_events: Optional[list[Dict[str, Any]]] = None,
+) -> None:
+    sync_events = sync_events or []
     matched = [item for item in audits if item["decision_matched"]]
     arithmetic_available = [item for item in audits if item["arithmetic"] != "UNAVAILABLE"]
     fresh = [item for item in audits if item["freshness"] == "FRESH"]
@@ -296,7 +320,52 @@ def print_report(audits: list[Dict[str, Any]], args: argparse.Namespace) -> None
     print(f"signals closing on exact 5m boundary | {len(boundary)}")
     print(f"boundary signals that used stale 5m candle | {len(boundary_stale)}")
     print()
-    print("4. TRADE-BY-TRADE")
+    print("4. RUNTIME SYNC TELEMETRY")
+    event_counts = {
+        name: sum(event.get("event") == name for event in sync_events)
+        for name in (
+            "GE_CANDLE_FRESH",
+            "GE_CANDLE_WAITING",
+            "GE_CANDLE_READY",
+            "GE_CANDLE_TIMEOUT",
+            "GE_CANDLE_EXPIRED_NEXT_1M",
+            "GE_CANDLE_FUTURE",
+        )
+    }
+    released_waits = [
+        float(event["waited_seconds"])
+        for event in sync_events
+        if event.get("event") == "GE_CANDLE_READY"
+        and isinstance(event.get("waited_seconds"), (int, float))
+    ]
+    print(f"events | {len(sync_events)}")
+    print(
+        "fresh={GE_CANDLE_FRESH} | waiting={GE_CANDLE_WAITING} | "
+        "released={GE_CANDLE_READY} | timeout={GE_CANDLE_TIMEOUT} | "
+        "expired_next_1m={GE_CANDLE_EXPIRED_NEXT_1M} | future={GE_CANDLE_FUTURE}".format(
+            **event_counts
+        )
+    )
+    print(
+        f"released wait | avg={sum(released_waits) / len(released_waits):.2f}s | "
+        f"max={max(released_waits):.2f}s"
+        if released_waits
+        else "released wait | n/a"
+    )
+    latest_counters = sync_events[-1].get("ge_sync_counters", {}) if sync_events else {}
+    if isinstance(latest_counters, dict) and latest_counters:
+        print(
+            "latest runtime counters | "
+            + " | ".join(
+                f"{name}={latest_counters.get(name, 0)}"
+                for name in (
+                    "fresh", "waiting", "released", "timeout",
+                    "expired_next_entry_candle", "future_candle", "duplicate_ignored",
+                )
+            )
+        )
+    print()
+    print("5. TRADE-BY-TRADE")
     print(
         "pair_id | opened | source 1m | latest 5m candle used | expected latest 5m | reference candle | "
         "freshness | high now/ref | low now/ref | logged | recalculated | arithmetic | match lag"
@@ -321,7 +390,7 @@ def print_report(audits: list[Dict[str, Any]], args: argparse.Namespace) -> None
                 f"buy_decision_at={item.get('buy_decision_at') or 'n/a'}"
             )
     print()
-    print("5. INTERPRETATION")
+    print("6. INTERPRETATION")
     if any(item["arithmetic"] == "MISMATCH" for item in audits):
         print("result | GE arithmetic mismatch detected; inspect those rows before strategy analysis")
     elif future:
