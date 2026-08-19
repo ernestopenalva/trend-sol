@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from src.indicators.indicators import dmi_adx
 from src.logging_utils import JsonlLogger
 from src.monitor.entry_engine import Candle, EntryEngine, EntrySignal
+from src.monitor.dmi15_shadow import Dmi15ShadowRegistry
 from src.monitor.gcr_shadow import GcrShadowRegistry
 from src.monitor.market_context import MarketContextEngine
 from src.no_progress import resolved_no_progress_tolerance
@@ -73,6 +75,9 @@ class NewPackageTests(unittest.TestCase):
             expected = {"ema20", "ema50", "ema20_slope_pct", "ema50_slope_pct", "adx14", "plus_di14", "minus_di14", "rsi14", "relative_volume"}
             self.assertTrue(expected.issubset(context["tf_5m"]))
             self.assertTrue(expected.issubset(context["tf_15m"]))
+            self.assertIsNotNone(context["tf_5m"]["plus_di14_15m_ago"])
+            self.assertIsNotNone(context["tf_5m"]["minus_di14_15m_ago"])
+            self.assertIsNotNone(context["tf_5m"]["rsi14_15m_ago"])
             before = context["tf_5m"]["ema20"]
             engine.auxiliary_candles["5m"].append(
                 Candle(99_000_000, 99_299_999, 500, 501, 499, 500, 9999, False)
@@ -106,6 +111,55 @@ class NewPackageTests(unittest.TestCase):
             self.assertEqual(len(shadow.open_positions), 0)
             self.assertTrue(shadow.on_signal(EntrySignal("SOLUSDT", 99.5, "ts", 300_000, 0.2, "1m", 14)))
 
+    def test_dmi15_shadow_uses_only_strict_dmi_rule_and_own_state(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _context_config()
+            config["risk"]["no_progress"]["enabled"] = False
+            shadow = Dmi15ShadowRegistry(root, config, _logger(root))
+            context = {
+                "captured_at": "2026-08-19T12:05:00+00:00",
+                "tf_5m": {
+                    "latest_open_at_ms": 300_000,
+                    "latest_closed_at_ms": 599_999,
+                    "close": 100,
+                    "plus_di14": 30,
+                    "plus_di14_15m_ago": 20,
+                    "minus_di14": 10,
+                    "minus_di14_15m_ago": 15,
+                },
+            }
+            self.assertTrue(shadow.on_closed_5m(context, 0.2, "1m", 14))
+            self.assertEqual(len(shadow.open_positions), 1)
+            self.assertFalse(shadow.open_positions[0].no_progress_enabled)
+            self.assertFalse(shadow.on_closed_5m(context, 0.2, "1m", 14))
+
+            blocked = deepcopy(context)
+            blocked["tf_5m"]["latest_open_at_ms"] = 600_000
+            blocked["tf_5m"]["latest_closed_at_ms"] = 899_999
+            blocked["tf_5m"]["plus_di14"] = 19
+            self.assertFalse(shadow.on_closed_5m(blocked, 0.2, "1m", 14))
+            self.assertEqual(len(shadow.open_positions), 1)
+            shadow.on_tick(98.0, "2026-08-19T12:06:00+00:00")
+            self.assertEqual(len(shadow.open_positions), 0)
+            records = shadow.ledger.load()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["position_type"], "DMI15_SHADOW")
+            self.assertEqual(records[0]["shadow_kind"], "DMI15_SHADOW")
+
+    def test_restored_position_disables_npe_when_config_disables_it(self) -> None:
+        with TemporaryDirectory() as tmp:
+            logger = _logger(Path(tmp))
+            original = _position(FakeClient(), logger, tolerance=7200)
+            config = dict(original.config)
+            config["no_progress"] = {"enabled": False}
+            restored = BotFullExitPosition.from_state(
+                original.to_state(), config, FakeClient(), logger  # type: ignore[arg-type]
+            )
+            self.assertFalse(restored.no_progress_enabled)
+            self.assertIsNone(restored.no_progress_tolerance_seconds)
+            self.assertEqual(restored.no_progress_tolerance_source, "DISABLED_BY_CONFIG")
+
 
 def _settings():
     return {"default_hours": 2, "rolling_window": 20, "min_be_samples": 4, "tolerance_buffer_pct": 25}
@@ -133,7 +187,7 @@ def _context_config():
         "capital": {"operational_balance_usdt": 100, "trade_size_pct": 20, "max_open_positions": 5},
         "risk": {"hard_stop": {"enabled": True, "stop_pct": 1.5}, "no_progress": {"enabled": True, **_settings()}, "breakeven": {"mode": "atr", "trigger_atr": 3, "offset_atr": 0.1}, "profit_lock": {"mode": "atr", "steps": [{"trigger_atr": 5, "lock_atr": 1.5}]}, "trailing": {"mode": "atr", "activation_atr": 10, "gap_atr": 5}},
         "fees": {"enabled": True, "taker_fee_pct": 0.1}, "ladder": {},
-        "instrumentation": {"enabled": True, "gcr_shadow": {"enabled": True}, "market_context": {"enabled": True, "slope_lookback_candles": 3, "relative_volume_period": 20}},
+        "instrumentation": {"enabled": True, "gcr_shadow": {"enabled": True}, "dmi15_shadow": {"enabled": True}, "market_context": {"enabled": True, "slope_lookback_candles": 3, "relative_volume_period": 20}},
     }
 
 

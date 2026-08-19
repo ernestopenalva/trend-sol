@@ -288,12 +288,25 @@ class BotFullExitPosition(PositionBase):
         )
         position.phantom = bool(state.get("phantom", False))
         position.phantom_id = str(state["phantom_id"]) if state.get("phantom_id") else None
-        # Missing key means that the position predates this rule and is grandfathered.
-        position.no_progress_enabled = bool(state.get("no_progress_enabled", False))
-        position.no_progress_tolerance_seconds = _optional_float(
-            state.get("no_progress_tolerance_seconds")
+        # An explicit runtime disable wins over the tolerance frozen in persisted state.
+        no_progress_cfg = config.get("no_progress")
+        no_progress_disabled = (
+            isinstance(no_progress_cfg, dict)
+            and not bool(no_progress_cfg.get("enabled", False))
         )
-        position.no_progress_tolerance_source = state.get("no_progress_tolerance_source")
+        position.no_progress_enabled = (
+            False if no_progress_disabled else bool(state.get("no_progress_enabled", False))
+        )
+        position.no_progress_tolerance_seconds = (
+            None
+            if no_progress_disabled
+            else _optional_float(state.get("no_progress_tolerance_seconds"))
+        )
+        position.no_progress_tolerance_source = (
+            "DISABLED_BY_CONFIG"
+            if no_progress_disabled
+            else state.get("no_progress_tolerance_source")
+        )
         position.be_armed_at = state.get("be_armed_at")
         position.time_to_be_seconds = _optional_float(state.get("time_to_be_seconds"))
         position.market_context_entry = state.get("market_context_entry")

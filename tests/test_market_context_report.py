@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import unittest
 
-from tools.market_context_report import _extreme
+from tools.market_context_report import _extreme, _rsi_move
 
 
 class MarketContextReportTests(unittest.TestCase):
+    def test_rsi_move_formats_fifteen_minute_delta(self) -> None:
+        self.assertEqual(
+            _rsi_move({"rsi14_15m_ago": 52.1, "rsi14": 64.3}),
+            "RSI 52.1→64.3 (+12.2)",
+        )
+
     def test_peak_and_trough_include_price_percentage_and_atr(self) -> None:
         trade = {
             "entry_price": 76.20,

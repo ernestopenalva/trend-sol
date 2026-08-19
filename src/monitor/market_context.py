@@ -23,7 +23,8 @@ class MarketContextEngine:
         timeframes: Dict[str, Any] = {}
         for timeframe in ("5m", "15m"):
             timeframes[f"tf_{timeframe}"] = self._timeframe_snapshot(
-                self.entry_engine._candles_for(timeframe)
+                self.entry_engine._candles_for(timeframe),
+                timeframe,
             )
         gate = self.entry_engine.config.get("trend_gate", {})
         ge_interval = str(gate.get("candle_interval", "5m"))
@@ -55,7 +56,7 @@ class MarketContextEngine:
         }
         return self.latest
 
-    def _timeframe_snapshot(self, candles: list[Candle]) -> Dict[str, Any]:
+    def _timeframe_snapshot(self, candles: list[Candle], timeframe: str) -> Dict[str, Any]:
         closed = [item for item in candles if item.closed]
         closes = [item.close for item in closed]
         highs = [item.high for item in closed]
@@ -69,10 +70,12 @@ class MarketContextEngine:
         )
         slope_lookback = max(1, int(self.settings.get("slope_lookback_candles", 3)))
         rvol_period = max(1, int(self.settings.get("relative_volume_period", 20)))
+        fifteen_minute_lookback = {"5m": 3, "15m": 1}[timeframe]
         baseline = volumes[-1 - rvol_period : -1] if len(volumes) > rvol_period else []
         baseline_avg = sum(baseline) / len(baseline) if baseline else None
         latest_volume = volumes[-1] if volumes else None
         return {
+            "latest_open_at_ms": closed[-1].open_time if closed else None,
             "latest_closed_at_ms": closed[-1].close_time if closed else None,
             "close": closes[-1] if closes else None,
             "ema20": _last(ema20),
@@ -83,6 +86,9 @@ class MarketContextEngine:
             "plus_di14": _last(plus_di),
             "minus_di14": _last(minus_di),
             "rsi14": _last(rsi14),
+            "plus_di14_15m_ago": _lookback(plus_di, fifteen_minute_lookback),
+            "minus_di14_15m_ago": _lookback(minus_di, fifteen_minute_lookback),
+            "rsi14_15m_ago": _lookback(rsi14, fifteen_minute_lookback),
             "relative_volume": (
                 latest_volume / baseline_avg
                 if latest_volume is not None and baseline_avg not in (None, 0)
@@ -97,6 +103,12 @@ class MarketContextEngine:
 
 def _last(values: list[Optional[float]]) -> Optional[float]:
     return float(values[-1]) if values and values[-1] is not None else None
+
+
+def _lookback(values: list[Optional[float]], candles: int) -> Optional[float]:
+    if len(values) <= candles or values[-1 - candles] is None:
+        return None
+    return float(values[-1 - candles])
 
 
 def _slope_pct(values: list[Optional[float]], lookback: int) -> Optional[float]:

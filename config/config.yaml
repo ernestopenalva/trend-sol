@@ -138,7 +138,7 @@ risk:
     enabled: true
     stop_pct: 1.5
   no_progress:
-    enabled: true
+    enabled: false
     default_hours: 2
     rolling_window: 20
     min_be_samples: 4
@@ -197,6 +197,11 @@ instrumentation:
     max_open_positions: 5
     state_file: "data/state/gcr_shadow.json"
     ledger_file: "data/trades/trades_gcr_shadow.jsonl"
+  dmi15_shadow:
+    enabled: true
+    max_open_positions: 5
+    state_file: "data/state/dmi15_shadow.json"
+    ledger_file: "data/trades/trades_dmi15_shadow.jsonl"
   market_context:
     enabled: true
     timeframes: ["5m", "15m"]
@@ -414,6 +419,7 @@ instrumentation:
   rejected_signals_file: "data/telemetry/rejected_signals.jsonl"
   market_shadow_events_file: "data/telemetry/market_shadow_events.jsonl"
   gcr_shadow_events_file: "data/telemetry/gcr_shadow_events.jsonl"
+  dmi15_shadow_events_file: "data/telemetry/dmi15_shadow_events.jsonl"
   market_context_events_file: "data/telemetry/market_context_events.jsonl"
 
 console:

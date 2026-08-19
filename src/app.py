@@ -20,6 +20,7 @@ from src.exchange.binance_client import BinanceClient, BinanceClientError
 from src.exchange.binance_market_data import BinanceMarketDataClient
 from src.logging_utils import JsonlLogger
 from src.monitor.cycle_manager import CycleManager
+from src.monitor.dmi15_shadow import Dmi15ShadowRegistry
 from src.monitor.entry_engine import EntryEngine
 from src.monitor.gcr_shadow import GcrShadowRegistry
 from src.monitor.market_context import MarketContextEngine
@@ -82,6 +83,9 @@ class Monitor:
         self.gcr_shadow = GcrShadowRegistry(
             self.project_root, self.config, self.logger, self.telemetry_writer
         )
+        self.dmi15_shadow = Dmi15ShadowRegistry(
+            self.project_root, self.config, self.logger, self.telemetry_writer
+        )
         self.market_context = MarketContextEngine(self.entry_engine, self.config)
         no_progress = self.config.get("risk", {}).get("no_progress", {})
         context_settings = self.config.get("instrumentation", {}).get("market_context", {})
@@ -99,12 +103,15 @@ class Monitor:
             admission_candle_interval=self.config.get("entry", {}).get("admission_candle_interval"),
             hard_stop_pct=self.config.get("risk", {}).get("hard_stop", {}).get("stop_pct"),
             no_progress_default_hours=no_progress.get("default_hours"),
+            no_progress_enabled=no_progress.get("enabled"),
             no_progress_rolling_window=no_progress.get("rolling_window"),
             no_progress_min_be_samples=no_progress.get("min_be_samples"),
             no_progress_statistic=no_progress.get("statistic"),
             no_progress_tolerance_buffer_pct=no_progress.get("tolerance_buffer_pct"),
             gcr_shadow="GCR_SHADOW_B",
             gcr_previous_must_arm_be=True,
+            dmi15_shadow="DMI15_SHADOW_C",
+            dmi15_entry_rule="+DI_now>+DI_15m_ago AND -DI_now<-DI_15m_ago AND +DI_now>-DI_now",
             market_context_telemetry_only=True,
             market_context_timeframes=context_settings.get("timeframes"),
             market_context_indicators=["EMA20", "EMA50", "EMA20_SLOPE", "EMA50_SLOPE", "ADX14", "+DI14", "-DI14", "RSI14", "RVOL", "GE15"],
@@ -148,6 +155,7 @@ class Monitor:
             initial_context = self._safe_refresh_market_context()
             self.registry.record_market_context(initial_context)
             self.gcr_shadow.record_market_context(initial_context)
+            self.dmi15_shadow.record_market_context(initial_context)
             self.market_shadow.start()
             self.market_shadow_ge30.start()
             market_cfg = self.config["market_data"]
@@ -231,6 +239,10 @@ class Monitor:
                 self.gcr_shadow.on_tick(price, _market_timestamp(payload))
             except Exception as exc:
                 self.logger.system("gcr_shadow_tick_failed", price=price, error=str(exc))
+            try:
+                self.dmi15_shadow.on_tick(price, _market_timestamp(payload))
+            except Exception as exc:
+                self.logger.system("dmi15_shadow_tick_failed", price=price, error=str(exc))
             self._stop_after_cycle_if_needed()
             return
 
@@ -245,6 +257,15 @@ class Monitor:
                 if timeframe == "5m":
                     self.registry.record_market_context(snapshot)
                     self.gcr_shadow.record_market_context(snapshot)
+                    try:
+                        self.dmi15_shadow.on_closed_5m(
+                            snapshot,
+                            entry_atr=self.entry_engine._current_entry_atr(),
+                            atr_timeframe=self.entry_engine.entry_timeframe,
+                            atr_period=int(self.config["entry"]["atr_period"]),
+                        )
+                    except Exception as exc:
+                        self.logger.system("dmi15_shadow_candle_failed", error=str(exc))
             if signal is not None and self._entry_operational_pause_reason() is not None:
                 signal = None
             if signal is not None:

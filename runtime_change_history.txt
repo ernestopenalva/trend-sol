@@ -1,1 +1,1 @@
-Evento: market_context_report.py passou a exibir peak e trough de cada trade com preco, variacao percentual desde a entrada e distancia em ATR, repetidos nas linhas de entry e exit para facilitar leitura e exportacao.
+Evento: NPE adaptativo desativado; criado DMI15_SHADOW_C independente, com entrada exclusiva pela evolucao de +DI/-DI Wilder 14 em candles 5m fechados, estado, slots, ledger e telemetria proprios; relatorios passaram a comparar a logica C e mostrar RSI de 15 minutos atras ate o atual.

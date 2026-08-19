@@ -17,14 +17,16 @@ from src.trade_ledger import TradeLedger
 
 def main() -> None:
     args = _args()
-    path = (
-        PROJECT_ROOT / "data/trades/trades_B.jsonl"
-        if args.strategy == "A"
-        else PROJECT_ROOT / "data/trades/trades_gcr_shadow.jsonl"
-    )
+    paths = {
+        "A": PROJECT_ROOT / "data/trades/trades_B.jsonl",
+        "B": PROJECT_ROOT / "data/trades/trades_gcr_shadow.jsonl",
+        "C": PROJECT_ROOT / "data/trades/trades_dmi15_shadow.jsonl",
+    }
+    labels = {"A": "REAL_A", "B": "GCR_SHADOW_B", "C": "DMI15_SHADOW_C"}
+    path = paths[args.strategy]
     records = _filter(TradeLedger(PROJECT_ROOT, path).load(), args)
     print("TREND-SOL | market context report")
-    print(f"strategy | {'REAL_A' if args.strategy == 'A' else 'GCR_SHADOW_B'} | trades | {len(records)}")
+    print(f"strategy | {labels[args.strategy]} | trades | {len(records)}")
     print("opened | closed | age | peak | trough | net | reason | phase | 5m indicators | 15m indicators | GE15")
     for record in records:
         phases = (("entry", record.get("market_context_entry")), ("exit", record.get("market_context_exit")))
@@ -55,7 +57,7 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--until")
     parser.add_argument("--since-field", choices=["opened_at", "closed_at"], default="opened_at")
     parser.add_argument("--profile")
-    parser.add_argument("--strategy", choices=["A", "B"], default="A")
+    parser.add_argument("--strategy", choices=["A", "B", "C"], default="A")
     parser.add_argument("--detail", action="store_true")
     return parser.parse_args()
 
@@ -84,9 +86,17 @@ def _tf(value: Any) -> str:
         f"EMA20={_num(item.get('ema20'))} EMA50={_num(item.get('ema50'))} "
         f"S20={_pct(item.get('ema20_slope_pct'))} S50={_pct(item.get('ema50_slope_pct'))} "
         f"ADX={_num(item.get('adx14'))} +DI={_num(item.get('plus_di14'))} "
-        f"-DI={_num(item.get('minus_di14'))} RSI={_num(item.get('rsi14'))} "
+        f"-DI={_num(item.get('minus_di14'))} {_rsi_move(item)} "
         f"RVOL={_num(item.get('relative_volume'))}x"
     )
+
+
+def _rsi_move(item: Dict[str, Any]) -> str:
+    previous = _float(item.get("rsi14_15m_ago"))
+    current = _float(item.get("rsi14"))
+    if previous is None or current is None:
+        return f"RSI={_num(current)}"
+    return f"RSI {previous:.1f}→{current:.1f} ({current - previous:+.1f})"
 
 
 def _parse_user_dt(value: Optional[str]) -> Optional[datetime]:
