@@ -11,6 +11,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.trade_ledger import TradeLedger
 
+MIN_MEANINGFUL_MFE_PCT = 1e-9
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Observational indicator ranking; never changes runtime.")
@@ -59,31 +61,31 @@ def main() -> None:
             if gross is not None:
                 entry = _f(record.get("entry_price"))
                 peak_price = _f(record.get("peak_price"))
-                peak_pct = ((peak_price / entry - 1) * 100) if entry and peak_price is not None else None
-                retained = gross / peak_pct * 100 if peak_pct and peak_pct > 0 else None
-                cases.append((direction, gross, net or 0, peak, trough, retained, _f(record.get("time_to_be_seconds"))))
+                peak_pct = _peak_excursion_pct(entry, peak_price)
+                cases.append((direction, gross, net or 0, peak, trough, peak_pct, _f(record.get("time_to_be_seconds"))))
         accuracy = sum(1 for d, g, *_ in cases if (g > 0 and d > 0) or (g < 0 and d < 0)) / len(cases) * 100 if cases else 0
         avg_net = sum(item[2] for item in cases) / len(cases) if cases else 0
         consistency = sum(1 for _, _, n, *_ in cases if n > 0) / len(cases) * 100 if cases else 0
         peaks = [item[3] for item in cases if item[3] is not None]
         troughs = [item[4] for item in cases if item[4] is not None]
-        retained = [item[5] for item in cases if item[5] is not None]
+        gross_and_mfe = [(item[1], item[5]) for item in cases]
         be_times = [item[6] for item in cases if item[6] is not None]
         avg_peak = sum(peaks) / len(peaks) if peaks else 0
         avg_trough = sum(troughs) / len(troughs) if troughs else 0
-        exit_quality = sum(retained) / len(retained) if retained else 0
+        exit_quality, exit_quality_n = _aggregate_exit_quality(gross_and_mfe)
         avg_be_minutes = sum(be_times) / len(be_times) / 60 if be_times else 0
         score = accuracy * 0.5 + consistency * 0.3 + max(-10, min(10, avg_net * 10)) * 0.2
-        rows.append((score, name, len(cases), long_count, short_count, neutral_count, accuracy, avg_net, avg_peak, avg_trough, avg_be_minutes, exit_quality, consistency, outcomes))
+        rows.append((score, name, len(cases), long_count, short_count, neutral_count, accuracy, avg_net, avg_peak, avg_trough, avg_be_minutes, exit_quality, exit_quality_n, consistency, outcomes))
     print("TREND-SOL | observational indicator ranking | telemetry only")
-    print("indicator | N | LONG/SHORT/NEUTRAL | directional_accuracy | avg net | MFE ATR | MAE ATR | avg time_to_BE | exit_quality(% peak retained) | consistency | HS/NPE/TRAIL | score")
-    for score, name, n, longs, shorts, neutrals, accuracy, avg_net, avg_peak, avg_trough, avg_be_minutes, exit_quality, consistency, outcomes in sorted(rows, reverse=True):
+    print("indicator | N | LONG/SHORT/NEUTRAL | directional_accuracy | avg net | MFE ATR | MAE ATR | avg time_to_BE | exit_quality(% aggregate MFE retained; N) | consistency | HS/NPE/TRAIL | score")
+    for score, name, n, longs, shorts, neutrals, accuracy, avg_net, avg_peak, avg_trough, avg_be_minutes, exit_quality, exit_quality_n, consistency, outcomes in sorted(rows, reverse=True):
         print(
             f"{name} | {n} | {longs}/{shorts}/{neutrals} | {accuracy:.1f}% | {avg_net:+.3f}% | "
-            f"{avg_peak:+.2f} | {avg_trough:+.2f} | {avg_be_minutes:.1f}m | {exit_quality:.1f}% | "
+            f"{avg_peak:+.2f} | {avg_trough:+.2f} | {avg_be_minutes:.1f}m | {_fmt_exit_quality(exit_quality, exit_quality_n)} | "
             f"{consistency:.1f}% | {outcomes.get('HARD_STOP', 0)}/{outcomes.get('NO_PROGRESS_EXIT', 0)}/{outcomes.get('TRAILING', 0)} | {score:.2f}"
         )
     print("score = 50% directional accuracy + 30% positive-net consistency + 20% capped avg-net component")
+    print("exit_quality = sum gross PnL / sum positive MFE; zero/residual MFE is excluded")
 
 
 def _v(item: Dict[str, Any], key: str) -> float:
@@ -95,6 +97,35 @@ def _f(value: Any):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _peak_excursion_pct(entry: Any, peak_price: Any) -> float | None:
+    entry_value = _f(entry)
+    peak_value = _f(peak_price)
+    if entry_value is None or peak_value is None or entry_value <= 0:
+        return None
+    excursion = (peak_value / entry_value - 1) * 100
+    return excursion if excursion > MIN_MEANINGFUL_MFE_PCT else None
+
+
+def _aggregate_exit_quality(
+    gross_and_mfe: list[tuple[float, float | None]],
+) -> tuple[float | None, int]:
+    eligible = [
+        (gross, mfe)
+        for gross, mfe in gross_and_mfe
+        if mfe is not None and mfe > MIN_MEANINGFUL_MFE_PCT
+    ]
+    if not eligible:
+        return None, 0
+    total_mfe = sum(mfe for _, mfe in eligible)
+    if total_mfe <= MIN_MEANINGFUL_MFE_PCT:
+        return None, 0
+    return sum(gross for gross, _ in eligible) / total_mfe * 100, len(eligible)
+
+
+def _fmt_exit_quality(value: float | None, sample_size: int) -> str:
+    return f"{value:.1f}% (N={sample_size})" if value is not None else "n/a (N=0)"
 
 
 def _sign(value: float) -> int:

@@ -25,16 +25,24 @@ def main() -> None:
     records = _filter(TradeLedger(PROJECT_ROOT, path).load(), args)
     print("TREND-SOL | market context report")
     print(f"strategy | {'REAL_A' if args.strategy == 'A' else 'GCR_SHADOW_B'} | trades | {len(records)}")
-    print("opened | closed | age | net | reason | phase | 5m indicators | 15m indicators | GE15")
+    print("opened | closed | age | peak | trough | net | reason | phase | 5m indicators | 15m indicators | GE15")
     for record in records:
         phases = (("entry", record.get("market_context_entry")), ("exit", record.get("market_context_exit")))
         for phase, context in phases:
             if not isinstance(context, dict):
                 if args.detail:
-                    print(f"{_dt(record.get('opened_at'))} | {_dt(record.get('closed_at'))} | {_age(record)} | {_pct(record.get('net_pnl_pct'))} | {record.get('exit_reason')} | {phase} | unavailable | unavailable | unavailable")
+                    print(
+                        f"{_dt(record.get('opened_at'))} | {_dt(record.get('closed_at'))} | {_age(record)} | "
+                        f"{_extreme(record, 'peak_price', 'peak_pct', 'peak_atr')} | "
+                        f"{_extreme(record, 'trough_price', 'trough_pct', 'trough_atr')} | "
+                        f"{_pct(record.get('net_pnl_pct'))} | {record.get('exit_reason')} | {phase} | "
+                        "unavailable | unavailable | unavailable"
+                    )
                 continue
             print(
                 f"{_dt(record.get('opened_at'))} | {_dt(record.get('closed_at'))} | {_age(record)} | "
+                f"{_extreme(record, 'peak_price', 'peak_pct', 'peak_atr')} | "
+                f"{_extreme(record, 'trough_price', 'trough_pct', 'trough_atr')} | "
                 f"{_pct(record.get('net_pnl_pct'))} | {record.get('exit_reason')} | {phase} | "
                 f"{_tf(context.get('tf_5m'))} | {_tf(context.get('tf_15m'))} | "
                 f"{(context.get('ge15') or {}).get('status', 'n/a')}"
@@ -125,6 +133,32 @@ def _pct(value: Any) -> str:
         return f"{float(value):+.2f}%"
     except (TypeError, ValueError):
         return "n/a"
+
+
+def _extreme(
+    item: Dict[str, Any],
+    price_key: str,
+    pct_key: str,
+    atr_key: str,
+) -> str:
+    price = _float(item.get(price_key))
+    pct = _float(item.get(pct_key))
+    entry = _float(item.get("entry_price"))
+    if pct is None and price is not None and entry not in (None, 0):
+        pct = (price / entry - 1) * 100
+    atr_value = _float(item.get(atr_key))
+    if price is None:
+        return "n/a"
+    pct_text = f"{pct:+.2f}%" if pct is not None else "n/a"
+    atr_text = f"{atr_value:+.2f} ATR" if atr_value is not None else "n/a ATR"
+    return f"{price:.4f} ({pct_text} / {atr_text})"
+
+
+def _float(value: Any) -> Optional[float]:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 if __name__ == "__main__":

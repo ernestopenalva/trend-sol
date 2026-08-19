@@ -217,6 +217,14 @@ python tools/indicator_ranking.py --strategy A
 python tools/indicator_ranking.py --strategy B
 ```
 
+O relatorio de contexto inclui peak e trough de cada trade com preco, percentual
+desde a entrada e distancia em ATR; os campos aparecem tanto na fase de entrada
+quanto na fase de saida para manter cada linha autocontida.
+
+No ranking, `exit_quality` e a razao agregada entre gross realizado e MFE positivo
+(`sum(gross) / sum(MFE)`). MFE zero ou apenas residual de ponto flutuante e excluido,
+e o relatorio mostra o tamanho da amostra usado nessa metrica.
+
 Para auditar apenas a precisao mecanica do GE15 nas entradas reais, incluindo os
 dois candles efetivamente usados, reproducao de maxima/minima e frescor do candle
 5m em fronteiras de fechamento:
