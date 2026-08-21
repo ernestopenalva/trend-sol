@@ -65,6 +65,11 @@ class MarketContextEngine:
         ema20 = ema(closes, int(self.settings.get("ema_fast_period", 20)))
         ema50 = ema(closes, int(self.settings.get("ema_slow_period", 50)))
         rsi14 = rsi(closes, int(self.settings.get("rsi_period", 14)))
+        rsi_ma = _rsi_based_ma(
+            rsi14,
+            str(self.settings.get("rsi_based_ma_type", "SMA")),
+            int(self.settings.get("rsi_based_ma_period", 14)),
+        ) if timeframe == "5m" else []
         plus_di, minus_di, adx = dmi_adx(
             highs, lows, closes, int(self.settings.get("adx_period", 14))
         )
@@ -86,6 +91,7 @@ class MarketContextEngine:
             "plus_di14": _last(plus_di),
             "minus_di14": _last(minus_di),
             "rsi14": _last(rsi14),
+            "rsi14_sma14": _last(rsi_ma),
             "plus_di14_15m_ago": _lookback(plus_di, fifteen_minute_lookback),
             "minus_di14_15m_ago": _lookback(minus_di, fifteen_minute_lookback),
             "rsi14_15m_ago": _lookback(rsi14, fifteen_minute_lookback),
@@ -119,3 +125,21 @@ def _slope_pct(values: list[Optional[float]], lookback: int) -> Optional[float]:
     if current is None or previous in (None, 0):
         return None
     return (float(current) / float(previous) - 1) * 100
+
+
+def _rsi_based_ma(
+    values: list[Optional[float]],
+    ma_type: str,
+    period: int,
+) -> list[Optional[float]]:
+    if ma_type.upper() != "SMA":
+        raise ValueError(f"Unsupported RSI-based MA type: {ma_type}")
+    if period <= 0:
+        raise ValueError("RSI-based MA period must be positive")
+    output: list[Optional[float]] = [None] * len(values)
+    for index in range(period - 1, len(values)):
+        window = values[index - period + 1 : index + 1]
+        if any(value is None for value in window):
+            continue
+        output[index] = sum(float(value) for value in window if value is not None) / period
+    return output

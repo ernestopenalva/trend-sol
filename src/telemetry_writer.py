@@ -17,6 +17,7 @@ class TelemetryWriter:
         "market_shadow_event": "market_shadow_events_file",
         "gcr_shadow_event": "gcr_shadow_events_file",
         "dmi15_shadow_event": "dmi15_shadow_events_file",
+        "dmi15_spread_shadow_event": "dmi15_spread_shadow_events_file",
         "market_context": "market_context_events_file",
     }
 

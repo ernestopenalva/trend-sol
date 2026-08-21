@@ -202,6 +202,12 @@ instrumentation:
     max_open_positions: 5
     state_file: "data/state/dmi15_shadow.json"
     ledger_file: "data/trades/trades_dmi15_shadow.jsonl"
+  dmi15_spread_shadow:
+    enabled: true
+    max_open_positions: 5
+    min_di_spread: 6
+    state_file: "data/state/dmi15_spread_shadow.json"
+    ledger_file: "data/trades/trades_dmi15_spread_shadow.jsonl"
   market_context:
     enabled: true
     timeframes: ["5m", "15m"]
@@ -210,6 +216,8 @@ instrumentation:
     slope_lookback_candles: 3
     adx_period: 14
     rsi_period: 14
+    rsi_based_ma_type: "SMA"
+    rsi_based_ma_period: 14
     relative_volume_period: 20
     relative_volume_baseline: "mean_previous_closed_candles"
   cohort_guard_study:
@@ -420,6 +428,7 @@ instrumentation:
   market_shadow_events_file: "data/telemetry/market_shadow_events.jsonl"
   gcr_shadow_events_file: "data/telemetry/gcr_shadow_events.jsonl"
   dmi15_shadow_events_file: "data/telemetry/dmi15_shadow_events.jsonl"
+  dmi15_spread_shadow_events_file: "data/telemetry/dmi15_spread_shadow_events.jsonl"
   market_context_events_file: "data/telemetry/market_context_events.jsonl"
 
 console:

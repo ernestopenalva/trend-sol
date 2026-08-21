@@ -21,8 +21,9 @@ def main() -> None:
         "A": PROJECT_ROOT / "data/trades/trades_B.jsonl",
         "B": PROJECT_ROOT / "data/trades/trades_gcr_shadow.jsonl",
         "C": PROJECT_ROOT / "data/trades/trades_dmi15_shadow.jsonl",
+        "D": PROJECT_ROOT / "data/trades/trades_dmi15_spread_shadow.jsonl",
     }
-    labels = {"A": "REAL_A", "B": "GCR_SHADOW_B", "C": "DMI15_SHADOW_C"}
+    labels = {"A": "REAL_A", "B": "GCR_SHADOW_B", "C": "DMI15_SHADOW_C", "D": "DMI15_SPREAD6_SHADOW_D"}
     path = paths[args.strategy]
     records = _filter(TradeLedger(PROJECT_ROOT, path).load(), args)
     print("TREND-SOL | market context report")
@@ -46,7 +47,7 @@ def main() -> None:
                 f"{_extreme(record, 'peak_price', 'peak_pct', 'peak_atr')} | "
                 f"{_extreme(record, 'trough_price', 'trough_pct', 'trough_atr')} | "
                 f"{_pct(record.get('net_pnl_pct'))} | {record.get('exit_reason')} | {phase} | "
-                f"{_tf(context.get('tf_5m'))} | {_tf(context.get('tf_15m'))} | "
+                f"{_tf(context.get('tf_5m'), show_rsi_ma=True)} | {_tf(context.get('tf_15m'))} | "
                 f"{(context.get('ge15') or {}).get('status', 'n/a')}"
             )
 
@@ -57,7 +58,7 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--until")
     parser.add_argument("--since-field", choices=["opened_at", "closed_at"], default="opened_at")
     parser.add_argument("--profile")
-    parser.add_argument("--strategy", choices=["A", "B", "C"], default="A")
+    parser.add_argument("--strategy", choices=["A", "B", "C", "D"], default="A")
     parser.add_argument("--detail", action="store_true")
     return parser.parse_args()
 
@@ -80,13 +81,14 @@ def _filter(records: list[Dict[str, Any]], args: argparse.Namespace) -> list[Dic
     return sorted(output, key=lambda item: str(item.get("opened_at") or ""))
 
 
-def _tf(value: Any) -> str:
+def _tf(value: Any, show_rsi_ma: bool = False) -> str:
     item = value if isinstance(value, dict) else {}
     return (
         f"EMA20={_num(item.get('ema20'))} EMA50={_num(item.get('ema50'))} "
         f"S20={_pct(item.get('ema20_slope_pct'))} S50={_pct(item.get('ema50_slope_pct'))} "
         f"ADX={_num(item.get('adx14'))} +DI={_num(item.get('plus_di14'))} "
-        f"-DI={_num(item.get('minus_di14'))} {_rsi_move(item)} "
+        f"-DI={_num(item.get('minus_di14'))} {_rsi_move(item)}"
+        f"{' RSI-MA14=' + _num(item.get('rsi14_sma14')) if show_rsi_ma else ''} "
         f"RVOL={_num(item.get('relative_volume'))}x"
     )
 

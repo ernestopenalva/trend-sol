@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from tools.market_context_report import _extreme, _rsi_move
+from tools.market_context_report import _extreme, _rsi_move, _tf
 
 
 class MarketContextReportTests(unittest.TestCase):
@@ -36,6 +36,10 @@ class MarketContextReportTests(unittest.TestCase):
             _extreme({}, "peak_price", "peak_pct", "peak_atr"),
             "n/a",
         )
+
+    def test_five_minute_context_formats_rsi_based_ma(self) -> None:
+        text = _tf({"rsi14": 64.3, "rsi14_sma14": 59.7}, show_rsi_ma=True)
+        self.assertIn("RSI-MA14=59.70", text)
 
 
 if __name__ == "__main__":

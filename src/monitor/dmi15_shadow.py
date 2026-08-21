@@ -20,6 +20,10 @@ class Dmi15ShadowRegistry:
 
     STRATEGY = "DMI15_SHADOW_C"
     SHADOW_KIND = "DMI15_SHADOW"
+    SETTINGS_KEY = "dmi15_shadow"
+    LEDGER_APPEND_METHOD = "append_closed_dmi15_shadow_trade"
+    TELEMETRY_STREAM = "dmi15_shadow_event"
+    PAIR_PREFIX = "dmi15"
 
     def __init__(
         self,
@@ -31,7 +35,7 @@ class Dmi15ShadowRegistry:
         self.config = config
         self.logger = logger
         self.telemetry_writer = telemetry_writer
-        settings = config.get("instrumentation", {}).get("dmi15_shadow", {})
+        settings = config.get("instrumentation", {}).get(self.SETTINGS_KEY, {})
         self.settings = settings if isinstance(settings, dict) else {}
         self.enabled = bool(self.settings.get("enabled", False))
         self.state_path = project_root / str(
@@ -48,6 +52,7 @@ class Dmi15ShadowRegistry:
         self.evaluated_buckets: set[int] = set()
         self.blocked_same_5m = 0
         self.blocked_capacity = 0
+        self.blocked_spread = 0
         self.signals_passed = 0
         self.max_simultaneous_positions = 0
         self.latest_market_context: Optional[Dict[str, Any]] = None
@@ -80,6 +85,7 @@ class Dmi15ShadowRegistry:
             self._save_state()
             return False
         plus_now, plus_previous, minus_now, minus_previous = values
+        dmi_spread = plus_now - minus_now
         passed = (
             plus_now > plus_previous
             and minus_now < minus_previous
@@ -93,8 +99,12 @@ class Dmi15ShadowRegistry:
             plus_di_15m_ago=plus_previous,
             minus_di_now=minus_now,
             minus_di_15m_ago=minus_previous,
+            dmi_spread=dmi_spread,
         )
         if not passed:
+            self._save_state()
+            return False
+        if not self._passes_additional_entry_gate(bucket, dmi_spread):
             self._save_state()
             return False
         if entry_atr is None or entry_atr <= 0:
@@ -151,15 +161,15 @@ class Dmi15ShadowRegistry:
             position.market_context_exit = deepcopy(self.latest_market_context)
             self._market_context_event(position, "EXIT", position.market_context_exit)
             try:
-                self.ledger.append_closed_dmi15_shadow_trade(position, self.config)
+                getattr(self.ledger, self.LEDGER_APPEND_METHOD)(position, self.config)
             except Exception as exc:
                 self.logger.system(
-                    "dmi15_shadow_ledger_failed",
+                    f"{self.SETTINGS_KEY}_ledger_failed",
                     pair_id=position.pair_id,
                     error=str(exc),
                 )
             self.logger.system(
-                "dmi15_shadow_closed",
+                f"{self.SETTINGS_KEY}_closed",
                 report_strategy=self.STRATEGY,
                 pair_id=position.pair_id,
                 reason=position.exit_reason,
@@ -194,7 +204,7 @@ class Dmi15ShadowRegistry:
         )
         client = PhantomExecutionClient()
         client.set_price(price)
-        pair_id = f"dmi15-{uuid.uuid4().hex[:12]}"
+        pair_id = f"{self.PAIR_PREFIX}-{uuid.uuid4().hex[:12]}"
         position = BotFullExitPosition(
             pair_id=pair_id,
             symbol=str(self.config["symbol"]),
@@ -229,7 +239,7 @@ class Dmi15ShadowRegistry:
             position._trade_event("OPEN", price, 0.0, None, price_source="closed_5m")
         )
         self.logger.system(
-            "dmi15_shadow_opened",
+            f"{self.SETTINGS_KEY}_opened",
             report_strategy=self.STRATEGY,
             pair_id=pair_id,
             admission_bucket_open_time=bucket,
@@ -248,7 +258,7 @@ class Dmi15ShadowRegistry:
         }
         self.logger.decision(payload)
         if self.telemetry_writer:
-            self.telemetry_writer.submit("dmi15_shadow_event", payload)
+            self.telemetry_writer.submit(self.TELEMETRY_STREAM, payload)
 
     def _market_context_event(
         self,
@@ -295,6 +305,7 @@ class Dmi15ShadowRegistry:
         }
         self.blocked_same_5m = int(data.get("blocked_same_5m", 0))
         self.blocked_capacity = int(data.get("blocked_capacity", 0))
+        self.blocked_spread = int(data.get("blocked_spread", 0))
         self.signals_passed = int(data.get("signals_passed", 0))
         self.max_simultaneous_positions = int(data.get("max_simultaneous_positions", 0))
         for item in data.get("positions", []):
@@ -331,6 +342,7 @@ class Dmi15ShadowRegistry:
             ),
             "blocked_same_5m": self.blocked_same_5m,
             "blocked_capacity": self.blocked_capacity,
+            "blocked_spread": self.blocked_spread,
             "signals_passed": self.signals_passed,
             "max_simultaneous_positions": self.max_simultaneous_positions,
             "positions": [item.to_state() for item in self.open_positions],
@@ -338,6 +350,10 @@ class Dmi15ShadowRegistry:
         tmp = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.state_path)
+
+    def _passes_additional_entry_gate(self, bucket: int, dmi_spread: float) -> bool:
+        del bucket, dmi_spread
+        return True
 
 
 def _dmi_values(snapshot: Dict[str, Any]) -> Optional[tuple[float, float, float, float]]:

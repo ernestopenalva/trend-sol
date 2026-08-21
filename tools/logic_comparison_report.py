@@ -17,12 +17,12 @@ from src.trade_ledger import TradeLedger
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare REAL_A, GCR_SHADOW_B and DMI15_SHADOW_C.")
+    parser = argparse.ArgumentParser(description="Compare REAL_A, GCR_SHADOW_B, DMI15_SHADOW_C and DMI15_SPREAD6_SHADOW_D.")
     parser.add_argument("--since")
     parser.add_argument("--until")
     parser.add_argument("--since-field", choices=["opened_at", "closed_at"], default="opened_at")
     parser.add_argument("--profile")
-    parser.add_argument("--strategy", choices=["A", "B", "C", "both", "all"], default="all")
+    parser.add_argument("--strategy", choices=["A", "B", "C", "D", "both", "all"], default="all")
     args = parser.parse_args()
     requested_strategy = args.strategy
     setattr(args, "strategy", "A")
@@ -34,9 +34,14 @@ def main() -> None:
     dmi = _filter(
         TradeLedger(PROJECT_ROOT, PROJECT_ROOT / "data/trades/trades_dmi15_shadow.jsonl").load(), args
     )
+    setattr(args, "strategy", "D")
+    dmi_spread = _filter(
+        TradeLedger(PROJECT_ROOT, PROJECT_ROOT / "data/trades/trades_dmi15_spread_shadow.jsonl").load(), args
+    )
     gcr_state = _json(PROJECT_ROOT / "data/state/gcr_shadow.json")
     dmi_state = _json(PROJECT_ROOT / "data/state/dmi15_shadow.json")
-    print("TREND-SOL | REAL_A vs GCR_SHADOW_B vs DMI15_SHADOW_C")
+    dmi_spread_state = _json(PROJECT_ROOT / "data/state/dmi15_spread_shadow.json")
+    print("TREND-SOL | REAL_A vs GCR_SHADOW_B vs DMI15_SHADOW_C vs DMI15_SPREAD6_SHADOW_D")
     print("strategy | trades | gross | net | fees | avg net | winrate | profit factor | avg age | median age | slots full | max simultaneous | HS | NPE | BE | PL | TRAIL")
     if requested_strategy in ("A", "both", "all"):
         _line("REAL_A", real, 5)
@@ -44,6 +49,8 @@ def main() -> None:
         _line("GCR_SHADOW_B", shadow, 5)
     if requested_strategy in ("C", "all"):
         _line("DMI15_SHADOW_C", dmi, 5)
+    if requested_strategy in ("D", "all"):
+        _line("DMI15_SPREAD6_SHADOW_D", dmi_spread, 5)
     print()
     print(f"REAL_A blocked same 5m | {_count_events(PROJECT_ROOT / 'logs/decisions.jsonl', 'ENTRY_BLOCKED_SAME_5M_CANDLE', args)}")
     print(f"GCR_SHADOW_B blocked same 5m | {_count_events(PROJECT_ROOT / 'data/telemetry/gcr_shadow_events.jsonl', 'ENTRY_BLOCKED_SAME_5M_CANDLE', args)}")
@@ -52,6 +59,10 @@ def main() -> None:
     print(f"DMI15_SHADOW_C blocked same 5m | {_count_events(PROJECT_ROOT / 'data/telemetry/dmi15_shadow_events.jsonl', 'ENTRY_BLOCKED_SAME_5M_CANDLE', args)}")
     print(f"DMI15_SHADOW_C blocked capacity | {_count_events(PROJECT_ROOT / 'data/telemetry/dmi15_shadow_events.jsonl', 'ENTRY_BLOCKED_SHADOW_CAPACITY', args)}")
     print(f"DMI15_SHADOW_C max simultaneous positions | {dmi_state.get('max_simultaneous_positions', 0)} (lifetime state)")
+    print(f"DMI15_SPREAD6_SHADOW_D blocked same 5m | {_count_events(PROJECT_ROOT / 'data/telemetry/dmi15_spread_shadow_events.jsonl', 'ENTRY_BLOCKED_SAME_5M_CANDLE', args)}")
+    print(f"DMI15_SPREAD6_SHADOW_D blocked capacity | {_count_events(PROJECT_ROOT / 'data/telemetry/dmi15_spread_shadow_events.jsonl', 'ENTRY_BLOCKED_SHADOW_CAPACITY', args)}")
+    print(f"DMI15_SPREAD6_SHADOW_D blocked spread<6 | {_count_events(PROJECT_ROOT / 'data/telemetry/dmi15_spread_shadow_events.jsonl', 'ENTRY_BLOCKED_DMI_SPREAD', args)}")
+    print(f"DMI15_SPREAD6_SHADOW_D max simultaneous positions | {dmi_spread_state.get('max_simultaneous_positions', 0)} (lifetime state)")
 
 
 def _line(name: str, records: list[Dict[str, Any]], slots: int) -> None:

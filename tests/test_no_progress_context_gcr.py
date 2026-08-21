@@ -9,6 +9,7 @@ from src.indicators.indicators import dmi_adx
 from src.logging_utils import JsonlLogger
 from src.monitor.entry_engine import Candle, EntryEngine, EntrySignal
 from src.monitor.dmi15_shadow import Dmi15ShadowRegistry
+from src.monitor.dmi15_spread_shadow import Dmi15SpreadShadowRegistry
 from src.monitor.gcr_shadow import GcrShadowRegistry
 from src.monitor.market_context import MarketContextEngine
 from src.no_progress import resolved_no_progress_tolerance
@@ -78,6 +79,8 @@ class NewPackageTests(unittest.TestCase):
             self.assertIsNotNone(context["tf_5m"]["plus_di14_15m_ago"])
             self.assertIsNotNone(context["tf_5m"]["minus_di14_15m_ago"])
             self.assertIsNotNone(context["tf_5m"]["rsi14_15m_ago"])
+            self.assertIsNotNone(context["tf_5m"]["rsi14_sma14"])
+            self.assertIsNone(context["tf_15m"]["rsi14_sma14"])
             before = context["tf_5m"]["ema20"]
             engine.auxiliary_candles["5m"].append(
                 Candle(99_000_000, 99_299_999, 500, 501, 499, 500, 9999, False)
@@ -147,6 +150,44 @@ class NewPackageTests(unittest.TestCase):
             self.assertEqual(records[0]["position_type"], "DMI15_SHADOW")
             self.assertEqual(records[0]["shadow_kind"], "DMI15_SHADOW")
 
+    def test_dmi15_spread_shadow_blocks_only_the_extra_spread_gate(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _context_config()
+            config["risk"]["no_progress"]["enabled"] = False
+            config["instrumentation"]["dmi15_spread_shadow"] = {
+                "enabled": True,
+                "min_di_spread": 6,
+                "state_file": "data/state/dmi15_spread_shadow.json",
+                "ledger_file": "data/trades/trades_dmi15_spread_shadow.jsonl",
+            }
+            shadow = Dmi15SpreadShadowRegistry(root, config, _logger(root))
+            context = {
+                "captured_at": "2026-08-19T12:05:00+00:00",
+                "tf_5m": {
+                    "latest_open_at_ms": 300_000,
+                    "latest_closed_at_ms": 599_999,
+                    "close": 100,
+                    "plus_di14": 20,
+                    "plus_di14_15m_ago": 10,
+                    "minus_di14": 15,
+                    "minus_di14_15m_ago": 17,
+                },
+            }
+            self.assertFalse(shadow.on_closed_5m(context, 0.2, "1m", 14))
+            self.assertEqual(shadow.blocked_spread, 1)
+            self.assertFalse(shadow.open_positions)
+
+            allowed = deepcopy(context)
+            allowed["tf_5m"].update({
+                "latest_open_at_ms": 600_000,
+                "latest_closed_at_ms": 899_999,
+                "plus_di14": 21,
+                "minus_di14": 15,
+            })
+            self.assertTrue(shadow.on_closed_5m(allowed, 0.2, "1m", 14))
+            self.assertEqual(shadow.open_positions[0].shadow_kind, "DMI15_SPREAD6_SHADOW")
+
     def test_restored_position_disables_npe_when_config_disables_it(self) -> None:
         with TemporaryDirectory() as tmp:
             logger = _logger(Path(tmp))
@@ -187,7 +228,7 @@ def _context_config():
         "capital": {"operational_balance_usdt": 100, "trade_size_pct": 20, "max_open_positions": 5},
         "risk": {"hard_stop": {"enabled": True, "stop_pct": 1.5}, "no_progress": {"enabled": True, **_settings()}, "breakeven": {"mode": "atr", "trigger_atr": 3, "offset_atr": 0.1}, "profit_lock": {"mode": "atr", "steps": [{"trigger_atr": 5, "lock_atr": 1.5}]}, "trailing": {"mode": "atr", "activation_atr": 10, "gap_atr": 5}},
         "fees": {"enabled": True, "taker_fee_pct": 0.1}, "ladder": {},
-        "instrumentation": {"enabled": True, "gcr_shadow": {"enabled": True}, "dmi15_shadow": {"enabled": True}, "market_context": {"enabled": True, "slope_lookback_candles": 3, "relative_volume_period": 20}},
+        "instrumentation": {"enabled": True, "gcr_shadow": {"enabled": True}, "dmi15_shadow": {"enabled": True}, "dmi15_spread_shadow": {"enabled": True, "min_di_spread": 6}, "market_context": {"enabled": True, "slope_lookback_candles": 3, "relative_volume_period": 20}},
     }
 
 
