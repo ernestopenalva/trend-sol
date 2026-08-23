@@ -24,6 +24,7 @@ class Dmi15ShadowRegistry:
     LEDGER_APPEND_METHOD = "append_closed_dmi15_shadow_trade"
     TELEMETRY_STREAM = "dmi15_shadow_event"
     PAIR_PREFIX = "dmi15"
+    TRACK_REQUIRED_INDICATOR_UNAVAILABLE = False
 
     def __init__(
         self,
@@ -53,6 +54,9 @@ class Dmi15ShadowRegistry:
         self.blocked_same_5m = 0
         self.blocked_capacity = 0
         self.blocked_spread = 0
+        self.blocked_trajectory = 0
+        self.blocked_rsi_ma = 0
+        self.blocked_required_indicator_unavailable = 0
         self.signals_passed = 0
         self.max_simultaneous_positions = 0
         self.latest_market_context: Optional[Dict[str, Any]] = None
@@ -82,6 +86,10 @@ class Dmi15ShadowRegistry:
         values = _dmi_values(snapshot)
         if values is None:
             self._event("ENTRY_SKIPPED_DMI_UNAVAILABLE", bucket)
+            if self.TRACK_REQUIRED_INDICATOR_UNAVAILABLE:
+                self._record_required_indicator_unavailable(
+                    bucket, ("plus_di14", "minus_di14", "plus_di14_15m_ago", "minus_di14_15m_ago")
+                )
             self._save_state()
             return False
         plus_now, plus_previous, minus_now, minus_previous = values
@@ -104,7 +112,7 @@ class Dmi15ShadowRegistry:
         if not passed:
             self._save_state()
             return False
-        if not self._passes_additional_entry_gate(bucket, dmi_spread):
+        if not self._passes_additional_entry_gate(bucket, dmi_spread, snapshot):
             self._save_state()
             return False
         if entry_atr is None or entry_atr <= 0:
@@ -306,6 +314,11 @@ class Dmi15ShadowRegistry:
         self.blocked_same_5m = int(data.get("blocked_same_5m", 0))
         self.blocked_capacity = int(data.get("blocked_capacity", 0))
         self.blocked_spread = int(data.get("blocked_spread", 0))
+        self.blocked_trajectory = int(data.get("blocked_trajectory", 0))
+        self.blocked_rsi_ma = int(data.get("blocked_rsi_ma", 0))
+        self.blocked_required_indicator_unavailable = int(
+            data.get("blocked_required_indicator_unavailable", 0)
+        )
         self.signals_passed = int(data.get("signals_passed", 0))
         self.max_simultaneous_positions = int(data.get("max_simultaneous_positions", 0))
         for item in data.get("positions", []):
@@ -343,6 +356,9 @@ class Dmi15ShadowRegistry:
             "blocked_same_5m": self.blocked_same_5m,
             "blocked_capacity": self.blocked_capacity,
             "blocked_spread": self.blocked_spread,
+            "blocked_trajectory": self.blocked_trajectory,
+            "blocked_rsi_ma": self.blocked_rsi_ma,
+            "blocked_required_indicator_unavailable": self.blocked_required_indicator_unavailable,
             "signals_passed": self.signals_passed,
             "max_simultaneous_positions": self.max_simultaneous_positions,
             "positions": [item.to_state() for item in self.open_positions],
@@ -351,9 +367,21 @@ class Dmi15ShadowRegistry:
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.state_path)
 
-    def _passes_additional_entry_gate(self, bucket: int, dmi_spread: float) -> bool:
-        del bucket, dmi_spread
+    def _passes_additional_entry_gate(
+        self, bucket: int, dmi_spread: float, snapshot: Dict[str, Any]
+    ) -> bool:
+        del bucket, dmi_spread, snapshot
         return True
+
+    def _record_required_indicator_unavailable(
+        self, bucket: int, required_indicators: tuple[str, ...]
+    ) -> None:
+        self.blocked_required_indicator_unavailable += 1
+        self._event(
+            "ENTRY_SKIPPED_REQUIRED_INDICATOR_UNAVAILABLE",
+            bucket,
+            required_indicators=list(required_indicators),
+        )
 
 
 def _dmi_values(snapshot: Dict[str, Any]) -> Optional[tuple[float, float, float, float]]:

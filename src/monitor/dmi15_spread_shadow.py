@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, Dict
+
 from src.monitor.dmi15_shadow import Dmi15ShadowRegistry
 
 
@@ -13,7 +15,10 @@ class Dmi15SpreadShadowRegistry(Dmi15ShadowRegistry):
     TELEMETRY_STREAM = "dmi15_spread_shadow_event"
     PAIR_PREFIX = "dmi15s6"
 
-    def _passes_additional_entry_gate(self, bucket: int, dmi_spread: float) -> bool:
+    def _passes_additional_entry_gate(
+        self, bucket: int, dmi_spread: float, snapshot: Dict[str, Any]
+    ) -> bool:
+        del snapshot
         minimum = float(self.settings.get("min_di_spread", 6.0))
         if dmi_spread >= minimum:
             return True

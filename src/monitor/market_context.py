@@ -90,6 +90,8 @@ class MarketContextEngine:
             "adx14": _last(adx),
             "plus_di14": _last(plus_di),
             "minus_di14": _last(minus_di),
+            "plus_di14_5m_ago": _lookback(plus_di, 1) if timeframe == "5m" else None,
+            "minus_di14_5m_ago": _lookback(minus_di, 1) if timeframe == "5m" else None,
             "rsi14": _last(rsi14),
             "rsi14_sma14": _last(rsi_ma),
             "plus_di14_15m_ago": _lookback(plus_di, fifteen_minute_lookback),

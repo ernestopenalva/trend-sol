@@ -208,6 +208,24 @@ instrumentation:
     min_di_spread: 6
     state_file: "data/state/dmi15_spread_shadow.json"
     ledger_file: "data/trades/trades_dmi15_spread_shadow.jsonl"
+  dmi15_trajectory_shadow:
+    enabled: true
+    max_open_positions: 5
+    state_file: "data/state/dmi15_trajectory_shadow.json"
+    ledger_file: "data/trades/trades_dmi15_trajectory_shadow.jsonl"
+  dmi15_rsi70_shadow:
+    enabled: true
+    max_open_positions: 5
+    max_rsi_ma: 70
+    state_file: "data/state/dmi15_rsi70_shadow.json"
+    ledger_file: "data/trades/trades_dmi15_rsi70_shadow.jsonl"
+  dmi15_combined_shadow:
+    enabled: true
+    max_open_positions: 5
+    min_di_spread: 6
+    max_rsi_ma: 70
+    state_file: "data/state/dmi15_combined_shadow.json"
+    ledger_file: "data/trades/trades_dmi15_combined_shadow.jsonl"
   market_context:
     enabled: true
     timeframes: ["5m", "15m"]
@@ -429,6 +447,9 @@ instrumentation:
   gcr_shadow_events_file: "data/telemetry/gcr_shadow_events.jsonl"
   dmi15_shadow_events_file: "data/telemetry/dmi15_shadow_events.jsonl"
   dmi15_spread_shadow_events_file: "data/telemetry/dmi15_spread_shadow_events.jsonl"
+  dmi15_trajectory_shadow_events_file: "data/telemetry/dmi15_trajectory_shadow_events.jsonl"
+  dmi15_rsi70_shadow_events_file: "data/telemetry/dmi15_rsi70_shadow_events.jsonl"
+  dmi15_combined_shadow_events_file: "data/telemetry/dmi15_combined_shadow_events.jsonl"
   market_context_events_file: "data/telemetry/market_context_events.jsonl"
 
 console:

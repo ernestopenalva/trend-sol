@@ -46,6 +46,21 @@ class TradeLedger:
     ) -> bool:
         return self._append_closed(position, config, "DMI15_SPREAD_SHADOW")
 
+    def append_closed_dmi15_trajectory_shadow_trade(
+        self, position: BotFullExitPosition, config: Dict[str, Any]
+    ) -> bool:
+        return self._append_closed(position, config, "DMI15_TRAJECTORY_SHADOW")
+
+    def append_closed_dmi15_rsi70_shadow_trade(
+        self, position: BotFullExitPosition, config: Dict[str, Any]
+    ) -> bool:
+        return self._append_closed(position, config, "DMI15_RSI70_SHADOW")
+
+    def append_closed_dmi15_combined_shadow_trade(
+        self, position: BotFullExitPosition, config: Dict[str, Any]
+    ) -> bool:
+        return self._append_closed(position, config, "DMI15_COMBINED_SHADOW")
+
     def _append_closed(
         self,
         position: BotFullExitPosition,

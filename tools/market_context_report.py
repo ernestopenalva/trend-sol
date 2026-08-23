@@ -22,8 +22,11 @@ def main() -> None:
         "B": PROJECT_ROOT / "data/trades/trades_gcr_shadow.jsonl",
         "C": PROJECT_ROOT / "data/trades/trades_dmi15_shadow.jsonl",
         "D": PROJECT_ROOT / "data/trades/trades_dmi15_spread_shadow.jsonl",
+        "E": PROJECT_ROOT / "data/trades/trades_dmi15_trajectory_shadow.jsonl",
+        "F": PROJECT_ROOT / "data/trades/trades_dmi15_rsi70_shadow.jsonl",
+        "G": PROJECT_ROOT / "data/trades/trades_dmi15_combined_shadow.jsonl",
     }
-    labels = {"A": "REAL_A", "B": "GCR_SHADOW_B", "C": "DMI15_SHADOW_C", "D": "DMI15_SPREAD6_SHADOW_D"}
+    labels = {"A": "REAL_A", "B": "GCR_SHADOW_B", "C": "DMI15_SHADOW_C", "D": "DMI15_SPREAD6_SHADOW_D", "E": "DMI15_TRAJECTORY_SHADOW_E", "F": "DMI15_RSI70_SHADOW_F", "G": "DMI15_COMBINED_SHADOW_G"}
     path = paths[args.strategy]
     records = _filter(TradeLedger(PROJECT_ROOT, path).load(), args)
     print("TREND-SOL | market context report")
@@ -58,7 +61,7 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--until")
     parser.add_argument("--since-field", choices=["opened_at", "closed_at"], default="opened_at")
     parser.add_argument("--profile")
-    parser.add_argument("--strategy", choices=["A", "B", "C", "D"], default="A")
+    parser.add_argument("--strategy", choices=["A", "B", "C", "D", "E", "F", "G"], default="A")
     parser.add_argument("--detail", action="store_true")
     return parser.parse_args()
 
@@ -88,9 +91,15 @@ def _tf(value: Any, show_rsi_ma: bool = False) -> str:
         f"S20={_pct(item.get('ema20_slope_pct'))} S50={_pct(item.get('ema50_slope_pct'))} "
         f"ADX={_num(item.get('adx14'))} +DI={_num(item.get('plus_di14'))} "
         f"-DI={_num(item.get('minus_di14'))} {_rsi_move(item)}"
-        f"{' RSI-MA14=' + _num(item.get('rsi14_sma14')) if show_rsi_ma else ''} "
+        f"{' DMI[t/t-1/t-3]=+' + _num(item.get('plus_di14')) + '/' + _num(item.get('plus_di14_5m_ago')) + '/' + _num(item.get('plus_di14_15m_ago')) + ' -' + _num(item.get('minus_di14')) + '/' + _num(item.get('minus_di14_5m_ago')) + '/' + _num(item.get('minus_di14_15m_ago')) + ' spread=' + _num(_spread(item)) + ' RSI-MA14=' + _num(item.get('rsi14_sma14')) if show_rsi_ma else ''} "
         f"RVOL={_num(item.get('relative_volume'))}x"
     )
+
+
+def _spread(item: Dict[str, Any]) -> Optional[float]:
+    plus = _float(item.get("plus_di14"))
+    minus = _float(item.get("minus_di14"))
+    return plus - minus if plus is not None and minus is not None else None
 
 
 def _rsi_move(item: Dict[str, Any]) -> str:
