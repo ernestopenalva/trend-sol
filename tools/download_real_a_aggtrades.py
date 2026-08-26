@@ -29,6 +29,11 @@ ONE_HOUR_MS = 60 * 60 * 1000
 def main() -> None:
     args = _parse_args()
     seeds = load_real_a_seeds(args.ledger, _parse_timestamp(args.since))
+    if args.closed_until:
+        closed_until = _parse_timestamp(args.closed_until)
+        seeds = [seed for seed in seeds if seed.ledger_closed_at <= closed_until]
+        if not seeds:
+            raise ValueError("No seeds remain at or before --closed-until.")
     until = _parse_timestamp(args.until) if args.until else None
     if args.only_validation_grace:
         windows = merge_windows(
@@ -141,6 +146,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ledger", type=Path, default=PROJECT_ROOT / "data" / "trades" / "trades_B.jsonl")
     parser.add_argument("--since", default="2026-08-19T01:05:00-03:00")
     parser.add_argument("--until", help="Optional UTC/offset timestamp to retain post-real-exit ticks for one later variant.")
+    parser.add_argument("--closed-until", help="Freeze the seed set at this ledger closed_at timestamp.")
     parser.add_argument("--validation-grace-seconds", type=float, default=5.0)
     parser.add_argument("--only-validation-grace", action="store_true",
                         help="Append only the small closed_at-to-closed_at+grace windows to an existing output.")
