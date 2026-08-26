@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlencode
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -40,26 +41,46 @@ def main() -> None:
     if args.dry_run:
         return
 
-    trades: dict[int, dict[str, Any]] = {}
-    for start, end in windows:
-        for item in fetch_window(args.base_url, args.symbol, start, end, args.request_pause_seconds):
-            trade_id = int(item["a"])
-            trades[trade_id] = item
+    existing_ids = _existing_trade_ids(args.output)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("w", encoding="utf-8") as handle:
-        for item in sorted(trades.values(), key=lambda value: (int(value["T"]), int(value["a"]))):
-            handle.write(json.dumps(item, separators=(",", ":")) + "\n")
-    print(f"wrote {len(trades)} aggTrades to {args.output}")
+    mode = "a" if args.output.exists() else "w"
+    written = 0
+    try:
+        with args.output.open(mode, encoding="utf-8") as handle:
+            for index, (start, end) in enumerate(windows, start=1):
+                print(f"[{index}/{len(windows)}] {start.isoformat()} -> {end.isoformat()}", flush=True)
+                for item in fetch_window(
+                    args.base_url, args.symbol, start, end, args.request_pause_seconds,
+                    args.timeout_seconds, args.retries, progress_prefix=f"[{index}/{len(windows)}]",
+                ):
+                    trade_id = int(item["a"])
+                    if trade_id in existing_ids:
+                        continue
+                    handle.write(json.dumps(item, separators=(",", ":")) + "\n")
+                    existing_ids.add(trade_id)
+                    written += 1
+                    if written % 1000 == 0:
+                        handle.flush()
+                        print(f"  saved {written} new aggTrades", flush=True)
+    except KeyboardInterrupt:
+        print(f"\nInterrupted safely. Partial data retained in {args.output} ({written} new records this run).", flush=True)
+        raise
+    print(f"complete: {written} new aggTrades; {len(existing_ids)} total in {args.output}")
 
 
-def fetch_window(base_url: str, symbol: str, start: datetime, end: datetime, pause_seconds: float) -> Iterable[dict[str, Any]]:
+def fetch_window(
+    base_url: str, symbol: str, start: datetime, end: datetime, pause_seconds: float,
+    timeout_seconds: float, retries: int, progress_prefix: str,
+) -> Iterable[dict[str, Any]]:
     """Fetch every aggregate trade in an inclusive time window, paginating by id."""
     start_ms = _to_ms(start)
     end_ms = _to_ms(end)
     cursor_ms = start_ms
     while cursor_ms <= end_ms:
         chunk_end = min(cursor_ms + ONE_HOUR_MS - 1, end_ms)
-        batch = _request(base_url, {"symbol": symbol, "startTime": cursor_ms, "endTime": chunk_end, "limit": 1000})
+        print(f"  {progress_prefix} requesting {datetime.fromtimestamp(cursor_ms / 1000, timezone.utc).isoformat()}", flush=True)
+        batch = _request(base_url, {"symbol": symbol, "startTime": cursor_ms, "endTime": chunk_end, "limit": 1000}, timeout_seconds, retries)
+        page = 1
         while batch:
             for item in batch:
                 timestamp = int(item["T"])
@@ -71,7 +92,9 @@ def fetch_window(base_url: str, symbol: str, start: datetime, end: datetime, pau
                 break
             if pause_seconds:
                 time.sleep(pause_seconds)
-            batch = _request(base_url, {"symbol": symbol, "fromId": int(last["a"]) + 1, "limit": 1000})
+            page += 1
+            print(f"  {progress_prefix} requesting continuation page {page} (after aggTrade {last['a']})", flush=True)
+            batch = _request(base_url, {"symbol": symbol, "fromId": int(last["a"]) + 1, "limit": 1000}, timeout_seconds, retries)
         cursor_ms = chunk_end + 1
         if pause_seconds:
             time.sleep(pause_seconds)
@@ -88,13 +111,22 @@ def merge_windows(windows: Iterable[tuple[datetime, datetime]]) -> list[tuple[da
     return merged
 
 
-def _request(base_url: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+def _request(base_url: str, params: dict[str, Any], timeout_seconds: float, retries: int) -> list[dict[str, Any]]:
     url = f"{base_url.rstrip('/')}/api/v3/aggTrades?{urlencode(params)}"
-    with urlopen(url, timeout=30) as response:
-        value = json.loads(response.read())
-    if not isinstance(value, list):
-        raise ValueError(f"Unexpected Binance response: {value}")
-    return [item for item in value if isinstance(item, dict)]
+    for attempt in range(1, retries + 2):
+        try:
+            with urlopen(url, timeout=timeout_seconds) as response:
+                value = json.loads(response.read())
+            if not isinstance(value, list):
+                raise ValueError(f"Unexpected Binance response: {value}")
+            return [item for item in value if isinstance(item, dict)]
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+            if attempt > retries:
+                raise RuntimeError(f"Binance request failed after {attempt} attempts: {exc}") from exc
+            delay = min(30.0, 2.0 ** (attempt - 1))
+            print(f"  request failed ({exc}); retry {attempt}/{retries} in {delay:.0f}s", flush=True)
+            time.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -106,6 +138,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default="https://data-api.binance.vision")
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "data" / "analysis" / "solusdt_aggtrades_real_a_validation.jsonl")
     parser.add_argument("--request-pause-seconds", type=float, default=0.05)
+    parser.add_argument("--timeout-seconds", type=float, default=20.0)
+    parser.add_argument("--retries", type=int, default=4)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -117,6 +151,21 @@ def _parse_timestamp(value: str) -> datetime:
 
 def _to_ms(value: datetime) -> int:
     return int(value.timestamp() * 1000)
+
+
+def _existing_trade_ids(path: Path) -> set[int]:
+    if not path.exists():
+        return set()
+    output = set()
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                item = json.loads(line)
+                output.add(int(item["a"]))
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+    print(f"resuming from {len(output)} existing aggTrades in {path}", flush=True)
+    return output
 
 
 if __name__ == "__main__":

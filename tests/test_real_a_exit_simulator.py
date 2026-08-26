@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import tempfile
 import unittest
 
-from tools.download_real_a_aggtrades import merge_windows
+from tools.download_real_a_aggtrades import _existing_trade_ids, merge_windows
 from tools.real_a_exit_simulator import Seed, Tick, run_simulation
 
 
@@ -38,3 +40,9 @@ class RealAExitSimulatorTests(unittest.TestCase):
             (start + timedelta(minutes=1), start + timedelta(minutes=3)),
         ])
         self.assertEqual(windows, [(start, start + timedelta(minutes=3))])
+
+    def test_ignores_invalid_rows_when_resuming(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ticks.jsonl"
+            path.write_text('{"a": 12}\nnot-json\n{"a":"13"}\n', encoding="utf-8")
+            self.assertEqual(_existing_trade_ids(path), {12, 13})
