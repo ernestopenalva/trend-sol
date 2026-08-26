@@ -88,7 +88,7 @@ def main() -> None:
     variant_raw = _read_yaml(args.variant)
     _validate_variant(variant_raw)
     variant_config = effective_config(_deep_merge(raw_config, variant_raw))
-    variant = run_simulation(seeds, ticks, _exit_config(variant_config))
+    variant = run_simulation(seeds, ticks, _exit_config(variant_config), stop_at_ledger_close=False)
     print("\nSINGLE VARIANT (read-only; no parameter sweep)")
     _print_variant(baseline, variant)
 
@@ -137,7 +137,9 @@ def load_aggtrades(path: Path) -> list[Tick]:
     return sorted(ticks, key=lambda item: item.timestamp)
 
 
-def run_simulation(seeds: Iterable[Seed], ticks: list[Tick], exit_config: dict[str, Any]) -> list[dict[str, Any]]:
+def run_simulation(
+    seeds: Iterable[Seed], ticks: list[Tick], exit_config: dict[str, Any], *, stop_at_ledger_close: bool = True,
+) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for seed in seeds:
         position = BotFullExitPosition(
@@ -153,6 +155,8 @@ def run_simulation(seeds: Iterable[Seed], ticks: list[Tick], exit_config: dict[s
         for tick in ticks:
             if tick.timestamp < seed.opened_at:
                 continue
+            if stop_at_ledger_close and tick.timestamp > seed.ledger_closed_at:
+                break
             result = position.on_tick(tick.price, market_ts=tick.timestamp.isoformat())
             if result is not None:
                 trigger_at = tick.timestamp
@@ -210,12 +214,22 @@ def _exit_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validate_coverage(seeds: list[Seed], ticks: list[Tick], max_gap_seconds: float) -> None:
-    if ticks[0].timestamp > min(seed.opened_at for seed in seeds):
-        raise ValueError("aggTrade file begins after the first seed; coverage before entries is required.")
-    for previous, current in zip(ticks, ticks[1:]):
-        gap = (current.timestamp - previous.timestamp).total_seconds()
-        if gap > max_gap_seconds:
-            raise ValueError(f"aggTrade coverage gap of {gap:.3f}s exceeds --max-gap-seconds={max_gap_seconds}.")
+    for seed in seeds:
+        window = [tick for tick in ticks if seed.opened_at <= tick.timestamp <= seed.ledger_closed_at]
+        if not window:
+            raise ValueError(f"No aggTrade coverage for {seed.pair_id}.")
+        start_gap = (window[0].timestamp - seed.opened_at).total_seconds()
+        end_gap = (seed.ledger_closed_at - window[-1].timestamp).total_seconds()
+        if start_gap > max_gap_seconds or end_gap > max_gap_seconds:
+            raise ValueError(
+                f"aggTrade coverage boundary gap for {seed.pair_id}: start={start_gap:.3f}s end={end_gap:.3f}s."
+            )
+        for previous, current in zip(window, window[1:]):
+            gap = (current.timestamp - previous.timestamp).total_seconds()
+            if gap > max_gap_seconds:
+                raise ValueError(
+                    f"aggTrade coverage gap for {seed.pair_id} of {gap:.3f}s exceeds --max-gap-seconds={max_gap_seconds}."
+                )
 
 
 def _validate_variant(value: dict[str, Any]) -> None:

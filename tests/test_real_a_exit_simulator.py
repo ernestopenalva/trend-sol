@@ -1,6 +1,7 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import unittest
 
+from tools.download_real_a_aggtrades import merge_windows
 from tools.real_a_exit_simulator import Seed, Tick, run_simulation
 
 
@@ -29,3 +30,11 @@ class RealAExitSimulatorTests(unittest.TestCase):
         self.assertTrue(result["reason_match"])
         self.assertEqual(result["simulated_trigger_price"], 100.0)
         self.assertEqual(result["trigger_at"], ticks[1].timestamp)
+
+    def test_merges_overlapping_download_windows(self) -> None:
+        start = datetime(2026, 8, 19, tzinfo=timezone.utc)
+        windows = merge_windows([
+            (start, start + timedelta(minutes=2)),
+            (start + timedelta(minutes=1), start + timedelta(minutes=3)),
+        ])
+        self.assertEqual(windows, [(start, start + timedelta(minutes=3))])
