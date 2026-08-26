@@ -30,10 +30,17 @@ def main() -> None:
     args = _parse_args()
     seeds = load_real_a_seeds(args.ledger, _parse_timestamp(args.since))
     until = _parse_timestamp(args.until) if args.until else None
-    windows = merge_windows(
-        (seed.opened_at, max(seed.ledger_closed_at, until) if until is not None else seed.ledger_closed_at)
-        for seed in seeds
-    )
+    if args.only_validation_grace:
+        windows = merge_windows(
+            (seed.ledger_closed_at, seed.ledger_closed_at + timedelta(seconds=args.validation_grace_seconds))
+            for seed in seeds
+        )
+    else:
+        windows = merge_windows(
+            (seed.opened_at, max(seed.ledger_closed_at + timedelta(seconds=args.validation_grace_seconds), until)
+             if until is not None else seed.ledger_closed_at + timedelta(seconds=args.validation_grace_seconds))
+            for seed in seeds
+        )
     print(f"REAL_A validation seeds: {len(seeds)}")
     print(f"download windows: {len(windows)}")
     for start, end in windows:
@@ -134,6 +141,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ledger", type=Path, default=PROJECT_ROOT / "data" / "trades" / "trades_B.jsonl")
     parser.add_argument("--since", default="2026-08-19T01:05:00-03:00")
     parser.add_argument("--until", help="Optional UTC/offset timestamp to retain post-real-exit ticks for one later variant.")
+    parser.add_argument("--validation-grace-seconds", type=float, default=5.0)
+    parser.add_argument("--only-validation-grace", action="store_true",
+                        help="Append only the small closed_at-to-closed_at+grace windows to an existing output.")
     parser.add_argument("--symbol", default="SOLUSDT")
     parser.add_argument("--base-url", default="https://data-api.binance.vision")
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "data" / "analysis" / "solusdt_aggtrades_real_a_validation.jsonl")

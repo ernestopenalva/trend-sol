@@ -8,12 +8,13 @@ aggTrade timestamp with the ledger's closed_at (the closest persisted surrogate)
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import statistics
 import sys
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -71,7 +72,8 @@ def main() -> None:
     config = effective_config(raw_config)
     seeds = load_real_a_seeds(args.ledger, _parse_timestamp(args.since))
     baseline = run_simulation_stream(
-        seeds, iter_aggtrades(args.aggtrades), _exit_config(config), args.max_gap_seconds, progress=True,
+        seeds, iter_aggtrade_files(args.aggtrades), _exit_config(config), args.max_gap_seconds,
+        validation_grace_seconds=args.validation_grace_seconds, progress=True,
     )
     _print_validation(baseline)
     matched = sum(item["reason_match"] for item in baseline)
@@ -88,8 +90,8 @@ def main() -> None:
     _validate_variant(variant_raw)
     variant_config = effective_config(_deep_merge(raw_config, variant_raw))
     variant = run_simulation_stream(
-        seeds, iter_aggtrades(args.aggtrades), _exit_config(variant_config), args.max_gap_seconds,
-        stop_at_ledger_close=False, progress=True,
+        seeds, iter_aggtrade_files(args.aggtrades), _exit_config(variant_config), args.max_gap_seconds,
+        validation_grace_seconds=args.validation_grace_seconds, stop_at_ledger_close=False, progress=True,
     )
     print("\nSINGLE VARIANT (read-only; no parameter sweep)")
     _print_variant(baseline, variant)
@@ -153,6 +155,26 @@ def iter_aggtrades(path: Path) -> Iterable[Tick]:
         raise ValueError("No aggTrade ticks found. Expected JSONL with p/price and T/timestamp/ts.")
 
 
+def iter_aggtrade_files(paths: Iterable[Path]) -> Iterable[Tick]:
+    """Merge independently chronological aggTrade files without loading either into memory."""
+    iterators = [iter(iter_aggtrades(path)) for path in paths]
+    heap: list[tuple[datetime, int, Tick]] = []
+    for index, iterator in enumerate(iterators):
+        try:
+            tick = next(iterator)
+        except StopIteration:
+            continue
+        heapq.heappush(heap, (tick.timestamp, index, tick))
+    while heap:
+        _timestamp, index, tick = heapq.heappop(heap)
+        yield tick
+        try:
+            next_tick = next(iterators[index])
+        except StopIteration:
+            continue
+        heapq.heappush(heap, (next_tick.timestamp, index, next_tick))
+
+
 def run_simulation(
     seeds: Iterable[Seed], ticks: list[Tick], exit_config: dict[str, Any], *, stop_at_ledger_close: bool = True,
     progress: bool = False,
@@ -193,7 +215,7 @@ def run_simulation(
 
 def run_simulation_stream(
     seeds: Iterable[Seed], ticks: Iterable[Tick], exit_config: dict[str, Any], max_gap_seconds: float, *,
-    stop_at_ledger_close: bool = True, progress: bool = False,
+    validation_grace_seconds: float = 0.0, stop_at_ledger_close: bool = True, progress: bool = False,
 ) -> list[dict[str, Any]]:
     """Single-pass, bounded-memory version used for multi-million-record JSONL files."""
     ordered = sorted(seeds, key=lambda item: item.opened_at)
@@ -216,8 +238,9 @@ def run_simulation_stream(
             next_seed = next(pending, None)
 
         for pair_id, (seed, last_tick) in list(coverage.items()):
-            if tick.timestamp > seed.ledger_closed_at:
-                _finish_coverage(seed, last_tick, max_gap_seconds)
+            validation_end = seed.ledger_closed_at + timedelta(seconds=validation_grace_seconds)
+            if tick.timestamp > validation_end:
+                _finish_coverage(seed, last_tick, max_gap_seconds, validation_end)
                 del coverage[pair_id]
                 continue
             if last_tick is None:
@@ -229,7 +252,7 @@ def run_simulation_stream(
 
         if stop_at_ledger_close:
             for pair_id, (seed, _position) in list(active.items()):
-                if tick.timestamp > seed.ledger_closed_at:
+                if tick.timestamp > seed.ledger_closed_at + timedelta(seconds=validation_grace_seconds):
                     output[pair_id] = _simulation_row(seed, None, None)
                     del active[pair_id]
 
@@ -243,7 +266,7 @@ def run_simulation_stream(
             print(f"simulation progress: {processed} ticks | active={len(active)} | resolved={len(output)}", flush=True)
 
     for seed, last_tick in coverage.values():
-        _finish_coverage(seed, last_tick, max_gap_seconds)
+        _finish_coverage(seed, last_tick, max_gap_seconds, seed.ledger_closed_at + timedelta(seconds=validation_grace_seconds))
     for seed, _position in active.values():
         output[seed.pair_id] = _simulation_row(seed, None, None)
     while next_seed is not None:
@@ -252,10 +275,10 @@ def run_simulation_stream(
     return [output[seed.pair_id] for seed in ordered]
 
 
-def _finish_coverage(seed: Seed, last_tick: datetime | None, max_gap_seconds: float) -> None:
+def _finish_coverage(seed: Seed, last_tick: datetime | None, max_gap_seconds: float, validation_end: datetime) -> None:
     if last_tick is None:
         raise ValueError(f"No aggTrade coverage for {seed.pair_id}.")
-    if (seed.ledger_closed_at - last_tick).total_seconds() > max_gap_seconds:
+    if (validation_end - last_tick).total_seconds() > max_gap_seconds:
         raise ValueError(f"aggTrade coverage ends too early for {seed.pair_id}.")
 
 
@@ -352,9 +375,12 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Read-only REAL_A exit-ladder simulator over recorded aggTrade JSONL.")
     parser.add_argument("--ledger", type=Path, default=PROJECT_ROOT / "data" / "trades" / "trades_B.jsonl")
     parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "config" / "config.yaml")
-    parser.add_argument("--aggtrades", type=Path, required=True, help="Raw aggTrade JSONL: p/price and T/timestamp/ts.")
+    parser.add_argument("--aggtrades", type=Path, required=True, nargs="+",
+                        help="One or more chronological raw aggTrade JSONLs: p/price and T/timestamp/ts.")
     parser.add_argument("--since", default="2026-08-19T01:05:00-03:00")
     parser.add_argument("--max-gap-seconds", type=float, default=30.0)
+    parser.add_argument("--validation-grace-seconds", type=float, default=5.0,
+                        help="Extra ticks after ledger closed_at for its second-level timestamp precision.")
     parser.add_argument("--variant", type=Path, help="Optional single YAML overlay; only runs after >=95%% baseline reason agreement.")
     return parser.parse_args()
 

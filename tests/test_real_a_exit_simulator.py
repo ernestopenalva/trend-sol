@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from tools.download_real_a_aggtrades import _existing_trade_ids, merge_windows
-from tools.real_a_exit_simulator import Seed, Tick, run_simulation, run_simulation_stream
+from tools.real_a_exit_simulator import Seed, Tick, iter_aggtrade_files, run_simulation, run_simulation_stream
 
 
 class RealAExitSimulatorTests(unittest.TestCase):
@@ -37,6 +37,18 @@ class RealAExitSimulatorTests(unittest.TestCase):
         self.assertTrue(streamed["reason_match"])
         self.assertEqual(streamed["trigger_at"], ticks[1].timestamp)
 
+        late_tick = Tick(datetime(2026, 8, 19, 0, 0, 3, 500000, tzinfo=timezone.utc), 100.0)
+        grace_seed = Seed(
+            pair_id="late", symbol="SOLUSDT", opened_at=seed.opened_at, entry_price=100.0, entry_atr=1.0,
+            ledger_reason="BREAKEVEN", ledger_trigger_price=100.0,
+            ledger_closed_at=datetime(2026, 8, 19, 0, 0, 3, tzinfo=timezone.utc),
+            no_progress_enabled=False, no_progress_tolerance_seconds=None, no_progress_tolerance_source=None,
+        )
+        with_grace = run_simulation_stream(
+            [grace_seed], iter([ticks[0], late_tick]), config, max_gap_seconds=5, validation_grace_seconds=1,
+        )[0]
+        self.assertTrue(with_grace["reason_match"])
+
     def test_merges_overlapping_download_windows(self) -> None:
         start = datetime(2026, 8, 19, tzinfo=timezone.utc)
         windows = merge_windows([
@@ -50,3 +62,11 @@ class RealAExitSimulatorTests(unittest.TestCase):
             path = Path(directory) / "ticks.jsonl"
             path.write_text('{"a": 12}\nnot-json\n{"a":"13"}\n', encoding="utf-8")
             self.assertEqual(_existing_trade_ids(path), {12, 13})
+
+    def test_merges_multiple_aggtrade_files_chronologically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "first.jsonl"
+            second = Path(directory) / "second.jsonl"
+            first.write_text('{"p":"1","T":2000}\n', encoding="utf-8")
+            second.write_text('{"p":"2","T":1000}\n', encoding="utf-8")
+            self.assertEqual([item.price for item in iter_aggtrade_files([first, second])], [2.0, 1.0])
