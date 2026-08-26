@@ -5,9 +5,14 @@ import argparse
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
 from typing import Iterable
 
 import yaml
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config_profiles import effective_config
 from src.console_utils import BRASILIA_TZ
@@ -15,7 +20,6 @@ from tools.real_a_exit_ladder_triage import ARMS, Outcome, _arm_configs, _fmt_pf
 from tools.real_a_exit_simulator import iter_aggtrade_files, load_real_a_seeds
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SPLIT_AT = datetime.fromisoformat("2026-08-22T22:06:00-03:00").astimezone(timezone.utc)
 SLOT_LIMIT = 5
 
