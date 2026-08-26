@@ -70,10 +70,9 @@ def main() -> None:
     raw_config = _read_yaml(args.config)
     config = effective_config(raw_config)
     seeds = load_real_a_seeds(args.ledger, _parse_timestamp(args.since))
-    ticks = load_aggtrades(args.aggtrades)
-    _validate_coverage(seeds, ticks, args.max_gap_seconds)
-
-    baseline = run_simulation(seeds, ticks, _exit_config(config), progress=True)
+    baseline = run_simulation_stream(
+        seeds, iter_aggtrades(args.aggtrades), _exit_config(config), args.max_gap_seconds, progress=True,
+    )
     _print_validation(baseline)
     matched = sum(item["reason_match"] for item in baseline)
     agreement = matched / len(baseline) if baseline else 0.0
@@ -88,7 +87,10 @@ def main() -> None:
     variant_raw = _read_yaml(args.variant)
     _validate_variant(variant_raw)
     variant_config = effective_config(_deep_merge(raw_config, variant_raw))
-    variant = run_simulation(seeds, ticks, _exit_config(variant_config), stop_at_ledger_close=False, progress=True)
+    variant = run_simulation_stream(
+        seeds, iter_aggtrades(args.aggtrades), _exit_config(variant_config), args.max_gap_seconds,
+        stop_at_ledger_close=False, progress=True,
+    )
     print("\nSINGLE VARIANT (read-only; no parameter sweep)")
     _print_variant(baseline, variant)
 
@@ -125,16 +127,30 @@ def load_real_a_seeds(ledger_path: Path, since: datetime) -> list[Seed]:
 
 
 def load_aggtrades(path: Path) -> list[Tick]:
-    ticks: list[Tick] = []
-    for item in _read_jsonl(path):
-        payload = item.get("data") if isinstance(item.get("data"), dict) else item
-        price = _as_float(payload.get("p") or payload.get("price"))
-        timestamp = _parse_timestamp(payload.get("T") or payload.get("timestamp") or payload.get("ts"))
-        if price is not None and price > 0 and timestamp is not None:
-            ticks.append(Tick(timestamp, price))
+    ticks = list(iter_aggtrades(path))
     if not ticks:
         raise ValueError("No aggTrade ticks found. Expected JSONL with p/price and T/timestamp/ts.")
     return sorted(ticks, key=lambda item: item.timestamp)
+
+
+def iter_aggtrades(path: Path) -> Iterable[Tick]:
+    found = False
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            payload = item.get("data") if isinstance(item.get("data"), dict) else item
+            price = _as_float(payload.get("p") or payload.get("price"))
+            timestamp = _parse_timestamp(payload.get("T") or payload.get("timestamp") or payload.get("ts"))
+            if price is not None and price > 0 and timestamp is not None:
+                found = True
+                yield Tick(timestamp, price)
+    if not found:
+        raise ValueError("No aggTrade ticks found. Expected JSONL with p/price and T/timestamp/ts.")
 
 
 def run_simulation(
@@ -173,6 +189,74 @@ def run_simulation(
         output[next_seed.pair_id] = _simulation_row(next_seed, None, None)
         next_seed = next(pending, None)
     return [output[seed.pair_id] for seed in ordered]
+
+
+def run_simulation_stream(
+    seeds: Iterable[Seed], ticks: Iterable[Tick], exit_config: dict[str, Any], max_gap_seconds: float, *,
+    stop_at_ledger_close: bool = True, progress: bool = False,
+) -> list[dict[str, Any]]:
+    """Single-pass, bounded-memory version used for multi-million-record JSONL files."""
+    ordered = sorted(seeds, key=lambda item: item.opened_at)
+    pending = iter(ordered)
+    next_seed = next(pending, None)
+    active: dict[str, tuple[Seed, BotFullExitPosition]] = {}
+    coverage: dict[str, tuple[Seed, datetime | None]] = {}
+    output: dict[str, dict[str, Any]] = {}
+    previous_timestamp: datetime | None = None
+    processed = 0
+
+    for tick in ticks:
+        processed += 1
+        if previous_timestamp is not None and tick.timestamp < previous_timestamp:
+            raise ValueError("aggTrade file is not chronological; rerun the downloader before simulation.")
+        previous_timestamp = tick.timestamp
+        while next_seed is not None and next_seed.opened_at <= tick.timestamp:
+            active[next_seed.pair_id] = (next_seed, _new_position(next_seed, exit_config))
+            coverage[next_seed.pair_id] = (next_seed, None)
+            next_seed = next(pending, None)
+
+        for pair_id, (seed, last_tick) in list(coverage.items()):
+            if tick.timestamp > seed.ledger_closed_at:
+                _finish_coverage(seed, last_tick, max_gap_seconds)
+                del coverage[pair_id]
+                continue
+            if last_tick is None:
+                if (tick.timestamp - seed.opened_at).total_seconds() > max_gap_seconds:
+                    raise ValueError(f"aggTrade coverage starts too late for {seed.pair_id}.")
+            elif (tick.timestamp - last_tick).total_seconds() > max_gap_seconds:
+                raise ValueError(f"aggTrade coverage gap for {seed.pair_id} exceeds --max-gap-seconds={max_gap_seconds}.")
+            coverage[pair_id] = (seed, tick.timestamp)
+
+        if stop_at_ledger_close:
+            for pair_id, (seed, _position) in list(active.items()):
+                if tick.timestamp > seed.ledger_closed_at:
+                    output[pair_id] = _simulation_row(seed, None, None)
+                    del active[pair_id]
+
+        for pair_id, (seed, position) in list(active.items()):
+            result = position.on_tick(tick.price, market_ts=tick.timestamp.isoformat())
+            if result is not None:
+                output[pair_id] = _simulation_row(seed, result, tick.timestamp)
+                del active[pair_id]
+
+        if progress and processed % 100_000 == 0:
+            print(f"simulation progress: {processed} ticks | active={len(active)} | resolved={len(output)}", flush=True)
+
+    for seed, last_tick in coverage.values():
+        _finish_coverage(seed, last_tick, max_gap_seconds)
+    for seed, _position in active.values():
+        output[seed.pair_id] = _simulation_row(seed, None, None)
+    while next_seed is not None:
+        output[next_seed.pair_id] = _simulation_row(next_seed, None, None)
+        next_seed = next(pending, None)
+    return [output[seed.pair_id] for seed in ordered]
+
+
+def _finish_coverage(seed: Seed, last_tick: datetime | None, max_gap_seconds: float) -> None:
+    if last_tick is None:
+        raise ValueError(f"No aggTrade coverage for {seed.pair_id}.")
+    if (seed.ledger_closed_at - last_tick).total_seconds() > max_gap_seconds:
+        raise ValueError(f"aggTrade coverage ends too early for {seed.pair_id}.")
 
 
 def _new_position(seed: Seed, exit_config: dict[str, Any]) -> BotFullExitPosition:

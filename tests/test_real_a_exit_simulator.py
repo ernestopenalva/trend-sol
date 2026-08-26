@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from tools.download_real_a_aggtrades import _existing_trade_ids, merge_windows
-from tools.real_a_exit_simulator import Seed, Tick, run_simulation
+from tools.real_a_exit_simulator import Seed, Tick, run_simulation, run_simulation_stream
 
 
 class RealAExitSimulatorTests(unittest.TestCase):
@@ -32,6 +32,10 @@ class RealAExitSimulatorTests(unittest.TestCase):
         self.assertTrue(result["reason_match"])
         self.assertEqual(result["simulated_trigger_price"], 100.0)
         self.assertEqual(result["trigger_at"], ticks[1].timestamp)
+
+        streamed = run_simulation_stream([seed], iter(ticks), config, max_gap_seconds=5)[0]
+        self.assertTrue(streamed["reason_match"])
+        self.assertEqual(streamed["trigger_at"], ticks[1].timestamp)
 
     def test_merges_overlapping_download_windows(self) -> None:
         start = datetime(2026, 8, 19, tzinfo=timezone.utc)
