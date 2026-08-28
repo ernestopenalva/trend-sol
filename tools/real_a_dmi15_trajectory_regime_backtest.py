@@ -129,7 +129,7 @@ def main() -> None:
         results: dict[str, ReplayResult] = {}
         for arm in ARMS:
             print(f"Replaying {regime.name} arm {arm} ({len(signals[arm])} raw signals)...", flush=True)
-            results[arm] = run_universe(name=f"{regime.name}_{arm}", lookback=3, config=config, signals=signals[arm], execution_candles=candles["1m"], start_ms=start_ms, end_ms=end_ms, intrabar_path=path, round_trip_spread_bps=spread)
+            results[arm] = run_universe(name=f"{regime.name}_{arm}", lookback=3, config=_arm_config(config, arm), signals=signals[arm], execution_candles=candles["1m"], start_ms=start_ms, end_ms=end_ms, intrabar_path=path, round_trip_spread_bps=spread)
         all_results[regime.name], all_signals[regime.name], all_e_blocks[regime.name] = results, signals, e_blocks
         _print_regime(regime, results, signals, e_blocks)
     _print_final(selected, all_results)
@@ -184,7 +184,7 @@ def _print_validations(args: argparse.Namespace, config: Dict[str, Any], candles
         start_ms, end_ms = int(start.timestamp() * 1000), int(end.timestamp() * 1000) - 1
         print(f"validating {arm} signal reproduction...", flush=True)
         signals, _e_blocks = _signals(config, candles, start_ms, end_ms, label=f"validation-{arm}")
-        replay = run_universe(name=f"VALIDATION_{arm}", lookback=3, config=config, signals=signals[arm], execution_candles=candles["1m"], start_ms=start_ms, end_ms=end_ms, intrabar_path=path, round_trip_spread_bps=spread)
+        replay = run_universe(name=f"VALIDATION_{arm}", lookback=3, config=_arm_config(config, arm), signals=signals[arm], execution_candles=candles["1m"], start_ms=start_ms, end_ms=end_ms, intrabar_path=path, round_trip_spread_bps=spread)
         records = TradeLedger(PROJECT_ROOT, ledgers[arm]).load()
         if arm == "A":
             observed = [item for item in real_bot_b_records(records, args.profile) if start_ms <= _record_ms(item) < end_ms]
@@ -200,6 +200,14 @@ def _shadow_ledger(config: Dict[str, Any], key: str, default: str) -> Path:
     settings = config.get("instrumentation", {}).get(key, {})
     value = settings.get("ledger_file", default) if isinstance(settings, dict) else default
     return PROJECT_ROOT / str(value)
+
+
+def _arm_config(config: Dict[str, Any], arm: str) -> Dict[str, Any]:
+    """C/E registries have no entry-spacing gate; preserve their runtime admission."""
+    output = deepcopy(config)
+    if arm in {"C", "E"}:
+        output.setdefault("entry", {})["entry_spacing_atr"] = 0.0
+    return output
 
 
 def _print_regime(regime: Regime, results: dict[str, ReplayResult], signals: dict[str, list[SignalEvent]], e_blocks: int) -> None:

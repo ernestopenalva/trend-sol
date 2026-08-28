@@ -23,3 +23,4 @@ Evento: Criada ferramenta read-only de backtest independente REAL_A/Shadow-C/Sha
 Evento: Adicionada opção explícita de diagnóstico local para pular somente a validação forward do backtest read-only REAL_A/Shadow-C/Shadow-E; a execução padrão continua validando A/C/E contra os ledgers, sem alterar runtime, configuração ou shadows.
 Evento: Adicionado progresso por blocos de candles à geração read-only de sinais REAL_A/Shadow-C/Shadow-E para observabilidade do backtest, sem alterar regras, runtime, configuração ou shadows.
 Evento: Restringida a contagem read-only de bloqueios de trajetória do Shadow-E à janela de regime ou validação solicitada, excluindo apenas o warmup técnico, sem alterar regras, runtime, configuração ou shadows.
+Evento: Corrigida a admissão read-only dos braços Shadow-C e Shadow-E para não aplicar entry_spacing_atr, pois esses registries não possuem regra de spacing no runtime; não altera runtime, configuração ou shadows.
