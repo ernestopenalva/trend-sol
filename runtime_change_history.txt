@@ -32,3 +32,4 @@ Evento: Adicionados DMI15_TRAJECTORY_CONTEXT_SHADOW e SLOW_GE_CONTEXT_SHADOW, am
 Evento: Adicionado relatório de forward exclusivo da nova coorte REAL_A versus os dois context shadows, mantendo o histórico e os relatórios dos shadows aposentados separados.
 Evento: Corrigido o relatório de forward da nova coorte para ler as posições abertas reais em data/state/open_positions.json; contadores exclusivos de contexto não são mais apresentados como zero para REAL_A.
 Evento: Corrigida a contagem de posições abertas REAL_A no relatório da nova coorte para excluir phantoms, que usam internamente label B mas não são posições reais nem ocupam slots.
+Evento: Corrigida a exclusão de phantoms no relatório da nova coorte para aplicá-la somente a REAL_A; posições virtuais dos context shadows continuam sendo contadas em seus próprios braços.

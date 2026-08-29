@@ -84,13 +84,7 @@ def _line(name: str, records: list[dict[str, Any]], state: Any, *, real_a: bool)
     gross, net, ages = [item for item in gross if item is not None], [item for item in net if item is not None], [item for item in ages if item is not None]
     reasons = Counter(str(item.get("exit_reason") or "UNKNOWN") for item in records)
     count = len(records)
-    positions = state if isinstance(state, list) else state.get("positions", [])
-    open_positions = [
-        item for item in positions
-        if item.get("status") == "OPEN"
-        and not item.get("phantom", False)
-        and (not real_a or item.get("label") == "B")
-    ]
+    open_positions = _open_positions(state, real_a=real_a)
     counters = ("- | - | - | - | - | -") if real_a else " | ".join(
         str(state.get(key, 0))
         for key in ("blocked_context", "blocked_context_unavailable", "blocked_capacity", "blocked_same_5m", "blocked_spacing", "max_simultaneous_positions")
@@ -110,6 +104,16 @@ def _load_state(path: Path) -> Any:
         return data if isinstance(data, (dict, list)) else {}
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _open_positions(state: Any, *, real_a: bool) -> list[dict[str, Any]]:
+    positions = state if isinstance(state, list) else state.get("positions", [])
+    return [
+        item for item in positions
+        if item.get("status") == "OPEN"
+        and (not real_a or not item.get("phantom", False))
+        and (not real_a or item.get("label") == "B")
+    ]
 
 
 def _number(value: Any) -> float | None:
