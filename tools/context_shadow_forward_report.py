@@ -87,7 +87,9 @@ def _line(name: str, records: list[dict[str, Any]], state: Any, *, real_a: bool)
     positions = state if isinstance(state, list) else state.get("positions", [])
     open_positions = [
         item for item in positions
-        if item.get("status") == "OPEN" and (not real_a or item.get("label") == "B")
+        if item.get("status") == "OPEN"
+        and not item.get("phantom", False)
+        and (not real_a or item.get("label") == "B")
     ]
     counters = ("- | - | - | - | - | -") if real_a else " | ".join(
         str(state.get(key, 0))

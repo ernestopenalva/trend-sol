@@ -31,3 +31,4 @@ Evento: Iniciada nova coorte de forward: aposentados para novas entradas GCR e s
 Evento: Adicionados DMI15_TRAJECTORY_CONTEXT_SHADOW e SLOW_GE_CONTEXT_SHADOW, ambos independentes e com o pipeline REAL_A completo após autorização contextual, além de telemetria EMA20/50/100 exclusivamente observacional em entradas; REAL_A, ladder A, sizing, fees e gates não foram alterados.
 Evento: Adicionado relatório de forward exclusivo da nova coorte REAL_A versus os dois context shadows, mantendo o histórico e os relatórios dos shadows aposentados separados.
 Evento: Corrigido o relatório de forward da nova coorte para ler as posições abertas reais em data/state/open_positions.json; contadores exclusivos de contexto não são mais apresentados como zero para REAL_A.
+Evento: Corrigida a contagem de posições abertas REAL_A no relatório da nova coorte para excluir phantoms, que usam internamente label B mas não são posições reais nem ocupam slots.
