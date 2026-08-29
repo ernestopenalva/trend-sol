@@ -73,7 +73,7 @@ class NewPackageTests(unittest.TestCase):
             engine.auxiliary_candles["5m"] = candles
             engine.trend_candles = candles
             context = MarketContextEngine(engine, _context_config()).refresh()
-            expected = {"ema20", "ema50", "ema20_slope_pct", "ema50_slope_pct", "adx14", "plus_di14", "minus_di14", "rsi14", "relative_volume"}
+            expected = {"ema20", "ema50", "ema100", "ema20_slope_pct", "ema50_slope_pct", "adx14", "plus_di14", "minus_di14", "rsi14", "relative_volume", "ema20_t_minus_3", "ema50_t_minus_3", "ema100_t_minus_3", "ema20_delta_pct", "ema50_delta_pct", "ema100_delta_pct", "ema20_rising", "ema50_rising", "ema100_rising", "ema_trend_score", "ema_trend_label"}
             self.assertTrue(expected.issubset(context["tf_5m"]))
             self.assertTrue(expected.issubset(context["tf_15m"]))
             self.assertIsNotNone(context["tf_5m"]["plus_di14_15m_ago"])

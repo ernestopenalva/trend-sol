@@ -61,6 +61,11 @@ class TradeLedger:
     ) -> bool:
         return self._append_closed(position, config, "DMI15_COMBINED_SHADOW")
 
+    def append_closed_context_shadow_trade(
+        self, position: BotFullExitPosition, config: Dict[str, Any]
+    ) -> bool:
+        return self._append_closed(position, config, "CONTEXT_SHADOW")
+
     def _append_closed(
         self,
         position: BotFullExitPosition,

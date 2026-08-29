@@ -195,6 +195,8 @@ class MultiMarketShadow:
             instrumentation.get("enabled", False)
             and self.settings.get("enabled", False)
         )
+        self.accept_new_entries = bool(self.settings.get("accept_new_entries", True))
+        self.selection_enabled = bool(self.settings.get("selection_enabled", True))
         self.project_root = project_root
         self.config = config
         self.market_client = market_client
@@ -237,12 +239,13 @@ class MultiMarketShadow:
             return
         self._load_state()
         now_ms = _now_ms()
-        reset_epoch = (
-            self.epoch_started_ms is None
-            or _selection_epoch(self.epoch_started_ms, self._reevaluate_hours())
-            != _selection_epoch(now_ms, self._reevaluate_hours())
-        )
-        self._evaluate_selection("STARTUP", now_ms, reset_epoch=reset_epoch)
+        if self.selection_enabled:
+            reset_epoch = (
+                self.epoch_started_ms is None
+                or _selection_epoch(self.epoch_started_ms, self._reevaluate_hours())
+                != _selection_epoch(now_ms, self._reevaluate_hours())
+            )
+            self._evaluate_selection("STARTUP", now_ms, reset_epoch=reset_epoch)
         self.logger.system(
             "multi_market_shadow_started",
             shadow_kind=self.shadow_kind,
@@ -272,7 +275,7 @@ class MultiMarketShadow:
             for symbol, positions in self.positions.items()
             if any(position.status == "OPEN" for position in positions)
         }
-        symbols = sorted(set(self.selected) | open_symbols)
+        symbols = sorted((set(self.selected) if self.accept_new_entries else set()) | open_symbols)
         streams = []
         for symbol in symbols:
             lower = symbol.lower()
@@ -297,7 +300,7 @@ class MultiMarketShadow:
             )
 
     def sync_selection_from_source(self, boundary_ms: int) -> None:
-        if not self.enabled or self.selection_source is None:
+        if not self.enabled or not self.selection_enabled or self.selection_source is None:
             return
         same_selection = self.selected == self.selection_source.selected
         same_epoch = self.epoch_started_ms == self.selection_source.epoch_started_ms
@@ -322,14 +325,15 @@ class MultiMarketShadow:
         if not bool(kline.get("x")):
             return
         boundary_ms = int(kline.get("T", 0)) + 1
-        self._maybe_reevaluate(boundary_ms)
+        if self.selection_enabled:
+            self._maybe_reevaluate(boundary_ms)
         if symbol not in self.selected or self._is_quarantined(symbol, boundary_ms):
             return
         engine = self.engines.get(symbol)
         if engine is None:
             return
         signal = engine.on_kline(stream, payload)
-        if signal is not None:
+        if signal is not None and self.accept_new_entries:
             self._admit_signal(symbol, signal, boundary_ms)
 
     def save_state(self) -> None:

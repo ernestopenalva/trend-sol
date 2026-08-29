@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config_profiles import effective_config
 from src.console_utils import BRASILIA_TZ
+from src.monitor.context_predicates import passes_slow_ge45
 from src.monitor.entry_engine import EntryEngine, EntrySignal
 from src.trade_ledger import TradeLedger
 from tools.cohort_study import _load_config
@@ -140,10 +141,7 @@ def _signals(config: Dict[str, Any], candles: Dict[str, Sequence[MarketCandle]],
 
 
 def _slow_ge(candles: Sequence[Any]) -> bool:
-    if len(candles) < 4:
-        return False
-    latest, reference = candles[-1], candles[-4]
-    return latest.high > reference.high and latest.low > reference.low
+    return passes_slow_ge45(candles)
 
 
 def _validate_a(args: argparse.Namespace, config: Dict[str, Any], candles: Dict[str, Sequence[MarketCandle]], start: datetime, end: datetime, path: str, spread: float) -> None:

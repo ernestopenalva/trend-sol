@@ -133,6 +133,17 @@ class PositionRegistry:
                             "market_context": market_context,
                         },
                     )
+                    self._submit_telemetry(
+                        "ema_entry",
+                        {
+                            "ts": open_ts,
+                            "symbol": position.symbol,
+                            "strategy": "REAL_A",
+                            "trade_id": pair_id,
+                            "entry_price": entry_price,
+                            **_ema_entry_values(market_context),
+                        },
+                    )
                 self.logger.trade(
                     position._trade_event(
                         "OPEN",
@@ -860,6 +871,16 @@ def _parse_ts(value: Any) -> Optional[datetime]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _ema_entry_values(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    values = snapshot.get("tf_5m") if isinstance(snapshot.get("tf_5m"), dict) else {}
+    fields = (
+        "ema20", "ema20_t_minus_3", "ema50", "ema50_t_minus_3", "ema100", "ema100_t_minus_3",
+        "ema20_delta_pct", "ema50_delta_pct", "ema100_delta_pct", "ema20_rising", "ema50_rising",
+        "ema100_rising", "ema_trend_score", "ema_trend_label",
+    )
+    return {field: values.get(field) for field in fields}
 
 
 def _age_minutes(opened_at: Any, observed_at: Any) -> Optional[int]:

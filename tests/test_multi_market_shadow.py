@@ -262,6 +262,8 @@ def _shadow(
     config["entry"].update(config["profiles"]["intraday"]["entry"])
     config["instrumentation"]["multi_market_shadow"]["state_file"] = "state.json"
     config["instrumentation"]["multi_market_shadow"]["ledger_file"] = "ledger.jsonl"
+    config["instrumentation"]["multi_market_shadow"]["accept_new_entries"] = True
+    config["instrumentation"]["multi_market_shadow"]["selection_enabled"] = True
     config["logging"]["console"] = False
     logger = JsonlLogger(root, config)
     telemetry = FakeTelemetry()

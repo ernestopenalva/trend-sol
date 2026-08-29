@@ -64,6 +64,7 @@ class MarketContextEngine:
         volumes = [item.volume for item in closed]
         ema20 = ema(closes, int(self.settings.get("ema_fast_period", 20)))
         ema50 = ema(closes, int(self.settings.get("ema_slow_period", 50)))
+        ema100 = ema(closes, int(self.settings.get("ema_long_period", 100)))
         rsi14 = rsi(closes, int(self.settings.get("rsi_period", 14)))
         rsi_ma = _rsi_based_ma(
             rsi14,
@@ -79,12 +80,31 @@ class MarketContextEngine:
         baseline = volumes[-1 - rvol_period : -1] if len(volumes) > rvol_period else []
         baseline_avg = sum(baseline) / len(baseline) if baseline else None
         latest_volume = volumes[-1] if volumes else None
+        ema_values = {
+            "ema20": _last(ema20),
+            "ema20_t_minus_3": _lookback(ema20, 3),
+            "ema50": _last(ema50),
+            "ema50_t_minus_3": _lookback(ema50, 3),
+            "ema100": _last(ema100),
+            "ema100_t_minus_3": _lookback(ema100, 3),
+        }
+        for label, values in (("ema20", ema20), ("ema50", ema50), ("ema100", ema100)):
+            current, previous = _last(values), _lookback(values, 3)
+            ema_values[f"{label}_delta_pct"] = _delta_pct(current, previous)
+            ema_values[f"{label}_rising"] = (current > previous) if current is not None and previous is not None else None
+        rising_values = [ema_values[f"{label}_rising"] for label in ("ema20", "ema50", "ema100")]
+        if any(value is None for value in rising_values):
+            score, trend_label = None, "UNAVAILABLE"
+        else:
+            rising_count = sum(value is True for value in rising_values)
+            score, trend_label = {0: (0.0, "FALLING"), 1: (3.3, "MOSTLY_FALLING"), 2: (6.7, "MOSTLY_RISING"), 3: (10.0, "RISING")}[rising_count]
         return {
             "latest_open_at_ms": closed[-1].open_time if closed else None,
             "latest_closed_at_ms": closed[-1].close_time if closed else None,
             "close": closes[-1] if closes else None,
-            "ema20": _last(ema20),
-            "ema50": _last(ema50),
+            **ema_values,
+            "ema_trend_score": score,
+            "ema_trend_label": trend_label,
             "ema20_slope_pct": _slope_pct(ema20, slope_lookback),
             "ema50_slope_pct": _slope_pct(ema50, slope_lookback),
             "adx14": _last(adx),
@@ -124,6 +144,12 @@ def _slope_pct(values: list[Optional[float]], lookback: int) -> Optional[float]:
         return None
     current = values[-1]
     previous = values[-1 - lookback]
+    if current is None or previous in (None, 0):
+        return None
+    return (float(current) / float(previous) - 1) * 100
+
+
+def _delta_pct(current: Optional[float], previous: Optional[float]) -> Optional[float]:
     if current is None or previous in (None, 0):
         return None
     return (float(current) / float(previous) - 1) * 100

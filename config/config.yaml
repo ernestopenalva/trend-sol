@@ -191,36 +191,43 @@ logging:
 
 instrumentation:
   enabled: true
+  context_forward_cohort_id: "REAL_A_CONTEXT_PHASE_2026"
   queue_max_size: 10000
   gcr_shadow:
     enabled: true
+    accept_new_entries: false
     max_open_positions: 5
     state_file: "data/state/gcr_shadow.json"
     ledger_file: "data/trades/trades_gcr_shadow.jsonl"
   dmi15_shadow:
     enabled: true
+    accept_new_entries: false
     max_open_positions: 5
     state_file: "data/state/dmi15_shadow.json"
     ledger_file: "data/trades/trades_dmi15_shadow.jsonl"
   dmi15_spread_shadow:
     enabled: true
+    accept_new_entries: false
     max_open_positions: 5
     min_di_spread: 6
     state_file: "data/state/dmi15_spread_shadow.json"
     ledger_file: "data/trades/trades_dmi15_spread_shadow.jsonl"
   dmi15_trajectory_shadow:
     enabled: true
+    accept_new_entries: false
     max_open_positions: 5
     state_file: "data/state/dmi15_trajectory_shadow.json"
     ledger_file: "data/trades/trades_dmi15_trajectory_shadow.jsonl"
   dmi15_rsi70_shadow:
     enabled: true
+    accept_new_entries: false
     max_open_positions: 5
     max_rsi_ma: 70
     state_file: "data/state/dmi15_rsi70_shadow.json"
     ledger_file: "data/trades/trades_dmi15_rsi70_shadow.jsonl"
   dmi15_combined_shadow:
     enabled: true
+    accept_new_entries: false
     max_open_positions: 5
     min_di_spread: 6
     max_rsi_ma: 70
@@ -231,6 +238,7 @@ instrumentation:
     timeframes: ["5m", "15m"]
     ema_fast_period: 20
     ema_slow_period: 50
+    ema_long_period: 100
     slope_lookback_candles: 3
     adx_period: 14
     rsi_period: 14
@@ -238,6 +246,18 @@ instrumentation:
     rsi_based_ma_period: 14
     relative_volume_period: 20
     relative_volume_baseline: "mean_previous_closed_candles"
+  dmi15_trajectory_context_shadow:
+    enabled: true
+    accept_new_entries: true
+    max_open_positions: 5
+    state_file: "data/state/dmi15_trajectory_context_shadow.json"
+    ledger_file: "data/trades/trades_dmi15_trajectory_context_shadow.jsonl"
+  slow_ge_context_shadow:
+    enabled: true
+    accept_new_entries: true
+    max_open_positions: 5
+    state_file: "data/state/slow_ge_context_shadow.json"
+    ledger_file: "data/trades/trades_slow_ge_context_shadow.jsonl"
   cohort_guard_study:
     episode_gap_hours: 6
     rules:
@@ -405,6 +425,8 @@ instrumentation:
       - 15
   multi_market_shadow:
     enabled: true
+    accept_new_entries: false
+    selection_enabled: false
     top_count: 3
     reevaluate_hours: 4
     max_universe_symbols: 50
@@ -450,7 +472,9 @@ instrumentation:
   dmi15_trajectory_shadow_events_file: "data/telemetry/dmi15_trajectory_shadow_events.jsonl"
   dmi15_rsi70_shadow_events_file: "data/telemetry/dmi15_rsi70_shadow_events.jsonl"
   dmi15_combined_shadow_events_file: "data/telemetry/dmi15_combined_shadow_events.jsonl"
+  context_shadow_events_file: "data/telemetry/context_shadow_events.jsonl"
   market_context_events_file: "data/telemetry/market_context_events.jsonl"
+  ema_entry_events_file: "data/telemetry/ema_entry_events.jsonl"
 
 console:
   mode: human

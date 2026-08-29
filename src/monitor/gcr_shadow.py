@@ -33,6 +33,7 @@ class GcrShadowRegistry:
         settings = config.get("instrumentation", {}).get("gcr_shadow", {})
         self.settings = settings if isinstance(settings, dict) else {}
         self.enabled = bool(self.settings.get("enabled", False))
+        self.accept_new_entries = bool(self.settings.get("accept_new_entries", True))
         self.state_path = project_root / str(
             self.settings.get("state_file", "data/state/gcr_shadow.json")
         )
@@ -56,7 +57,7 @@ class GcrShadowRegistry:
         signal: EntrySignal,
         market_context: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        if not self.enabled:
+        if not self.enabled or not self.accept_new_entries:
             return False
         bucket = _bucket_5m(signal.source_candle_open_time)
         maximum = int(self.config.get("entry", {}).get("max_entries_per_candle", 1))

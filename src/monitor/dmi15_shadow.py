@@ -39,6 +39,7 @@ class Dmi15ShadowRegistry:
         settings = config.get("instrumentation", {}).get(self.SETTINGS_KEY, {})
         self.settings = settings if isinstance(settings, dict) else {}
         self.enabled = bool(self.settings.get("enabled", False))
+        self.accept_new_entries = bool(self.settings.get("accept_new_entries", True))
         self.state_path = project_root / str(
             self.settings.get("state_file", "data/state/dmi15_shadow.json")
         )
@@ -70,7 +71,7 @@ class Dmi15ShadowRegistry:
         atr_timeframe: str,
         atr_period: int,
     ) -> bool:
-        if not self.enabled or not isinstance(market_context, dict):
+        if not self.enabled or not self.accept_new_entries or not isinstance(market_context, dict):
             return False
         self.latest_market_context = deepcopy(market_context)
         snapshot = market_context.get("tf_5m")

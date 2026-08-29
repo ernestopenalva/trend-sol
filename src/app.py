@@ -26,6 +26,8 @@ from src.monitor.dmi15_trajectory_shadow import Dmi15TrajectoryShadowRegistry
 from src.monitor.dmi15_rsi70_shadow import Dmi15Rsi70ShadowRegistry
 from src.monitor.dmi15_combined_shadow import Dmi15CombinedShadowRegistry
 from src.monitor.entry_engine import EntryEngine
+from src.monitor.context_predicates import passes_dmi15_trajectory, passes_slow_ge45
+from src.monitor.context_shadow import RealAContextShadow
 from src.monitor.gcr_shadow import GcrShadowRegistry
 from src.monitor.market_context import MarketContextEngine
 from src.monitor.human_console_reporter import HumanConsoleReporter
@@ -58,6 +60,13 @@ class Monitor:
             config=str(config_path),
             symbol=self.config.get("symbol"),
             profile=self.config.get("active_profile"),
+        )
+        self.logger.system(
+            "context_forward_cohort_started",
+            cohort_id=self.config.get("instrumentation", {}).get("context_forward_cohort_id"),
+            arms=["REAL_A", "DMI15_TRAJECTORY_CONTEXT_SHADOW", "SLOW_GE_CONTEXT_SHADOW"],
+            primary_metric="gross_per_trade",
+            ladder="A",
         )
         execution_cfg = self.config["execution"]
         self.logger.system("syncing_binance_server_time", url=execution_cfg["testnet_url"])
@@ -103,6 +112,30 @@ class Monitor:
             self.project_root, self.config, self.logger, self.telemetry_writer
         )
         self.market_context = MarketContextEngine(self.entry_engine, self.config)
+        self.dmi15_trajectory_context_shadow = RealAContextShadow(
+            self.project_root,
+            self.config,
+            self.logger,
+            self.telemetry_writer,
+            settings_key="dmi15_trajectory_context_shadow",
+            strategy="DMI15_TRAJECTORY_CONTEXT_SHADOW",
+            shadow_kind="DMI15_TRAJECTORY_CONTEXT_SHADOW",
+            pair_prefix="dmi15ctx",
+            predicate=lambda _engine, snapshot: passes_dmi15_trajectory(
+                snapshot.get("tf_5m", {}) if isinstance(snapshot, dict) else {}
+            ),
+        )
+        self.slow_ge_context_shadow = RealAContextShadow(
+            self.project_root,
+            self.config,
+            self.logger,
+            self.telemetry_writer,
+            settings_key="slow_ge_context_shadow",
+            strategy="SLOW_GE_CONTEXT_SHADOW",
+            shadow_kind="SLOW_GE_CONTEXT_SHADOW",
+            pair_prefix="slowgectx",
+            predicate=lambda engine, _snapshot: passes_slow_ge45(engine._candles_for("15m")),
+        )
         no_progress = self.config.get("risk", {}).get("no_progress", {})
         context_settings = self.config.get("instrumentation", {}).get("market_context", {})
         ge_sync = self.config.get("trend_gate", {}).get("sync", {})
@@ -136,6 +169,10 @@ class Monitor:
             dmi15_rsi70_entry_rule="DMI15 AND RSI_MA_5m<=70",
             dmi15_combined_shadow="DMI15_COMBINED_SHADOW_G",
             dmi15_combined_entry_rule="DMI15 AND spread>=6 AND trajectory AND RSI_MA_5m<=70",
+            dmi15_trajectory_context_shadow="DMI15_TRAJECTORY_CONTEXT_SHADOW",
+            dmi15_trajectory_context_rule="DMI15_TRAJECTORY THEN unchanged REAL_A: GE15 + G2 + G3 + G4",
+            slow_ge_context_shadow="SLOW_GE_CONTEXT_SHADOW",
+            slow_ge_context_rule="GE45 THEN unchanged REAL_A: GE15 + G2 + G3 + G4",
             market_context_telemetry_only=True,
             market_context_timeframes=context_settings.get("timeframes"),
             market_context_indicators=["EMA20", "EMA50", "EMA20_SLOPE", "EMA50_SLOPE", "ADX14", "+DI14", "-DI14", "RSI14", "RSI14_SMA14_5M", "RVOL", "GE15"],
@@ -239,6 +276,12 @@ class Monitor:
                 limit=int(limits.get(timeframe, 120)),
             )
             self.entry_engine.load_history(timeframe, klines, now_ms=self._server_now_ms())
+            self.dmi15_trajectory_context_shadow.engine.load_history(
+                timeframe, klines, now_ms=self._server_now_ms()
+            )
+            self.slow_ge_context_shadow.engine.load_history(
+                timeframe, klines, now_ms=self._server_now_ms()
+            )
 
     def _server_now_ms(self) -> int:
         import time
@@ -279,6 +322,14 @@ class Monitor:
                 ("dmi15_trajectory_shadow", self.dmi15_trajectory_shadow),
                 ("dmi15_rsi70_shadow", self.dmi15_rsi70_shadow),
                 ("dmi15_combined_shadow", self.dmi15_combined_shadow),
+            ):
+                try:
+                    shadow.on_tick(price, _market_timestamp(payload))
+                except Exception as exc:
+                    self.logger.system(f"{name}_tick_failed", price=price, error=str(exc))
+            for name, shadow in (
+                ("dmi15_trajectory_context_shadow", self.dmi15_trajectory_context_shadow),
+                ("slow_ge_context_shadow", self.slow_ge_context_shadow),
             ):
                 try:
                     shadow.on_tick(price, _market_timestamp(payload))
@@ -330,6 +381,16 @@ class Monitor:
                             )
                         except Exception as exc:
                             self.logger.system(f"{name}_candle_failed", error=str(exc))
+            else:
+                snapshot = self.market_context.latest
+            for name, shadow in (
+                ("dmi15_trajectory_context_shadow", self.dmi15_trajectory_context_shadow),
+                ("slow_ge_context_shadow", self.slow_ge_context_shadow),
+            ):
+                try:
+                    shadow.on_kline(stream, payload, snapshot)
+                except Exception as exc:
+                    self.logger.system(f"{name}_candle_failed", error=str(exc))
             if signal is not None and self._entry_operational_pause_reason() is not None:
                 signal = None
             if signal is not None:

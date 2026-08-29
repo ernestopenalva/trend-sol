@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from src.monitor.dmi15_shadow import Dmi15ShadowRegistry, _number
+from src.monitor.context_predicates import dmi15_trajectory_values
+from src.monitor.dmi15_shadow import Dmi15ShadowRegistry
 
 
 class Dmi15TrajectoryShadowRegistry(Dmi15ShadowRegistry):
@@ -20,15 +21,13 @@ class Dmi15TrajectoryShadowRegistry(Dmi15ShadowRegistry):
         self, bucket: int, dmi_spread: float, snapshot: Dict[str, Any]
     ) -> bool:
         del dmi_spread
-        plus_now = _number(snapshot.get("plus_di14"))
-        plus_previous = _number(snapshot.get("plus_di14_5m_ago"))
-        minus_now = _number(snapshot.get("minus_di14"))
-        minus_previous = _number(snapshot.get("minus_di14_5m_ago"))
-        if None in (plus_now, plus_previous, minus_now, minus_previous):
+        values = dmi15_trajectory_values(snapshot)
+        if values is None:
             self._record_required_indicator_unavailable(
                 bucket, ("plus_di14", "plus_di14_5m_ago", "minus_di14", "minus_di14_5m_ago")
             )
             return False
+        plus_now, plus_previous, minus_now, minus_previous = values
         if (
             plus_now > plus_previous and minus_now < minus_previous
         ):
