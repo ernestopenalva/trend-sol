@@ -33,3 +33,5 @@ Evento: Adicionado relatório de forward exclusivo da nova coorte REAL_A versus 
 Evento: Corrigido o relatório de forward da nova coorte para ler as posições abertas reais em data/state/open_positions.json; contadores exclusivos de contexto não são mais apresentados como zero para REAL_A.
 Evento: Corrigida a contagem de posições abertas REAL_A no relatório da nova coorte para excluir phantoms, que usam internamente label B mas não são posições reais nem ocupam slots.
 Evento: Corrigida a exclusão de phantoms no relatório da nova coorte para aplicá-la somente a REAL_A; posições virtuais dos context shadows continuam sendo contadas em seus próprios braços.
+Evento: Adicionada ferramenta read-only ema_context_monitor para visualização de EMA20/50/100 em candles 5m fechados, usando a mesma função EMA da instrumentação; não altera estado, telemetria, runtime ou decisões do bot.
+Evento: Tornada a saída do ema_context_monitor compatível com terminais sem Unicode completo, mantendo a visualização observacional sem alterar cálculos ou runtime.
