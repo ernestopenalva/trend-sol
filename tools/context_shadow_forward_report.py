@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 
 
 ARMS = (
-    ("REAL_A", "data/trades/trades_B.jsonl", None),
+    ("REAL_A", "data/trades/trades_B.jsonl", "data/state/open_positions.json"),
     ("DMI15_TRAJECTORY_CONTEXT_SHADOW", "data/trades/trades_dmi15_trajectory_context_shadow.jsonl", "data/state/dmi15_trajectory_context_shadow.json"),
     ("SLOW_GE_CONTEXT_SHADOW", "data/trades/trades_slow_ge_context_shadow.jsonl", "data/state/slow_ge_context_shadow.json"),
 )
@@ -38,8 +38,8 @@ def main() -> None:
     print("strategy | closed | gross | gross/trade | net | net/trade | HS rate | TRAIL rate | HS | BE | PL | TRAIL | avg age | median age | open now | blocked context | context unavailable | capacity | same 5m | spacing | max simultaneous")
     for name, ledger_path, state_path in ARMS:
         records = _records(PROJECT_ROOT / ledger_path, since, until, args.since_field)
-        state = _load_state(PROJECT_ROOT / state_path) if state_path else {}
-        _line(name, records, state)
+        state = _load_state(PROJECT_ROOT / state_path)
+        _line(name, records, state, real_a=name == "REAL_A")
     print("\nPrimary metric declared before forward: gross/trade. Net/trade is supplementary only.")
     print("All three arms use ladder A; EMA telemetry is observational and absent from this decision path.")
 
@@ -77,28 +77,35 @@ def _parse_user_dt(value: str | None):
         raise SystemExit(f"Invalid date/time: {value}") from exc
 
 
-def _line(name: str, records: list[dict[str, Any]], state: dict[str, Any]) -> None:
+def _line(name: str, records: list[dict[str, Any]], state: Any, *, real_a: bool) -> None:
     gross = [_number(item.get("gross_pnl_pct")) for item in records]
     net = [_number(item.get("net_pnl_pct")) for item in records]
     ages = [_number(item.get("age_seconds")) for item in records]
     gross, net, ages = [item for item in gross if item is not None], [item for item in net if item is not None], [item for item in ages if item is not None]
     reasons = Counter(str(item.get("exit_reason") or "UNKNOWN") for item in records)
     count = len(records)
+    positions = state if isinstance(state, list) else state.get("positions", [])
+    open_positions = [
+        item for item in positions
+        if item.get("status") == "OPEN" and (not real_a or item.get("label") == "B")
+    ]
+    counters = ("- | - | - | - | - | -") if real_a else " | ".join(
+        str(state.get(key, 0))
+        for key in ("blocked_context", "blocked_context_unavailable", "blocked_capacity", "blocked_same_5m", "blocked_spacing", "max_simultaneous_positions")
+    )
     print(
         f"{name} | {count} | {sum(gross):+.2f}% | {_mean(gross):+.2f}% | {sum(net):+.2f}% | {_mean(net):+.2f}% | "
         f"{(reasons['HARD_STOP'] / count * 100 if count else 0):.1f}% | {(reasons['TRAILING'] / count * 100 if count else 0):.1f}% | "
         f"{reasons['HARD_STOP']} | {reasons['BREAKEVEN']} | {reasons['PROFIT_LOCK']} | {reasons['TRAILING']} | "
         f"{(_mean(ages) / 3600 if ages else 0):.2f}h | {(median(ages) / 3600 if ages else 0):.2f}h | "
-        f"{len([item for item in state.get('positions', []) if item.get('status') == 'OPEN'])} | "
-        f"{state.get('blocked_context', 0)} | {state.get('blocked_context_unavailable', 0)} | {state.get('blocked_capacity', 0)} | "
-        f"{state.get('blocked_same_5m', 0)} | {state.get('blocked_spacing', 0)} | {state.get('max_simultaneous_positions', 0)}"
+        f"{len(open_positions)} | {counters}"
     )
 
 
-def _load_state(path: Path) -> dict[str, Any]:
+def _load_state(path: Path) -> Any:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        return data if isinstance(data, (dict, list)) else {}
     except (OSError, json.JSONDecodeError):
         return {}
 
