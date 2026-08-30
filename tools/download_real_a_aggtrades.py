@@ -29,12 +29,21 @@ ONE_HOUR_MS = 60 * 60 * 1000
 def main() -> None:
     args = _parse_args()
     seeds = load_real_a_seeds(args.ledger, _parse_timestamp(args.since))
+    if args.opened_until:
+        opened_until = _parse_timestamp(args.opened_until)
+        seeds = [seed for seed in seeds if seed.opened_at < opened_until]
+    if args.exit_reason:
+        seeds = [seed for seed in seeds if seed.ledger_reason == args.exit_reason]
+    if not seeds:
+        raise ValueError("No seeds remain after the requested opened_at / exit_reason filters.")
     if args.closed_until:
         closed_until = _parse_timestamp(args.closed_until)
         seeds = [seed for seed in seeds if seed.ledger_closed_at <= closed_until]
         if not seeds:
             raise ValueError("No seeds remain at or before --closed-until.")
     until = _parse_timestamp(args.until) if args.until else None
+    if args.only_validation_grace and args.post_open_hours is not None:
+        raise ValueError("--only-validation-grace cannot be combined with --post-open-hours.")
     if args.only_validation_grace:
         windows = merge_windows(
             (seed.ledger_closed_at, seed.ledger_closed_at + timedelta(seconds=args.validation_grace_seconds))
@@ -42,8 +51,11 @@ def main() -> None:
         )
     else:
         windows = merge_windows(
-            (seed.opened_at, max(seed.ledger_closed_at + timedelta(seconds=args.validation_grace_seconds), until)
-             if until is not None else seed.ledger_closed_at + timedelta(seconds=args.validation_grace_seconds))
+            (seed.opened_at, max(
+                seed.ledger_closed_at + timedelta(seconds=args.validation_grace_seconds),
+                seed.opened_at + timedelta(hours=args.post_open_hours) if args.post_open_hours is not None else seed.ledger_closed_at,
+                until if until is not None else seed.ledger_closed_at,
+            ))
             for seed in seeds
         )
     print(f"REAL_A validation seeds: {len(seeds)}")
@@ -53,7 +65,9 @@ def main() -> None:
     if args.dry_run:
         return
 
-    existing_ids = _existing_trade_ids(args.output)
+    if args.no_resume_dedup and args.output.exists():
+        raise ValueError("--no-resume-dedup requires a new output path; it intentionally does not load prior IDs.")
+    existing_ids = None if args.no_resume_dedup else _existing_trade_ids(args.output)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if args.output.exists() else "w"
     written = 0
@@ -66,10 +80,11 @@ def main() -> None:
                     args.timeout_seconds, args.retries, progress_prefix=f"[{index}/{len(windows)}]",
                 ):
                     trade_id = int(item["a"])
-                    if trade_id in existing_ids:
+                    if existing_ids is not None and trade_id in existing_ids:
                         continue
                     handle.write(json.dumps(item, separators=(",", ":")) + "\n")
-                    existing_ids.add(trade_id)
+                    if existing_ids is not None:
+                        existing_ids.add(trade_id)
                     written += 1
                     if written % 1000 == 0:
                         handle.flush()
@@ -77,7 +92,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print(f"\nInterrupted safely. Partial data retained in {args.output} ({written} new records this run).", flush=True)
         raise
-    print(f"complete: {written} new aggTrades; {len(existing_ids)} total in {args.output}")
+    total = len(existing_ids) if existing_ids is not None else written
+    print(f"complete: {written} new aggTrades; {total} total in {args.output}")
 
 
 def fetch_window(
@@ -146,6 +162,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ledger", type=Path, default=PROJECT_ROOT / "data" / "trades" / "trades_B.jsonl")
     parser.add_argument("--since", default="2026-08-19T01:05:00-03:00")
     parser.add_argument("--until", help="Optional UTC/offset timestamp to retain post-real-exit ticks for one later variant.")
+    parser.add_argument("--opened-until", help="Exclude seeds whose opened_at is at or after this timestamp.")
+    parser.add_argument("--exit-reason", help="Restrict seeds to one exact ledger exit reason, e.g. BREAKEVEN.")
+    parser.add_argument("--post-open-hours", type=float,
+                        help="For every selected seed, retain ticks through opened_at plus this many hours.")
     parser.add_argument("--closed-until", help="Freeze the seed set at this ledger closed_at timestamp.")
     parser.add_argument("--validation-grace-seconds", type=float, default=5.0)
     parser.add_argument("--only-validation-grace", action="store_true",
@@ -157,6 +177,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-seconds", type=float, default=20.0)
     parser.add_argument("--retries", type=int, default=4)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-resume-dedup", action="store_true",
+                        help="Use bounded memory for a new output only; do not support resumable ID de-duplication.")
     return parser.parse_args()
 
 
