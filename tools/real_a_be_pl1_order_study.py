@@ -10,7 +10,8 @@ import csv
 import json
 import statistics
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,12 @@ class BeSeed:
     entry_atr: float
     peak_price: float
     trough_price: float
+    strategy_version: str
+    profile: str
+    hard_stop_price: float
+    hard_stop_pct: float | None
+    pl_shadow_step: str | None
+    pl_shadow_activation_price: float | None
 
 @dataclass
 class FollowThrough:
@@ -48,6 +55,7 @@ class FollowThrough:
     pl1_price: float
     hard_stop_price: float
     reference_price: float
+    threshold_source: str = ""
     first_tick: datetime | None = None
     last_tick: datetime | None = None
     resolved_at: datetime | None = None
@@ -114,11 +122,20 @@ def _load_be_seeds(ledger: Path, start: datetime, end: datetime) -> list[BeSeed]
             opened = _parse_timestamp(item.get("opened_at")); closed = _parse_timestamp(item.get("closed_at"))
             entry = _as_float(item.get("entry_price")); atr = _as_float(item.get("entry_atr"))
             peak = _as_float(item.get("peak_price")); trough = _as_float(item.get("trough_price"))
-            if opened is None or closed is None or not start <= opened < end or None in (entry, atr, peak, trough):
+            hard_stop = _as_float(item.get("hard_stop_price"))
+            version = str(item.get("strategy_version") or "")
+            if opened is None or closed is None or not start <= opened < end or None in (entry, atr, peak, trough, hard_stop):
                 continue
-            if entry <= 0 or atr <= 0 or peak <= 0 or trough <= 0:
+            if entry <= 0 or atr <= 0 or peak <= 0 or trough <= 0 or hard_stop <= 0:
                 continue
-            output.append(BeSeed(str(item.get("pair_id") or "unknown"), opened, closed, entry, atr, peak, trough))
+            if version not in {"b_atr_v1.3", "b_atr_v1.4"}:
+                raise ValueError(f"Unsupported strategy_version for {item.get('pair_id')}: {version or 'missing'}.")
+            output.append(BeSeed(
+                str(item.get("pair_id") or "unknown"), opened, closed, entry, atr, peak, trough,
+                version, str(item.get("profile") or "unknown"), hard_stop,
+                _as_float(item.get("hard_stop_pct")), str(item["pl_shadow_step"]) if item.get("pl_shadow_step") else None,
+                _as_float(item.get("pl_shadow_activation_price")),
+            ))
     return sorted(output, key=lambda seed: seed.opened_at)
 
 
@@ -156,24 +173,58 @@ def _follow_through(seeds: list[BeSeed], ticks: Iterable[Tick], config: dict[str
 
 
 def _state(seed: BeSeed, config: dict[str, Any]) -> FollowThrough:
-    """Ask the same position class used at runtime for effective PL1/HS prices."""
+    """Derive the historical PL1 formula and use the persisted per-trade hard stop."""
     position = BotFullExitPosition(
         pair_id=seed.pair_id, symbol="SOLUSDT", entry_price=seed.entry_price, quantity=1.0,
-        entry_order={}, open_ts=seed.opened_at.isoformat(), config=_exit_config(config),
+        entry_order={}, open_ts=seed.opened_at.isoformat(), config=_historical_exit_config(config, seed.strategy_version),
         client=_NoopClient(), logger=_NoopLogger(), entry_atr=seed.entry_atr,
         atr_timeframe="1m", atr_period=14,
     )
-    plans = position._profit_lock_candidates(999.0, 999.0)  # Uses runtime formula, including economic floor.
-    if not plans or position.hard_stop_price is None:
-        raise ValueError(f"Could not derive effective PL1/hard stop for {seed.pair_id}.")
-    return FollowThrough(seed, float(plans[0]["effective_trigger"]), float(position.hard_stop_price), seed.entry_price * (1 + REFERENCE_PCT / 100))
+    if seed.strategy_version == "b_atr_v1.3":
+        plans = position._profit_lock_shadow_plans()
+        source = "v1.3 PL-shadow formula (observational counterfactual)"
+        pl1 = float(plans[0]["activation_price"]) if plans else None
+    else:
+        plans = position._profit_lock_candidates(999.0, 999.0)
+        source = "v1.4 active PL1 formula"
+        pl1 = float(plans[0]["effective_trigger"]) if plans else None
+    if pl1 is None:
+        raise ValueError(f"Could not derive historical PL1 for {seed.pair_id}.")
+    return FollowThrough(seed, pl1, seed.hard_stop_price, seed.entry_price * (1 + REFERENCE_PCT / 100), source)
+
+
+def _historical_exit_config(config: dict[str, Any], strategy_version: str) -> dict[str, Any]:
+    """Frozen ladder settings from the deployed v1.3/v1.4 revisions.
+
+    The position class remains the source of the calculation.  These overrides
+    prevent the current YAML from silently changing a historical threshold.
+    """
+    output = _exit_config(config)
+    risk = output
+    profit_lock = deepcopy(risk.get("profit_lock") or {})
+    if strategy_version == "b_atr_v1.3":
+        risk["hard_stop"] = {"enabled": True, "stop_pct": 2.0}
+        profit_lock["net_floor_shadow"] = {
+            "enabled": True, "net_margin_pct": 0.05, "activation_buffer_atr": 0.5,
+        }
+        profit_lock.pop("economic_floor", None)
+    elif strategy_version == "b_atr_v1.4":
+        risk["hard_stop"] = {"enabled": True, "stop_pct": 1.5}
+        profit_lock["net_floor_shadow"] = {
+            "enabled": False, "net_margin_pct": 0.05, "activation_buffer_atr": 0.5,
+        }
+        profit_lock["economic_floor"] = {"enabled": True, "net_margin_pct": 0.05}
+    else:
+        raise ValueError(f"No frozen ladder specification for {strategy_version}.")
+    risk["profit_lock"] = profit_lock
+    return risk
 
 
 def _print_report(seeds: list[BeSeed], states: list[FollowThrough], args: argparse.Namespace, data_end: datetime | None) -> None:
     print("REAL_A BREAKEVEN -> PL1 / HARD_STOP order study | LEDGER + AGGTRADE | READ-ONLY")
     print(f"opened_at window: {_brt(_timestamp(args.since))} -> {_brt(_timestamp(args.until))} (end exclusive)")
     print(f"counterfactual observation: opened_at -> first effective PL1 / hard-stop touch, or end of supplied aggTrade data ({_brt_optional(data_end)}).")
-    print(f"Hard stop and PL1 prices are derived through BotFullExitPosition; reference +{REFERENCE_PCT:.2f}% remains ledger-only diagnostic.")
+    print("Hard stop is the price persisted in each ledger record. PL1 is derived by BotFullExitPosition with the frozen ladder of that record's strategy_version.")
     print(f"BE ledger seeds: {len(seeds)}")
     _print_peak_buckets(seeds)
     complete = [item for item in states if item.coverage_complete]
@@ -182,9 +233,42 @@ def _print_report(seeds: list[BeSeed], states: list[FollowThrough], args: argpar
     if incomplete:
         print("coverage failures: " + " | ".join(f"{key}={value}" for key, value in sorted(Counter(item.coverage_error for item in incomplete).items())))
         print("Tick-order conclusions below exclude incomplete records and are NOT decisive for the full seed set.")
-    _print_resolution(complete)
-    _print_resolution_time_buckets(complete)
-    print("PREDECLARED READING: the primary count ratio is PL1_FIRST / HARD_STOP_FIRST among resolved, complete paths. Unresolved-at-data-end records do not vote; no result authorizes a runtime change.")
+    _print_cohort_reports(complete)
+    _print_v13_shadow_validation(complete)
+    print("PREDECLARED READING: PL1_FIRST / HARD_STOP_FIRST is interpreted only inside a cohort. v1.4/HS=1.5% is the current-ladder cohort; v1.3 is historical PL-shadow counterfactual. Unresolved-at-data-end records do not vote; no result authorizes a runtime change.")
+
+
+def _cohort_label(seed: BeSeed) -> str:
+    hard_stop = f"{seed.hard_stop_pct:g}%" if seed.hard_stop_pct is not None else "unknown"
+    if seed.strategy_version == "b_atr_v1.4" and seed.hard_stop_pct == 1.5:
+        return "v1.4 | HS 1.5% | CURRENT LADDER"
+    if seed.strategy_version == "b_atr_v1.3":
+        return f"v1.3 | HS {hard_stop} | PL-SHADOW COUNTERFACTUAL"
+    return f"{seed.strategy_version} | HS {hard_stop} | EXCEPTION (separate)"
+
+
+def _print_cohort_reports(states: list[FollowThrough]) -> None:
+    cohorts: dict[str, list[FollowThrough]] = defaultdict(list)
+    for item in states:
+        cohorts[_cohort_label(item.seed)].append(item)
+    print("\nTICK FIRST-TOUCH BY HISTORICAL COHORT — NO CROSS-COHORT AGGREGATION")
+    for label, cohort in cohorts.items():
+        print(f"\nCOHORT | {label} | seeds={len(cohort)} | PL1 source: {cohort[0].threshold_source}")
+        _print_resolution(cohort)
+        _print_resolution_time_buckets(cohort)
+
+
+def _print_v13_shadow_validation(states: list[FollowThrough]) -> None:
+    comparisons = [
+        abs(item.pl1_price - float(item.seed.pl_shadow_activation_price))
+        for item in states
+        if item.seed.strategy_version == "b_atr_v1.3"
+        and item.seed.pl_shadow_step == "PL1"
+        and item.seed.pl_shadow_activation_price is not None
+    ]
+    if comparisons:
+        print("\nv1.3 PL-SHADOW THRESHOLD VALIDATION | records={} | max abs error={:.10f} | mean abs error={:.10f}".format(
+            len(comparisons), max(comparisons), statistics.fmean(comparisons)))
 
 
 def _print_peak_buckets(seeds: list[BeSeed]) -> None:
@@ -223,11 +307,11 @@ def _write_details(path: Path, states: list[FollowThrough]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(("pair_id", "opened_brt", "closed_brt", "entry", "entry_atr", "ledger_peak", "ledger_peak_pct", "ledger_trough", "peak_bucket", "hard_stop_effective", "effective_pl1", "reference_052", "coverage", "resolved_brt", "outcome", "hours_to_resolution"))
+        writer.writerow(("pair_id", "strategy_version", "profile", "cohort", "pl1_threshold_source", "opened_brt", "closed_brt", "entry", "entry_atr", "ledger_peak", "ledger_peak_pct", "ledger_trough", "peak_bucket", "ledger_hard_stop", "ledger_hard_stop_pct", "effective_pl1", "ledger_pl_shadow_step", "ledger_pl_shadow_activation", "reference_052", "coverage", "resolved_brt", "outcome", "hours_to_resolution"))
         for item in states:
             seed = item.seed
             hours = (item.resolved_at - seed.opened_at).total_seconds() / 3600 if item.resolved_at else None
-            writer.writerow((seed.pair_id, _brt(seed.opened_at), _brt(seed.closed_at), f"{seed.entry_price:.8f}", f"{seed.entry_atr:.8f}", f"{seed.peak_price:.8f}", f"{_pct(seed.peak_price, seed.entry_price):+.6f}", f"{seed.trough_price:.8f}", _peak_bucket(_pct(seed.peak_price, seed.entry_price)), f"{item.hard_stop_price:.8f}", f"{item.pl1_price:.8f}", f"{item.reference_price:.8f}", "COMPLETE" if item.coverage_complete else item.coverage_error, _brt_optional(item.resolved_at), item.outcome(), f"{hours:.6f}" if hours is not None else ""))
+            writer.writerow((seed.pair_id, seed.strategy_version, seed.profile, _cohort_label(seed), item.threshold_source, _brt(seed.opened_at), _brt(seed.closed_at), f"{seed.entry_price:.8f}", f"{seed.entry_atr:.8f}", f"{seed.peak_price:.8f}", f"{_pct(seed.peak_price, seed.entry_price):+.6f}", f"{seed.trough_price:.8f}", _peak_bucket(_pct(seed.peak_price, seed.entry_price)), f"{item.hard_stop_price:.8f}", f"{seed.hard_stop_pct:.8f}" if seed.hard_stop_pct is not None else "", f"{item.pl1_price:.8f}", seed.pl_shadow_step or "", f"{seed.pl_shadow_activation_price:.8f}" if seed.pl_shadow_activation_price is not None else "", f"{item.reference_price:.8f}", "COMPLETE" if item.coverage_complete else item.coverage_error, _brt_optional(item.resolved_at), item.outcome(), f"{hours:.6f}" if hours is not None else ""))
 
 
 def _print_ohlc_sensitivity(seeds: list[BeSeed], config: dict[str, Any], cache_path: Path) -> None:
