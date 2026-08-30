@@ -47,3 +47,4 @@ Evento: Ajustado o estudo BE-PL1 para observar até o primeiro toque efetivo de 
 Evento: Adicionada retomada bounded-memory do downloader de aggTrades pelo último ID persistido, para recuperar downloads analíticos interrompidos sem redownload ou grande uso de RAM.
 Evento: Corrigida a ferramenta read-only BE-PL1 para separar coortes históricas v1.3/v1.4, usar hard_stop_price persistido por trade e derivar PL1 pela fórmula congelada de cada versão; não altera runtime, configuração, shadows ou produção.
 Evento: Adicionada auditoria read-only do instante do primeiro toque PL1/HS em relação ao fechamento BE real, distinguindo toque anterior, simultâneo e posterior sem alterar cálculos, runtime, configuração, shadows ou produção.
+Evento: Adicionada auditoria read-only dos casos v1.4 em que PL1 reconstruído precede BREAKEVEN, usando apenas ledger, CSV prévio e aggTrades já baixados; não altera runtime, configuração, ladder, shadows ou produção.
