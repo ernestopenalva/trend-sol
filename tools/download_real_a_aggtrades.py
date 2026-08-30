@@ -65,19 +65,27 @@ def main() -> None:
     if args.dry_run:
         return
 
-    if args.no_resume_dedup and args.output.exists():
-        raise ValueError("--no-resume-dedup requires a new output path; it intentionally does not load prior IDs.")
+    resume = _last_aggtrade(args.output) if args.resume_from_last_aggtrade else None
+    if args.resume_from_last_aggtrade and not args.no_resume_dedup:
+        raise ValueError("--resume-from-last-aggtrade requires --no-resume-dedup.")
+    if args.no_resume_dedup and args.output.exists() and resume is None:
+        raise ValueError("--no-resume-dedup requires a new output path unless --resume-from-last-aggtrade is set.")
     existing_ids = None if args.no_resume_dedup else _existing_trade_ids(args.output)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if args.output.exists() else "w"
     written = 0
     try:
         with args.output.open(mode, encoding="utf-8") as handle:
+            first_resume_window = True
             for index, (start, end) in enumerate(windows, start=1):
+                if resume is not None and end < resume[1]:
+                    continue
+                request_start = max(start, resume[1]) if resume is not None else start
                 print(f"[{index}/{len(windows)}] {start.isoformat()} -> {end.isoformat()}", flush=True)
                 for item in fetch_window(
-                    args.base_url, args.symbol, start, end, args.request_pause_seconds,
+                    args.base_url, args.symbol, request_start, end, args.request_pause_seconds,
                     args.timeout_seconds, args.retries, progress_prefix=f"[{index}/{len(windows)}]",
+                    first_after_id=resume[0] if resume is not None and first_resume_window else None,
                 ):
                     trade_id = int(item["a"])
                     if existing_ids is not None and trade_id in existing_ids:
@@ -89,6 +97,7 @@ def main() -> None:
                     if written % 1000 == 0:
                         handle.flush()
                         print(f"  saved {written} new aggTrades", flush=True)
+                first_resume_window = False
     except KeyboardInterrupt:
         print(f"\nInterrupted safely. Partial data retained in {args.output} ({written} new records this run).", flush=True)
         raise
@@ -98,7 +107,7 @@ def main() -> None:
 
 def fetch_window(
     base_url: str, symbol: str, start: datetime, end: datetime, pause_seconds: float,
-    timeout_seconds: float, retries: int, progress_prefix: str,
+    timeout_seconds: float, retries: int, progress_prefix: str, first_after_id: int | None = None,
 ) -> Iterable[dict[str, Any]]:
     """Fetch every aggregate trade in an inclusive time window, paginating by id."""
     start_ms = _to_ms(start)
@@ -107,7 +116,11 @@ def fetch_window(
     while cursor_ms <= end_ms:
         chunk_end = min(cursor_ms + ONE_HOUR_MS - 1, end_ms)
         print(f"  {progress_prefix} requesting {datetime.fromtimestamp(cursor_ms / 1000, timezone.utc).isoformat()}", flush=True)
-        batch = _request(base_url, {"symbol": symbol, "startTime": cursor_ms, "endTime": chunk_end, "limit": 1000}, timeout_seconds, retries)
+        if first_after_id is not None:
+            batch = _request(base_url, {"symbol": symbol, "fromId": first_after_id + 1, "limit": 1000}, timeout_seconds, retries)
+            first_after_id = None
+        else:
+            batch = _request(base_url, {"symbol": symbol, "startTime": cursor_ms, "endTime": chunk_end, "limit": 1000}, timeout_seconds, retries)
         page = 1
         while batch:
             for item in batch:
@@ -179,6 +192,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-resume-dedup", action="store_true",
                         help="Use bounded memory for a new output only; do not support resumable ID de-duplication.")
+    parser.add_argument("--resume-from-last-aggtrade", action="store_true",
+                        help="Append from the last stored aggTrade ID with bounded memory; requires --no-resume-dedup.")
     return parser.parse_args()
 
 
@@ -204,6 +219,24 @@ def _existing_trade_ids(path: Path) -> set[int]:
                 continue
     print(f"resuming from {len(output)} existing aggTrades in {path}", flush=True)
     return output
+
+
+def _last_aggtrade(path: Path) -> tuple[int, datetime] | None:
+    if not path.exists() or path.stat().st_size == 0:
+        raise ValueError("--resume-from-last-aggtrade requires a non-empty existing output.")
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        end = handle.tell()
+        chunk = min(end, 131_072)
+        handle.seek(end - chunk)
+        lines = handle.read().decode("utf-8").splitlines()
+    for line in reversed(lines):
+        try:
+            item = json.loads(line)
+            return int(item["a"]), datetime.fromtimestamp(int(item["T"]) / 1000, timezone.utc)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            continue
+    raise ValueError(f"Could not parse a final aggTrade from {path}.")
 
 
 if __name__ == "__main__":

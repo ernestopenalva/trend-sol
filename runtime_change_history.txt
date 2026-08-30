@@ -44,3 +44,4 @@ Evento: Estendida a ferramenta read-only de download de aggTrades para seleciona
 Evento: Adicionada sensibilidade OHLC 1m HIGH_FIRST/LOW_FIRST somente para o caso de cobertura aggTrade incompleta no estudo BE-PL1; ela é explicitamente não decisiva e não substitui ticks reais.
 Evento: Adicionado modo de download aggTrade de memória limitada para novos arquivos de análise, evitando manter milhões de IDs em RAM; não altera runtime, configuração, shadows ou produção.
 Evento: Ajustado o estudo BE-PL1 para observar até o primeiro toque efetivo de PL1/HS ou até o fim dos dados, estratificando tempo de resolução; 24h deixou de ser corte artificial e passou a ser apenas faixa diagnóstica.
+Evento: Adicionada retomada bounded-memory do downloader de aggTrades pelo último ID persistido, para recuperar downloads analíticos interrompidos sem redownload ou grande uso de RAM.
