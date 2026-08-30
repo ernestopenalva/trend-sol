@@ -256,6 +256,7 @@ def _print_cohort_reports(states: list[FollowThrough]) -> None:
         print(f"\nCOHORT | {label} | seeds={len(cohort)} | PL1 source: {cohort[0].threshold_source}")
         _print_resolution(cohort)
         _print_resolution_time_buckets(cohort)
+        _print_ledger_exit_timing_audit(cohort)
 
 
 def _print_v13_shadow_validation(states: list[FollowThrough]) -> None:
@@ -269,6 +270,20 @@ def _print_v13_shadow_validation(states: list[FollowThrough]) -> None:
     if comparisons:
         print("\nv1.3 PL-SHADOW THRESHOLD VALIDATION | records={} | max abs error={:.10f} | mean abs error={:.10f}".format(
             len(comparisons), max(comparisons), statistics.fmean(comparisons)))
+
+
+def _print_ledger_exit_timing_audit(states: list[FollowThrough]) -> None:
+    """Separate a genuinely post-BE follow-through from an earlier ladder touch."""
+    print("FIRST-TOUCH TIME VS REAL BE EXIT | outcome | before >5s | within +/-5s | after >5s")
+    for outcome in ("PL1_FIRST", "HARD_STOP_FIRST"):
+        timing = Counter()
+        for item in states:
+            if item.outcome() != outcome or item.resolved_at is None:
+                continue
+            seconds = (item.resolved_at - item.seed.closed_at).total_seconds()
+            bucket = "before >5s" if seconds < -5 else "within +/-5s" if seconds <= 5 else "after >5s"
+            timing[bucket] += 1
+        print(f"{outcome} | {timing['before >5s']} | {timing['within +/-5s']} | {timing['after >5s']}")
 
 
 def _print_peak_buckets(seeds: list[BeSeed]) -> None:

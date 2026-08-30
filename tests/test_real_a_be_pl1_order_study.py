@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 
-from tools.real_a_be_pl1_order_study import BeSeed, FollowThrough, _cohort_label, _peak_bucket, _state
+from tools.real_a_be_pl1_order_study import BeSeed, FollowThrough, _cohort_label, _peak_bucket, _print_ledger_exit_timing_audit, _state
 from tools.real_a_exit_simulator import Tick
 
 
@@ -53,3 +55,13 @@ class BePl1OrderStudyTests(unittest.TestCase):
         self.assertEqual(_state(old, config).hard_stop_price, 71.6968)
         self.assertAlmostEqual(_state(current, config).pl1_price, 100.6)
         self.assertEqual(_state(current, config).hard_stop_price, 97.7)
+
+    def test_exit_timing_audit_separates_post_exit_touch(self) -> None:
+        before = FollowThrough(self.seed, 100.5, 98.5, 100.52,
+                               resolved_at=self.seed.closed_at - timedelta(seconds=6), resolution="PL1_FIRST")
+        after = FollowThrough(self.seed, 100.5, 98.5, 100.52,
+                              resolved_at=self.seed.closed_at + timedelta(seconds=6), resolution="PL1_FIRST")
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_ledger_exit_timing_audit([before, after])
+        self.assertIn("PL1_FIRST | 1 | 0 | 1", output.getvalue())
