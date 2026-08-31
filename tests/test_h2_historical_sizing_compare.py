@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from src.exchange.binance_client import SymbolFilters
-from tools.h2_historical_sizing_compare import Trade, _coverage, _executable_notional, _metrics, _simulate
+from tools.h2_historical_sizing_compare import Trade, _coverage, _metrics, _simulate, _strict_observable_subset
 
 
 class H2HistoricalSizingCompareTests(unittest.TestCase):
@@ -33,6 +33,17 @@ class H2HistoricalSizingCompareTests(unittest.TestCase):
         missing = _trade("missing", start, start + timedelta(hours=1), None, "BREAKEVEN", missing=True)
         result = _coverage([protected, hard_stop, missing])
         self.assertEqual(result, {"trades": 3, "persisted": 1, "never": 1, "missing": 1})
+
+    def test_no_progress_is_known_unprotected_and_missing_windows_are_excluded(self) -> None:
+        start = datetime(2026, 8, 16, tzinfo=timezone.utc)
+        npe = _trade("npe", start, start + timedelta(hours=2), None, "NO_PROGRESS_EXIT")
+        missing = _trade("missing", start + timedelta(hours=3), start + timedelta(hours=5), None, "BREAKEVEN", missing=True)
+        affected = _trade("affected", start + timedelta(hours=4), start + timedelta(hours=6), None, "HARD_STOP")
+        after = _trade("after", start + timedelta(hours=5), start + timedelta(hours=6), None, "HARD_STOP")
+        included, excluded = _strict_observable_subset([npe, missing, affected, after])
+        self.assertFalse(npe.protection_missing)
+        self.assertEqual([item.row["pair_id"] for item in included], ["npe", "after"])
+        self.assertEqual([item.row["pair_id"] for item in excluded], ["missing", "affected"])
 
     def test_capital_efficiency_uses_time_weighted_committed_capital(self) -> None:
         start = datetime(2026, 8, 16, tzinfo=timezone.utc)

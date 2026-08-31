@@ -23,7 +23,9 @@ from src.trade_ledger import TradeLedger
 
 
 CLEAN_START = datetime(2026, 8, 15, 18, 52, tzinfo=BRASILIA_TZ).astimezone(timezone.utc)
-KNOWN_UNPROTECTED_REASONS = {"HARD_STOP", "REVIEW_STOP"}
+# _no_progress_due() returns false once BE has armed, so all three reasons
+# are direct evidence that the trade never became economically protected.
+KNOWN_UNPROTECTED_REASONS = {"HARD_STOP", "REVIEW_STOP", "NO_PROGRESS_EXIT"}
 
 
 @dataclass(frozen=True)
@@ -68,17 +70,17 @@ def main() -> None:
     print(f"Source: data/trades/trades_B.jsonl | capital=${args.capital:.2f} | REAL_A base B=${base:.6f}")
     print(f"Protection coverage: trades={coverage['trades']} | persisted timestamp={coverage['persisted']} | known never protected={coverage['never']} | needs reconstruction={coverage['missing']}")
     _version_coverage(trades)
-    if coverage["missing"]:
-        print("\nSTOP: clean cohort has missing protection timestamps. No sizing comparison was run and no reconstruction was attempted.")
-        return
-    if not trades:
+    comparison_trades, excluded = _strict_observable_subset(trades)
+    if excluded:
+        print(f"Strict observable subset: {len(comparison_trades)}/{len(trades)} trades; excluded {len(excluded)} entries inside {coverage['missing']} unresolved protection window(s). No reconstruction was attempted.")
+    if not comparison_trades:
         print("\nNo REAL_A closed trades in the clean cohort.")
         return
     filters, filter_source = _filters(args, config)
     print(f"Executable filters: {filter_source} | min_notional={filters.min_notional} | min_qty={filters.min_qty} | step_size={filters.step_size}")
-    real = [Position(trade, base) for trade in trades]
-    h2_theoretical, _ = _simulate(trades, base, args.capital, None)
-    h2_executable, blocked = _simulate(trades, base, args.capital, filters)
+    real = [Position(trade, base) for trade in comparison_trades]
+    h2_theoretical, _ = _simulate(comparison_trades, base, args.capital, None)
+    h2_executable, blocked = _simulate(comparison_trades, base, args.capital, filters)
     print("\narm | trades | initial $ | net PnL $ | final balance $ | return % | realized max DD $ | realized max DD % | avg/max committed $ | avg/max simultaneous | avg/min/max entry $")
     for name, positions in (("REAL_A", real), ("H2_THEORETICAL", h2_theoretical), ("H2_EXECUTABLE", h2_executable)):
         _print_metrics(name, _metrics(positions, args.capital, since, until))
@@ -120,6 +122,22 @@ def _coverage(trades: Iterable[Trade]) -> dict[str, int]:
         "never": sum(item.protected_at is None and not item.protection_missing for item in values),
         "missing": sum(item.protection_missing for item in values),
     }
+
+
+def _strict_observable_subset(trades: list[Trade]) -> tuple[list[Trade], list[Trade]]:
+    """Exclude a missing-protection trade and entries during its live interval.
+
+    This keeps the remaining H2 state exact without inventing the missing
+    protection time.  Positions outside the uncertainty interval remain valid.
+    """
+    unknown = [item for item in trades if item.protection_missing]
+    if not unknown:
+        return trades, []
+    included, excluded = [], []
+    for item in trades:
+        affected = any(window.opened <= item.opened < window.closed for window in unknown)
+        (excluded if affected else included).append(item)
+    return included, excluded
 
 
 def _version(row: dict[str, Any]) -> str:
