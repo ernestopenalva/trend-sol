@@ -259,9 +259,10 @@ instrumentation:
     state_file: "data/state/slow_ge_context_shadow.json"
     ledger_file: "data/trades/trades_slow_ge_context_shadow.jsonl"
   h2_exposure_shadow:
-    # Shadow puramente sintético; só muda o notional das entradas aprovadas pelo REAL_A.
+    # Shadow puramente sintético; só reduz o notional do REAL_A quando há risco descoberto.
     enabled: true
     accept_new_entries: true
+    sizing_version: "v2_reducer"
     capital_max_usdt: 100
     max_open_positions: 5
     state_file: "data/state/h2_exposure_shadow.json"

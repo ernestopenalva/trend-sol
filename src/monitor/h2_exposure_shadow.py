@@ -39,6 +39,7 @@ class H2ExposureShadow:
         self.settings = settings if isinstance(settings, dict) else {}
         self.enabled = bool(self.settings.get("enabled", False))
         self.accept_new_entries = bool(self.settings.get("accept_new_entries", True))
+        self.sizing_version = str(self.settings.get("sizing_version", "v2_reducer"))
         self.state_path = project_root / str(self.settings.get("state_file", "data/state/h2_exposure_shadow.json"))
         self.ledger = TradeLedger(project_root, project_root / str(self.settings.get("ledger_file", "data/trades/trades_h2_exposure_shadow.jsonl")))
         self.filters_provider = filters_provider
@@ -48,7 +49,7 @@ class H2ExposureShadow:
         self.blocked_capacity = 0
         self.blocked_same_5m = 0
         self.blocked_spacing = 0
-        self.blocked_min_notional_or_capital = 0
+        self.blocked_min_notional_h2 = 0
         self.blocked_symbol_filters_unavailable = 0
         self.max_simultaneous_positions = 0
         if self.enabled:
@@ -60,6 +61,11 @@ class H2ExposureShadow:
         if configured is None:
             configured = self.config.get("capital", {}).get("operational_balance_usdt", 0)
         return float(configured)
+
+    @property
+    def base_notional_usdt(self) -> float:
+        capital = self.config.get("capital", {})
+        return float(capital.get("operational_balance_usdt", 0)) * float(capital.get("trade_size_pct", 0)) / 100
 
     @property
     def open_positions(self) -> list[BotFullExitPosition]:
@@ -89,8 +95,8 @@ class H2ExposureShadow:
             self.blocked_symbol_filters_unavailable += 1
             return self._block("ENTRY_BLOCKED_SYMBOL_FILTERS_UNAVAILABLE", signal, bucket, error=str(exc))
         if sizing is None:
-            self.blocked_min_notional_or_capital += 1
-            return self._block("BLOCKED_MIN_NOTIONAL_OR_CAPITAL", signal, bucket)
+            self.blocked_min_notional_h2 += 1
+            return self._block("ENTRY_BLOCKED_MIN_NOTIONAL_H2", signal, bucket)
         self._open(signal, bucket, sizing)
         return True
 
@@ -122,17 +128,15 @@ class H2ExposureShadow:
             return None
         minimum_qty = _ceil_to_step(max(filters.min_qty, filters.min_notional / price_d), filters.step_size)
         minimum_notional = minimum_qty * price_d
-        if minimum_notional > capital:
+        base = Decimal(str(self.base_notional_usdt))
+        if minimum_notional > capital or base <= 0:
             return None
         uncovered = self._uncovered_positions()
         step_index = min(len(uncovered), 4) + 1
-        distributable = capital - minimum_notional
-        weights = (Decimal("1"), Decimal("0.5"), Decimal(1) / Decimal(3), Decimal("0.25"))
-        harmonic = sum(weights)
-        candidate = minimum_notional if step_index == 5 else distributable * weights[step_index - 1] / harmonic
+        candidate = base / Decimal(step_index)
         committed = sum(Decimal(str(item.position_notional_usdt or 0)) for item in self.open_positions)
         available = max(Decimal(0), capital - committed)
-        effective = min(candidate, available)
+        effective = min(candidate, available, base)
         quantity = _floor_to_step(effective / price_d, filters.step_size)
         actual_notional = quantity * price_d
         if quantity < minimum_qty or actual_notional > available or actual_notional <= 0:
@@ -140,6 +144,8 @@ class H2ExposureShadow:
         return {
             "uncovered_count": len(uncovered),
             "h2_step": step_index,
+            "sizing_version": self.sizing_version,
+            "base_notional": float(base),
             "candidate_notional": float(candidate),
             "available_capital": float(available),
             "effective_notional": float(actual_notional),
@@ -184,6 +190,16 @@ class H2ExposureShadow:
         self._event("OPEN", pair_id=pair_id, admission_bucket_open_time=bucket, entry_price=signal.price, **metadata)
         self._save_state()
 
+    def announce_sizing_version(self) -> None:
+        """Persist an auditable boundary without touching restored positions."""
+        if self.enabled:
+            self._event(
+                "H2_SIZING_VERSION_ACTIVATED",
+                sizing_version=self.sizing_version,
+                base_notional=self.base_notional_usdt,
+                restored_open_positions=len(self.open_positions),
+            )
+
     def _protection_state(self, position: BotFullExitPosition) -> dict[str, Any]:
         step = position.current_step()
         return {"pair_id": position.pair_id, "step": step, "uncovered": step == "NONE", "effective_stop": position.effective_stop}
@@ -218,8 +234,11 @@ class H2ExposureShadow:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
             self.entries_by_bucket = {int(key): int(value) for key, value in (data.get("entries_by_bucket") or {}).items()}
             self.entry_metadata = {str(key): value for key, value in (data.get("entry_metadata") or {}).items() if isinstance(value, dict)}
-            for name in ("blocked_capacity", "blocked_same_5m", "blocked_spacing", "blocked_min_notional_or_capital", "blocked_symbol_filters_unavailable", "max_simultaneous_positions"):
+            for name in ("blocked_capacity", "blocked_same_5m", "blocked_spacing", "blocked_symbol_filters_unavailable", "max_simultaneous_positions"):
                 setattr(self, name, int(data.get(name, 0)))
+            self.blocked_min_notional_h2 = int(
+                data.get("blocked_min_notional_h2", data.get("blocked_min_notional_or_capital", 0))
+            )
             for item in data.get("positions", []):
                 if item.get("status") == "OPEN":
                     position = BotFullExitPosition.from_state(item, self._exit_config(), PhantomExecutionClient(), self.logger)  # type: ignore[arg-type]
@@ -239,7 +258,7 @@ class H2ExposureShadow:
             "positions": [item.to_state() for item in self.open_positions],
             "entry_metadata": self.entry_metadata,
         }
-        payload.update({name: getattr(self, name) for name in ("blocked_capacity", "blocked_same_5m", "blocked_spacing", "blocked_min_notional_or_capital", "blocked_symbol_filters_unavailable", "max_simultaneous_positions")})
+        payload.update({name: getattr(self, name) for name in ("blocked_capacity", "blocked_same_5m", "blocked_spacing", "blocked_min_notional_h2", "blocked_symbol_filters_unavailable", "max_simultaneous_positions")})
         tmp = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.state_path)

@@ -13,9 +13,9 @@ from src.monitor.h2_exposure_shadow import H2ExposureShadow
 
 
 class H2ExposureShadowTests(unittest.TestCase):
-    def test_harmonic_steps_sum_to_capital_before_quantity_rounding(self) -> None:
+    def test_reducer_steps_are_base_divided_by_uncovered_plus_one(self) -> None:
         with self._shadow() as shadow:
-            filters = _filters(min_notional="5", step="0.0001")
+            filters = _filters(min_notional="1", step="0.0001")
             values = []
             for index, price in enumerate((100, 100, 100, 100, 100)):
                 sizing = shadow._sizing_for(price, filters)
@@ -23,7 +23,12 @@ class H2ExposureShadowTests(unittest.TestCase):
                 values.append(float(sizing["candidate_notional"]))
                 shadow._open(_signal(price, index), index * 300_000, sizing)  # type: ignore[arg-type]
             self.assertEqual([item["h2_step"] for item in shadow.entry_metadata.values()], [1, 2, 3, 4, 5])
-            self.assertAlmostEqual(sum(values), 100.0, places=8)
+            self.assertEqual(values[0], 20.0)
+            self.assertEqual(values[1], 10.0)
+            self.assertAlmostEqual(values[2], 20 / 3)
+            self.assertEqual(values[3], 5.0)
+            self.assertEqual(values[4], 4.0)
+            self.assertTrue(all(value <= 20 for value in values))
             self.assertEqual(len({round(item.position_notional_usdt or 0, 8) for item in shadow.open_positions}), 5)
             self.assertLessEqual(sum(item.position_notional_usdt or 0 for item in shadow.open_positions), 100.0)
 
@@ -31,7 +36,7 @@ class H2ExposureShadowTests(unittest.TestCase):
         with self._shadow(capital=4) as shadow:
             shadow.filters_provider = lambda _symbol: _filters(min_notional="5")
             self.assertFalse(shadow.on_signal(_signal(100, 0)))
-            self.assertEqual(shadow.blocked_min_notional_or_capital, 1)
+            self.assertEqual(shadow.blocked_min_notional_h2, 1)
 
     def test_uncovered_count_drops_when_be_arms_and_step_recovers(self) -> None:
         with self._shadow() as shadow:
@@ -45,6 +50,10 @@ class H2ExposureShadowTests(unittest.TestCase):
             self.assertTrue(shadow.on_signal(_signal(102, 2)))
             self.assertEqual(shadow.entry_metadata[shadow.open_positions[-1].pair_id]["uncovered_count"], 1)
             self.assertEqual(shadow.entry_metadata[shadow.open_positions[-1].pair_id]["h2_step"], 2)
+            shadow.on_tick(102.7, "2026-08-31T00:02:00+00:00")
+            self.assertTrue(shadow.on_signal(_signal(103, 3)))
+            self.assertEqual(shadow.entry_metadata[shadow.open_positions[-1].pair_id]["uncovered_count"], 0)
+            self.assertEqual(shadow.entry_metadata[shadow.open_positions[-1].pair_id]["candidate_notional"], 20.0)
 
     def test_cap_and_state_survive_restart_and_do_not_share_context_state(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -53,8 +62,10 @@ class H2ExposureShadowTests(unittest.TestCase):
             logger = _logger(root)
             shadow = H2ExposureShadow(root, config, logger, None, lambda _symbol: _filters())
             self.assertTrue(shadow.on_signal(_signal(100, 0)))
+            original_notional = shadow.open_positions[0].position_notional_usdt
             restored = H2ExposureShadow(root, config, logger, None, lambda _symbol: _filters())
             self.assertEqual(len(restored.open_positions), 1)
+            self.assertEqual(restored.open_positions[0].position_notional_usdt, original_notional)
             self.assertEqual(restored.entry_metadata[restored.open_positions[0].pair_id]["h2_step"], 1)
             context = RealAContextShadow(
                 root, config, logger, None, settings_key="dmi15_trajectory_context_shadow",
@@ -74,6 +85,7 @@ class H2ExposureShadowTests(unittest.TestCase):
             shadow.on_tick(98.0, "2026-08-31T00:01:00+00:00")
             record = shadow.ledger.load()[0]
             self.assertEqual(record["position_type"], "H2_EXPOSURE_SHADOW")
+            self.assertEqual(record["h2"]["sizing_version"], "v2_reducer")
             self.assertAlmostEqual(record["gross_pnl_usdt"], (98 - 100) * record["qty"])
             self.assertAlmostEqual(record["estimated_fees_usdt"], record["position_notional_usdt"] * 0.002)
             self.assertAlmostEqual(record["net_pnl_usdt"], record["gross_pnl_usdt"] - record["estimated_fees_usdt"])
@@ -124,7 +136,7 @@ def _config(capital: float = 100) -> dict:
         "risk": risk, "fees": {"enabled": True, "taker_fee_pct": 0.1}, "ladder": {"be_net_margin_pct": 0.05, "be_activation_buffer_atr": 0.5},
         "logging": {"console": False, "trade_log": "logs/trades.jsonl", "decision_log": "logs/decisions.jsonl", "system_log": "logs/system.log"},
         "instrumentation": {
-            "h2_exposure_shadow": {"enabled": True, "accept_new_entries": True, "capital_max_usdt": capital, "max_open_positions": 5, "state_file": "data/state/h2.json", "ledger_file": "data/trades/h2.jsonl"},
+            "h2_exposure_shadow": {"enabled": True, "accept_new_entries": True, "sizing_version": "v2_reducer", "capital_max_usdt": capital, "max_open_positions": 5, "state_file": "data/state/h2.json", "ledger_file": "data/trades/h2.jsonl"},
             "dmi15_trajectory_context_shadow": {"enabled": True, "accept_new_entries": True, "max_open_positions": 5, "state_file": "data/state/context.json", "ledger_file": "data/trades/context.jsonl"},
         },
     }

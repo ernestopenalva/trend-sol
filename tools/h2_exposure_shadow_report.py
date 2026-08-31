@@ -58,7 +58,8 @@ def main() -> None:
             f"${stats['average_committed']:.4f}/${stats['max_committed']:.4f} | {stats['average_positions']:.3f}/{stats['max_positions']}"
         )
     _overlap(records, states)
-    _h2_blocks(PROJECT_ROOT / "data/telemetry/h2_exposure_shadow_events.jsonl", since, until)
+    blocks = _h2_blocks(PROJECT_ROOT / "data/telemetry/h2_exposure_shadow_events.jsonl", since, until)
+    _h2_sizing(records["H2_EXPOSURE_SHADOW"], PROJECT_ROOT / ARMS["H2_EXPOSURE_SHADOW"][1], blocks, since)
     print("\nNotes: PnL and fees use the runtime ledger convention (round-trip fee % applied to entry notional).")
     print("'realized max DD' is drawdown of closed-trade equity only. It is not an intratrade mark-to-market drawdown; the ledger has no continuous shared portfolio-equity series.")
     print("Open positions are excluded from closed PnL and realized balance; their committed entry notional is included in exposure metrics.")
@@ -124,7 +125,7 @@ def _overlap(records: dict[str, list[dict[str, Any]]], states: dict[str, list[di
     print("Expected differences can arise only from each arm's own capacity/same-5m/spacing admission or real-order execution; H2 adds no voluntary risk gate.")
 
 
-def _h2_blocks(path: Path, since: datetime, until: datetime) -> None:
+def _h2_blocks(path: Path, since: datetime, until: datetime) -> Counter[str]:
     counts: Counter[str] = Counter()
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -135,6 +136,32 @@ def _h2_blocks(path: Path, since: datetime, until: datetime) -> None:
             if _within(row.get("ts"), since, until) and str(row.get("event", "")).startswith(("BLOCKED", "ENTRY_BLOCKED")):
                 counts[str(row["event"])] += 1
     print("H2 admission blocks: " + (", ".join(f"{name}={count}" for name, count in sorted(counts.items())) or "none"))
+    return counts
+
+
+def _h2_sizing(records: list[dict[str, Any]], state_path: Path, blocks: Counter[str], since: datetime) -> None:
+    entries = [
+        {**(row.get("h2") if isinstance(row.get("h2"), dict) else {}), "effective_notional": row.get("position_notional_usdt")}
+        for row in records
+    ]
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    metadata = state.get("entry_metadata", {}) if isinstance(state, dict) else {}
+    positions = state.get("positions", []) if isinstance(state, dict) else []
+    for position in positions if isinstance(positions, list) else []:
+        opened = _parse_ts(position.get("open_ts"))
+        if position.get("status") == "OPEN" and opened and opened >= since:
+            entries.append({**(metadata.get(str(position.get("pair_id")), {}) if isinstance(metadata, dict) else {}), "effective_notional": position.get("position_notional_usdt")})
+    notionals = [_number(item.get("effective_notional")) for item in entries]
+    notionals = [item for item in notionals if item is not None]
+    uncovered = Counter(str(item.get("uncovered_count", "unknown")) for item in entries)
+    versions = Counter(str(item.get("sizing_version") or "v1_harmonic_legacy") for item in entries)
+    print("H2 sizing: " + (f"entries={len(entries)} | avg/min/max entry notional=${mean(notionals):.4f}/${min(notionals):.4f}/${max(notionals):.4f}" if notionals else "entries=0"))
+    print("H2 sizing version: " + (", ".join(f"{key}={value}" for key, value in sorted(versions.items())) or "none"))
+    print("H2 uncovered-count distribution at entry: " + (", ".join(f"N={key}:{value}" for key, value in sorted(uncovered.items())) or "none"))
+    print(f"H2 blocked minNotional: {blocks['ENTRY_BLOCKED_MIN_NOTIONAL_H2']}")
 
 
 def _open_state(path: Path, *, real_a: bool) -> list[dict[str, Any]]:

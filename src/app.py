@@ -100,6 +100,7 @@ class Monitor:
             self.telemetry_writer,
             self.client.symbol_filters,
         )
+        self.h2_exposure_shadow.announce_sizing_version()
         self.entry_engine = EntryEngine(str(self.config["symbol"]), self.config, self.logger)
         self.gcr_shadow = GcrShadowRegistry(
             self.project_root, self.config, self.logger, self.telemetry_writer
