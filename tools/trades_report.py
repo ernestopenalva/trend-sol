@@ -41,7 +41,7 @@ def main() -> None:
         print()
         _print_inline_counts("Exit reasons", Counter(_exit_reason(record) for record in phantoms))
         print()
-        _print_trades(phantoms, config)
+        _print_trades(phantoms, config, include_context=args.context)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -51,6 +51,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--strategy", help="Filtra por strategy_version.")
     parser.add_argument("--run-id", help="Filtra por run_id.")
     parser.add_argument("--detail", action="store_true", help="Mostra campos tecnicos completos.")
+    parser.add_argument(
+        "--context",
+        action="store_true",
+        help="Inclui contexto EMA 5m na abertura/saída: BU, BE ou MI.",
+    )
     parser.add_argument(
         "--phantoms",
         action="store_true",
@@ -94,7 +99,7 @@ def _print_report(records: list[Dict[str, Any]], args: argparse.Namespace, confi
         print()
         _print_detail(records, config)
     else:
-        _print_trades(records, config)
+        _print_trades(records, config, include_context=args.context)
 
 
 def _print_summary(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
@@ -205,10 +210,14 @@ def _print_exit_reason_breakdown(records: list[Dict[str, Any]], config: Dict[str
         )
 
 
-def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
+def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any], *, include_context: bool = False) -> None:
     print("Trades:")
-    print("opened | closed | age | entry | peak | trough | exit | giveback | gross | net | reason")
+    print("opened | closed | age | entry | peak | trough | exit | giveback | gross | net | reason" + (" | entry ctx | exit ctx" if include_context else ""))
     for record in records:
+        context_values = (
+            f" | {_market_stack(record.get('market_context_entry'))} | {_market_stack(record.get('market_context_exit'))}"
+            if include_context else ""
+        )
         print(
             f"{_short_time(record.get('opened_at'))} | "
             f"{_short_time(record.get('closed_at'))} | "
@@ -221,6 +230,7 @@ def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None
             f"{_fmt_signed_pct(_gross_pnl(record))} | "
             f"{_fmt_signed_pct(_net_pnl(record, config))} | "
             f"{_exit_reason(record)}"
+            f"{context_values}"
         )
     if any(record.get("trough_price") is not None and record.get("trough_tracking_complete") is False for record in records):
         print("* observed trough; tracking started after the trade opened")
@@ -278,6 +288,8 @@ def _print_detail(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None
             f"strategy={record.get('strategy_version')}",
             f"opened_at={record.get('opened_at')}",
             f"closed_at={record.get('closed_at')}",
+            f"entry_context={_market_stack(record.get('market_context_entry'))}",
+            f"exit_context={_market_stack(record.get('market_context_exit'))}",
         ]
         print(" | ".join(fields))
 
@@ -637,6 +649,21 @@ def _giveback_cell(record: Dict[str, Any]) -> str:
     difference = peak - exit_price
     percentage = difference / peak * 100
     return f"{difference:+.4f} ({percentage:+.2f}%)"
+
+
+def _market_stack(snapshot: Any) -> str:
+    """Existing 5m EMA stack, rendered for observation only."""
+    if not isinstance(snapshot, dict):
+        return "n/a"
+    values = snapshot.get("tf_5m") if isinstance(snapshot.get("tf_5m"), dict) else snapshot
+    ema20, ema50, ema100 = (_float(values.get(key)) for key in ("ema20", "ema50", "ema100"))
+    if None in (ema20, ema50, ema100):
+        return "n/a"
+    if ema20 > ema50 > ema100:
+        return "BU"
+    if ema20 < ema50 < ema100:
+        return "BE"
+    return "MI"
 
 
 def _price_pct_cell(price: Any, entry_price: Any, suffix: str = "", pct: Any = None) -> str:
