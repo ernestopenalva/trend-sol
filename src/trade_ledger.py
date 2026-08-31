@@ -66,6 +66,31 @@ class TradeLedger:
     ) -> bool:
         return self._append_closed(position, config, "CONTEXT_SHADOW")
 
+    def append_closed_h2_exposure_shadow_trade(
+        self,
+        position: BotFullExitPosition,
+        config: Dict[str, Any],
+        entry_metadata: Dict[str, Any],
+    ) -> bool:
+        """Append H2-only dollar fields without changing other ledger schemas."""
+        if position.status != "CLOSED" or self._contains(position.pair_id, "H2_EXPOSURE_SHADOW"):
+            return False
+        record = self._record(position, config, "H2_EXPOSURE_SHADOW")
+        gross = _float_or_none(record.get("realized_pnl_abs")) or 0.0
+        notional = _float_or_none(record.get("position_notional_usdt")) or 0.0
+        fees = notional * (_float_or_none(record.get("estimated_fees_pct")) or 0.0) / 100
+        record.update({
+            "shadow_kind": "H2_EXPOSURE_SHADOW",
+            "h2": entry_metadata,
+            "gross_pnl_usdt": gross,
+            "estimated_fees_usdt": fees,
+            "net_pnl_usdt": gross - fees,
+        })
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return True
+
     def _append_closed(
         self,
         position: BotFullExitPosition,

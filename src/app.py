@@ -28,6 +28,7 @@ from src.monitor.dmi15_combined_shadow import Dmi15CombinedShadowRegistry
 from src.monitor.entry_engine import EntryEngine
 from src.monitor.context_predicates import passes_dmi15_trajectory, passes_slow_ge45
 from src.monitor.context_shadow import RealAContextShadow
+from src.monitor.h2_exposure_shadow import H2ExposureShadow
 from src.monitor.gcr_shadow import GcrShadowRegistry
 from src.monitor.market_context import MarketContextEngine
 from src.monitor.human_console_reporter import HumanConsoleReporter
@@ -91,6 +92,13 @@ class Monitor:
             self.state_manager,
             self.trade_ledger,
             self.telemetry_writer,
+        )
+        self.h2_exposure_shadow = H2ExposureShadow(
+            self.project_root,
+            self.config,
+            self.logger,
+            self.telemetry_writer,
+            self.client.symbol_filters,
         )
         self.entry_engine = EntryEngine(str(self.config["symbol"]), self.config, self.logger)
         self.gcr_shadow = GcrShadowRegistry(
@@ -159,6 +167,8 @@ class Monitor:
             no_progress_tolerance_buffer_pct=no_progress.get("tolerance_buffer_pct"),
             gcr_shadow="GCR_SHADOW_B",
             gcr_previous_must_arm_be=True,
+            h2_exposure_shadow="H2_EXPOSURE_SHADOW",
+            h2_exposure_rule="unchanged REAL_A signal/admission/ladder; harmonic sizing by uncovered H2 positions",
             dmi15_shadow="DMI15_SHADOW_C",
             dmi15_entry_rule="+DI_now>+DI_15m_ago AND -DI_now<-DI_15m_ago AND +DI_now>-DI_now",
             dmi15_spread_shadow="DMI15_SPREAD6_SHADOW_D",
@@ -307,6 +317,10 @@ class Monitor:
             self.last_tick_monotonic = time.monotonic()
             self.registry.on_tick(price, market_ts=_market_timestamp(payload))
             try:
+                self.h2_exposure_shadow.on_tick(price, _market_timestamp(payload))
+            except Exception as exc:
+                self.logger.system("h2_exposure_shadow_tick_failed", price=price, error=str(exc))
+            try:
                 self.gcr_shadow.on_tick(price, _market_timestamp(payload))
             except Exception as exc:
                 self.logger.system("gcr_shadow_tick_failed", price=price, error=str(exc))
@@ -401,6 +415,12 @@ class Monitor:
                     except Exception as exc:
                         self.logger.system(
                             "gcr_shadow_signal_failed", signal_price=signal.price, error=str(exc)
+                        )
+                    try:
+                        self.h2_exposure_shadow.on_signal(signal)
+                    except Exception as exc:
+                        self.logger.system(
+                            "h2_exposure_shadow_signal_failed", signal_price=signal.price, error=str(exc)
                         )
                     self.registry.open_pair(signal, snapshot)
                 except BinanceClientError as exc:

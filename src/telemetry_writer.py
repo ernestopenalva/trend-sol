@@ -22,6 +22,7 @@ class TelemetryWriter:
         "dmi15_rsi70_shadow_event": "dmi15_rsi70_shadow_events_file",
         "dmi15_combined_shadow_event": "dmi15_combined_shadow_events_file",
         "context_shadow_event": "context_shadow_events_file",
+        "h2_exposure_shadow_event": "h2_exposure_shadow_events_file",
         "market_context": "market_context_events_file",
         "ema_entry": "ema_entry_events_file",
     }
