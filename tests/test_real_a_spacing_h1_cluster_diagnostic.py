@@ -32,3 +32,11 @@ class SpacingH1ClusterTests(unittest.TestCase):
         ))
         self.assertEqual(bad.category, "RUIM_HS_DOMINANTE")
         self.assertEqual(good.category, "BOM_LUCRO_DOMINANTE")
+
+    def test_profit_lock_economic_exit_counts_as_profit_lock(self) -> None:
+        cluster = Cluster(3, tuple(
+            Trade(str(index), self.start + timedelta(minutes=index), self.start + timedelta(minutes=10), 100 + index, "PROFIT_LOCK_ECONOMIC_EXIT")
+            for index in range(3)
+        ))
+        self.assertEqual(cluster.profit_lock_count, 3)
+        self.assertEqual(cluster.category, "BOM_LUCRO_DOMINANTE")

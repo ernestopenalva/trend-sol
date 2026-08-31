@@ -45,9 +45,17 @@ class Cluster:
         return result
 
     @property
+    def profit_lock_count(self) -> int:
+        return sum(count for reason, count in self.reasons.items() if reason.startswith("PROFIT_LOCK"))
+
+    @property
+    def winner_count(self) -> int:
+        return self.profit_lock_count + self.reasons["TRAILING"]
+
+    @property
     def category(self) -> str:
         reasons = self.reasons
-        winners = reasons["PROFIT_LOCK"] + reasons["TRAILING"]
+        winners = self.winner_count
         if reasons["HARD_STOP"] >= 2 and reasons["HARD_STOP"] > winners:
             return "RUIM_HS_DOMINANTE"
         if winners >= 2 and winners > reasons["HARD_STOP"]:
@@ -121,7 +129,7 @@ def _print_cluster(cluster: Cluster) -> None:
     transitions, reasons = cluster.transitions, cluster.reasons
     entries = " -> ".join(f"{_brt(trade.opened_at)} @ {trade.entry_price:.4f}" for trade in cluster.trades)
     exits = " | ".join(f"{trade.pair_id}:{trade.exit_reason}" for trade in cluster.trades)
-    print(f"\nCLUSTER {cluster.index} | {cluster.category} | entries={len(cluster.trades)} | ASC={transitions['ASCENDENTE']} DESC={transitions['DESCENDENTE']} EQ={transitions['IGUAL']} | HS={reasons['HARD_STOP']} BE={reasons['BREAKEVEN']} PL={reasons['PROFIT_LOCK']} TRAIL={reasons['TRAILING']}")
+    print(f"\nCLUSTER {cluster.index} | {cluster.category} | entries={len(cluster.trades)} | ASC={transitions['ASCENDENTE']} DESC={transitions['DESCENDENTE']} EQ={transitions['IGUAL']} | HS={reasons['HARD_STOP']} BE={reasons['BREAKEVEN']} PL={cluster.profit_lock_count} TRAIL={reasons['TRAILING']}")
     print(f"entries: {entries}")
     print(f"exits: {exits}")
 
@@ -147,9 +155,9 @@ def _print_comparison(clusters: list[Cluster]) -> None:
 
 def _print_examples(clusters: list[Cluster]) -> None:
     hs = sorted(clusters, key=lambda item: (item.reasons["HARD_STOP"], len(item.trades)), reverse=True)[:3]
-    winners = sorted(clusters, key=lambda item: (item.reasons["PROFIT_LOCK"] + item.reasons["TRAILING"], len(item.trades)), reverse=True)[:3]
+    winners = sorted(clusters, key=lambda item: (item.winner_count, len(item.trades)), reverse=True)[:3]
     print("\nEXAMPLES | largest HARD_STOP clusters: " + ", ".join(f"#{item.index} HS={item.reasons['HARD_STOP']} entries={len(item.trades)}" for item in hs))
-    print("EXAMPLES | largest PROFIT_LOCK/TRAILING clusters: " + ", ".join(f"#{item.index} PL+TRAIL={item.reasons['PROFIT_LOCK'] + item.reasons['TRAILING']} entries={len(item.trades)}" for item in winners))
+    print("EXAMPLES | largest PROFIT_LOCK/TRAILING clusters: " + ", ".join(f"#{item.index} PL+TRAIL={item.winner_count} entries={len(item.trades)}" for item in winners))
 
 
 def _transition_totals(clusters: list[Cluster]) -> Counter[str]:
@@ -177,7 +185,7 @@ def _write_csvs(directory: Path, clusters: list[Cluster]) -> None:
         writer = csv.writer(handle); writer.writerow(("cluster", "category", "entries", "ascending", "descending", "equal", "hard_stop", "breakeven", "profit_lock", "trailing"))
         for cluster in clusters:
             transitions, reasons = cluster.transitions, cluster.reasons
-            writer.writerow((cluster.index, cluster.category, len(cluster.trades), transitions["ASCENDENTE"], transitions["DESCENDENTE"], transitions["IGUAL"], reasons["HARD_STOP"], reasons["BREAKEVEN"], reasons["PROFIT_LOCK"], reasons["TRAILING"]))
+            writer.writerow((cluster.index, cluster.category, len(cluster.trades), transitions["ASCENDENTE"], transitions["DESCENDENTE"], transitions["IGUAL"], reasons["HARD_STOP"], reasons["BREAKEVEN"], cluster.profit_lock_count, reasons["TRAILING"]))
     with (directory / "cluster_entries.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle); writer.writerow(("cluster", "category", "pair_id", "opened_brt", "closed_brt", "entry_price", "transition_from_previous", "exit_reason"))
         for cluster in clusters:
