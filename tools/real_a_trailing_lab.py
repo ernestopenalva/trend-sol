@@ -158,6 +158,9 @@ def main() -> None:
     if args.until:
         until = _timestamp(args.until)
         seeds = [seed for seed in seeds if seed.opened_at < until]
+    if args.closed_until:
+        closed_until = _timestamp(args.closed_until)
+        seeds = [seed for seed in seeds if seed.ledger_closed_at <= closed_until]
     if not seeds:
         raise SystemExit("No REAL_A closed seeds in the requested opened_at window.")
 
@@ -470,6 +473,7 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--candles-1m", type=Path, required=True, help="Continuous historical 1m candle JSONL for CURRENT_ATR_5.")
     parser.add_argument("--since", default=CLEAN_START)
     parser.add_argument("--until", help="Optional opened_at end-exclusive timestamp for a frozen seed cohort.")
+    parser.add_argument("--closed-until", help="Optional inclusive ledger closed_at cutoff; freezes a live study cohort.")
     parser.add_argument("--capital", type=float, default=100.0)
     parser.add_argument("--max-gap-seconds", type=float, default=30.0)
     parser.add_argument("--validation-grace-seconds", type=float, default=5.0)

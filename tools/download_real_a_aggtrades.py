@@ -28,15 +28,20 @@ ONE_HOUR_MS = 60 * 60 * 1000
 
 def main() -> None:
     args = _parse_args()
-    seeds = load_real_a_seeds(args.ledger, _parse_timestamp(args.since))
+    continuous = bool(args.continuous_from or args.continuous_until)
+    if bool(args.continuous_from) != bool(args.continuous_until):
+        raise ValueError("--continuous-from and --continuous-until must be used together.")
+    if continuous and any((args.opened_until, args.exit_reason, args.closed_until, args.until, args.only_validation_grace, args.post_open_hours is not None)):
+        raise ValueError("Continuous mode cannot be combined with seed/window selection flags.")
+    seeds = [] if continuous else load_real_a_seeds(args.ledger, _parse_timestamp(args.since))
     if args.opened_until:
         opened_until = _parse_timestamp(args.opened_until)
         seeds = [seed for seed in seeds if seed.opened_at < opened_until]
     if args.exit_reason:
         seeds = [seed for seed in seeds if seed.ledger_reason == args.exit_reason]
-    if not seeds:
+    if not continuous and not seeds:
         raise ValueError("No seeds remain after the requested opened_at / exit_reason filters.")
-    if args.closed_until:
+    if not continuous and args.closed_until:
         closed_until = _parse_timestamp(args.closed_until)
         seeds = [seed for seed in seeds if seed.ledger_closed_at <= closed_until]
         if not seeds:
@@ -44,7 +49,14 @@ def main() -> None:
     until = _parse_timestamp(args.until) if args.until else None
     if args.only_validation_grace and args.post_open_hours is not None:
         raise ValueError("--only-validation-grace cannot be combined with --post-open-hours.")
-    if args.only_validation_grace:
+    if continuous:
+        start = _parse_timestamp(args.continuous_from)
+        end = _parse_timestamp(args.continuous_until)
+        if end <= start:
+            raise ValueError("--continuous-until must be after --continuous-from.")
+        windows = [(start, end)]
+        print("continuous aggTrade mode: retaining every aggTrade in the requested interval.")
+    elif args.only_validation_grace:
         windows = merge_windows(
             (seed.ledger_closed_at, seed.ledger_closed_at + timedelta(seconds=args.validation_grace_seconds))
             for seed in seeds
@@ -58,7 +70,8 @@ def main() -> None:
             ))
             for seed in seeds
         )
-    print(f"REAL_A validation seeds: {len(seeds)}")
+    if not continuous:
+        print(f"REAL_A validation seeds: {len(seeds)}")
     print(f"download windows: {len(windows)}")
     for start, end in windows:
         print(f"  {start.isoformat()} -> {end.isoformat()}")
@@ -174,6 +187,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Read-only downloader of public aggTrades for REAL_A exit validation.")
     parser.add_argument("--ledger", type=Path, default=PROJECT_ROOT / "data" / "trades" / "trades_B.jsonl")
     parser.add_argument("--since", default="2026-08-19T01:05:00-03:00")
+    parser.add_argument("--continuous-from", help="Inclusive continuous-series start, independent of ledger seeds.")
+    parser.add_argument("--continuous-until", help="Inclusive continuous-series end, independent of ledger seeds.")
     parser.add_argument("--until", help="Optional UTC/offset timestamp to retain post-real-exit ticks for one later variant.")
     parser.add_argument("--opened-until", help="Exclude seeds whose opened_at is at or after this timestamp.")
     parser.add_argument("--exit-reason", help="Restrict seeds to one exact ledger exit reason, e.g. BREAKEVEN.")
