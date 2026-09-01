@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 import unittest
-from tools.real_a_rsi_exposure_study import Trade, _attach_exposure, _quantile_groups
+from tools.real_a_rsi_exposure_study import Trade, _attach_exposure, _corr, _quantile_groups
 
 class RsiExposureStudyTests(unittest.TestCase):
     def test_exposure_counts_only_positions_open_at_new_entry(self):
@@ -10,3 +10,6 @@ class RsiExposureStudyTests(unittest.TestCase):
     def test_quantiles_do_not_drop_records(self):
         rows=[Trade({},datetime.now(timezone.utc),datetime.now(timezone.utc),1,1,0,float(i),rsi=float(i)) for i in range(5)]
         self.assertEqual(sum(len(x) for _,x in _quantile_groups(rows,'rsi')),5)
+
+    def test_correlation_returns_numeric_value(self):
+        self.assertEqual(_corr([1, 2, 3], [2, 4, 6]), 1.0)

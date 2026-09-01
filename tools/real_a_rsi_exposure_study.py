@@ -196,7 +196,11 @@ def _portfolio(trades:list[Trade],capital:float,affected:list[Trade],factor:floa
 def _quantile_groups(rows:list[Trade],field:str)->list[tuple[str,list[Trade]]]:
     ordered=sorted(rows,key=lambda x:float(getattr(x,field))); n=len(ordered); return [(f"Q{i+1}",ordered[i*n//4:(i+1)*n//4]) for i in range(4)] if n else []
 def _corr(xs:list[float],ys:list[float])->float:
-    if len(xs)<2: return 0.; mx,my=_mean(xs),_mean(ys); den=math.sqrt(sum((x-mx)**2 for x in xs)*sum((y-my)**2 for y in ys)); return sum((x-mx)*(y-my) for x,y in zip(xs,ys))/den if den else 0.
+    if len(xs) < 2:
+        return 0.0
+    mx, my = _mean(xs), _mean(ys)
+    denominator = math.sqrt(sum((x-mx)**2 for x in xs) * sum((y-my)**2 for y in ys))
+    return sum((x-mx)*(y-my) for x,y in zip(xs,ys)) / denominator if denominator else 0.0
 def _number(v:Any,default:float)->float:
     try:return float(v)
     except (TypeError,ValueError):return default
