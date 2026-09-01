@@ -80,8 +80,6 @@ class CurrentAtrSeries:
             raise ValueError(
                 "CURRENT_ATR_5 not run: 1m candle cache lacks the required Wilder-14 warmup before the first seed."
             )
-        if self.candles[-1].close_time > end + timedelta(minutes=1):
-            raise ValueError("1m candle cache is not chronological.")
         if self.candles[-1].close_time < end:
             raise ValueError("CURRENT_ATR_5 not run: 1m candle cache ends before the supplied aggTrade data.")
         relevant = [item for item in self.candles if earliest_required <= item.open_time <= end]

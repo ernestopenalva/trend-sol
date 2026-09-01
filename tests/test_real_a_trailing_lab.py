@@ -27,3 +27,5 @@ class RealATrailingLabTests(unittest.TestCase):
         self.assertIsNotNone(position.last_current_atr)
         self.assertEqual(position._current_trailing_stop(), 110)
 
+    def test_cache_may_extend_beyond_last_aggtrade(self) -> None:
+        self.series.validate(self.start + timedelta(minutes=20), self.start + timedelta(minutes=25))
