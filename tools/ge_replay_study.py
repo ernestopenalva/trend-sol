@@ -10,7 +10,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -115,6 +115,7 @@ class ReplayResult:
     full_slot_minutes: int = 0
     observed_minutes: int = 0
     max_simultaneous_positions: int = 0
+    blocked_circuit: int = 0
 
     def entries(self) -> list[ReplayEntry]:
         closed = {
@@ -490,6 +491,7 @@ def run_universe(
     end_ms: int,
     intrabar_path: str,
     round_trip_spread_bps: float,
+    admission_guard: Optional[Callable[[int, ReplayResult], bool]] = None,
 ) -> ReplayResult:
     if intrabar_path not in {"HIGH_FIRST", "LOW_FIRST"}:
         raise ValueError("intrabar path must be HIGH_FIRST or LOW_FIRST")
@@ -516,8 +518,12 @@ def run_universe(
         open_positions[:] = [item for item in open_positions if item.position.status == "OPEN"]
         if len(open_positions) >= max_positions:
             result.full_slot_minutes += 1
+        admission_allowed = admission_guard is None or admission_guard(boundary, result)
         admitted = 0
         for event in signal_groups.get(boundary, []):
+            if not admission_allowed:
+                result.blocked_circuit += 1
+                continue
             if len(open_positions) >= max_positions:
                 result.blocked_slots += 1
                 continue
