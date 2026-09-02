@@ -53,7 +53,7 @@ def main() -> None:
     if since is None or until is None or until <= since:
         raise SystemExit("--since and --until must be valid BRT/ISO timestamps, with --until after --since")
     rows = TradeLedger(PROJECT_ROOT, Path(args.ledger)).load()
-    all_trades = _load_trades(rows, since, until, args.capital)
+    all_trades = _load_trades(rows, since, until, args.capital, args)
     if not all_trades:
         raise SystemExit("No closed REAL_A trades in the requested opened_at window.")
     cohort, signature = _largest_uniform_group(all_trades)
@@ -62,10 +62,11 @@ def main() -> None:
     print("TREND-SOL | REAL_A circuit-breaker phase 1 | LEDGER DESCRIPTIVE | READ-ONLY")
     print(f"Requested opened_at window: {_fmt(since)} -> {_fmt(until)} (end exclusive)")
     print("No entry is blocked and no replay is run by this phase.")
-    _print_cohort(all_trades, cohort, signature)
+    _print_cohort(all_trades, cohort, signature, args)
     _write_detail(Path(args.output), points, args.capital)
     _print_distribution(points, args.capital, bool(args.detail))
     _print_worst_episodes(points, args.capital, args.episodes)
+    _print_hard_stop_clusters(points, 12, args.episodes)
     print("\nNEXT STEP")
     print("Use this distribution to predeclare only a few round candidate detectors (DD, rolling PnL, optionally damage+activity).")
     print("Then compare only those through independent full-engine replay with 1h/2h/4h/6h cooldowns.")
@@ -73,11 +74,17 @@ def main() -> None:
     print("This output is descriptive only and is not a circuit-breaker verdict.")
 
 
-def _load_trades(rows: Iterable[dict[str, Any]], since: datetime, until: datetime, capital: float) -> list[ClosedTrade]:
+def _load_trades(rows: Iterable[dict[str, Any]], since: datetime, until: datetime, capital: float, args: argparse.Namespace) -> list[ClosedTrade]:
     output = []
     fallback_notional = capital * 0.20
     for row in rows:
         if bool(row.get("phantom")) or row.get("shadow_kind") or str(row.get("position_type")) != "BOT_EXIT":
+            continue
+        if args.strategy_version and str(row.get("strategy_version") or "") != args.strategy_version:
+            continue
+        if args.hard_stop_pct is not None and not math.isclose(_number(row.get("hard_stop_pct")) or math.nan, args.hard_stop_pct, abs_tol=1e-9):
+            continue
+        if args.npe != "all" and _as_bool(row.get("no_progress_enabled")) != (args.npe == "true"):
             continue
         opened, closed, net = _parse_ts(row.get("opened_at")), _parse_ts(row.get("closed_at")), _number(row.get("net_pnl_pct"))
         if opened is None or closed is None or net is None or not (since <= opened < until):
@@ -115,13 +122,14 @@ def _equity_points(trades: list[ClosedTrade], capital: float) -> list[EquityPoin
     return output
 
 
-def _print_cohort(all_trades: list[ClosedTrade], cohort: list[ClosedTrade], signature: str) -> None:
+def _print_cohort(all_trades: list[ClosedTrade], cohort: list[ClosedTrade], signature: str, args: argparse.Namespace) -> None:
     groups = Counter(item.signature for item in all_trades)
     print("\nCOHORT / HISTORICAL COMPARABILITY")
-    print(f"Largest ledger-identifiable uniform group: {len(cohort)}/{len(all_trades)} closed trades")
+    selected = any((args.strategy_version, args.hard_stop_pct is not None, args.npe != "all"))
+    print(f"{'Explicitly selected' if selected else 'Largest ledger-identifiable uniform'} group: {len(cohort)}/{len(all_trades)} closed trades")
     print(f"Signature: {signature}")
     print(f"Uniform group span by opened_at: {_fmt(min(x.opened for x in cohort))} -> {_fmt(max(x.opened for x in cohort))}")
-    print("Other configuration signatures excluded from the primary descriptive cohort:")
+    print("Other ledger-identifiable signatures within the selected universe:")
     for name, count in sorted(groups.items(), key=lambda item: (-item[1], item[0])):
         if name != signature:
             print(f"  {count:4d} | {name}")
@@ -184,7 +192,8 @@ def _quantile(values: list[float], q: float) -> float:
 def _print_worst_episodes(points: list[EquityPoint], capital: float, limit: int) -> None:
     episodes = _drawdown_episodes(points)
     episodes.sort(key=lambda values: max(x.drawdown for x in values), reverse=True)
-    print(f"\nWORST REALIZED DRAWDOWN EPISODES (top {min(limit, len(episodes))})")
+    print(f"\nALL-TIME REALIZED DRAWDOWN EXCURSIONS (top {min(limit, len(episodes))})")
+    print("An excursion ends only after equity regains its prior all-time peak. It is not an acute-crisis definition.")
     if not episodes:
         print("None: equity never fell below a preceding realized peak.")
         return
@@ -195,6 +204,25 @@ def _print_worst_episodes(points: list[EquityPoint], capital: float, limit: int)
         recovery = _recovery(points, deepest)
         sequence = ",".join(str(x.trade.row.get("exit_reason") or "?") for x in values)
         print(f"#{index} | {_fmt(start.trade.closed)} -> {_fmt(end.trade.closed)} | duration={(end.trade.closed-start.trade.closed).total_seconds()/3600:.2f}h | net from peak={end.equity-start.peak:+.3f}$ | max DD={deepest.drawdown:.3f}$/{deepest.drawdown/capital*100:.3f}% | HS/BE/PL/TRAIL={reasons['HARD_STOP']}/{reasons['BREAKEVEN']}/{reasons['PROFIT_LOCK']}/{reasons['TRAILING']} | recover 25/50/100={recovery} | sequence={sequence}")
+
+
+def _print_hard_stop_clusters(points: list[EquityPoint], gap_hours: float, limit: int) -> None:
+    """Acute descriptive clusters; small BE outcomes never split a cluster."""
+    stops = [item for item in points if item.trade.row.get("exit_reason") == "HARD_STOP"]
+    clusters: list[list[EquityPoint]] = []
+    for item in stops:
+        if not clusters or item.trade.closed - clusters[-1][-1].trade.closed > timedelta(hours=gap_hours):
+            clusters.append([item])
+        else:
+            clusters[-1].append(item)
+    clusters = [item for item in clusters if len(item) >= 2]
+    clusters.sort(key=lambda values: sum(x.trade.net_dollars for x in values))
+    print(f"\nACUTE HARD_STOP CLUSTERS (>=2 HS, gap <= {gap_hours:g}h; descriptive only)")
+    if not clusters:
+        print("None.")
+        return
+    for index, values in enumerate(clusters[:limit], 1):
+        print(f"#{index} | {_fmt(values[0].trade.closed)} -> {_fmt(values[-1].trade.closed)} | HS={len(values)} | HS net={sum(x.trade.net_dollars for x in values):+.3f}$ | span={(values[-1].trade.closed-values[0].trade.closed).total_seconds()/3600:.2f}h")
 
 
 def _drawdown_episodes(points: list[EquityPoint]) -> list[list[EquityPoint]]:
@@ -226,6 +254,9 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--since", required=True)
     parser.add_argument("--until", required=True, help="End-exclusive BRT/ISO timestamp")
     parser.add_argument("--ledger", default=str(PROJECT_ROOT / "data/trades/trades_B.jsonl"))
+    parser.add_argument("--strategy-version", help="Exact ledger strategy_version; use this for a replay-comparable configuration.")
+    parser.add_argument("--hard-stop-pct", type=float, help="Exact ledger hard-stop percentage.")
+    parser.add_argument("--npe", choices=("all", "true", "false"), default="all", help="Filter no_progress_enabled without treating missing telemetry as false.")
     parser.add_argument("--capital", type=float, default=100.0)
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--detail", action="store_true", help="Also print every closed-trade row; CSV is always written.")
@@ -256,6 +287,14 @@ def _number(value: Any) -> float | None:
         return number if math.isfinite(number) else None
     except (TypeError, ValueError):
         return None
+
+
+def _as_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+        return value.strip().lower() == "true"
+    return None
 
 
 def _fmt(value: datetime) -> str:

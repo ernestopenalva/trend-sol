@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import unittest
 
-from tools.real_a_circuit_breaker_study import ClosedTrade, _drawdown_episodes, _equity_points, _largest_uniform_group, _signature
+from tools.real_a_circuit_breaker_study import ClosedTrade, _as_bool, _drawdown_episodes, _equity_points, _largest_uniform_group, _signature
 
 
 class CircuitBreakerStudyTests(unittest.TestCase):
@@ -24,3 +24,7 @@ class CircuitBreakerStudyTests(unittest.TestCase):
         a = _signature({"strategy_version": "v", "hard_stop_pct": 1.5, "no_progress_enabled": False, "profit_lock_economic_floor": 90.0})
         b = _signature({"strategy_version": "v", "hard_stop_pct": 1.5, "no_progress_enabled": False, "profit_lock_economic_floor": 110.0})
         self.assertEqual(a, b)
+
+    def test_npe_filter_never_equates_missing_to_false(self):
+        self.assertIsNone(_as_bool(None))
+        self.assertFalse(_as_bool(False))
