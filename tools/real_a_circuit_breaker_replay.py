@@ -78,12 +78,14 @@ def main() -> None:
     notional = args.capital * float(config["capital"]["trade_size_pct"]) / 100
     print("TREND-SOL | REAL_A circuit breaker | FULL-ENGINE REPLAY | READ-ONLY")
     print(f"Window: {_fmt(start)} -> {_fmt(end)} (end exclusive) | signals={len(signals)} | OHLC path={args.intrabar_path.upper()} | capital=${args.capital:.2f}")
-    print("Predeclared candidates: DD_1P5; PNL_2H_0P5; COMBO_DD1P5_PNL4H0P5_MIN2. Cooldowns: 1h/2h/4h/6h.")
+    rules = _selected_rules(args.rules)
+    cooldowns = _cooldowns(args.cooldowns)
+    print("Predeclared candidates: " + ", ".join(item.name for item in rules) + ". Cooldowns: " + ", ".join(f"{item:g}h" for item in cooldowns) + ".")
     base = run_universe(name="CONTROL", lookback=0, config=config, signals=signals, execution_candles=candles["1m"], start_ms=start_ms, end_ms=end_ms, intrabar_path=args.intrabar_path.upper(), round_trip_spread_bps=spread)
     _forward_validation(args, base, end)
     results: list[tuple[str, ReplayResult, CircuitGuard | None]] = [("CONTROL", base, None)]
-    for rule in _rules():
-        for cooldown in (1, 2, 4, 6):
+    for rule in rules:
+        for cooldown in cooldowns:
             guard = CircuitGuard(rule, cooldown, args.capital, notional)
             name = f"{rule.name}_{cooldown}H"
             replay = run_universe(name=name, lookback=0, config=config, signals=signals, execution_candles=candles["1m"], start_ms=start_ms, end_ms=end_ms, intrabar_path=args.intrabar_path.upper(), round_trip_spread_bps=spread, admission_guard=guard.allows)
@@ -102,6 +104,26 @@ def main() -> None:
 
 def _rules() -> tuple[Rule, ...]:
     return (Rule("DD_1P5", "DD", 1.5), Rule("PNL_2H_0P5", "PNL", 0.5, 2), Rule("COMBO_DD1P5_PNL4H0P5_MIN2", "COMBO", 1.5, 4, 2))
+
+
+def _selected_rules(value: str) -> tuple[Rule, ...]:
+    aliases = {"dd": "DD", "pnl": "PNL", "combo": "COMBO"}
+    requested = tuple(item.strip().lower() for item in value.split(",") if item.strip())
+    if not requested or (len(requested) == 1 and requested[0] == "all"):
+        return _rules()
+    if any(item not in aliases for item in requested):
+        raise SystemExit("--rules accepts all, dd, pnl, combo, or a comma-separated subset.")
+    return tuple(item for item in _rules() if item.kind in {aliases[key] for key in requested})
+
+
+def _cooldowns(value: str) -> tuple[float, ...]:
+    try:
+        output = tuple(float(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as error:
+        raise SystemExit("--cooldowns must be comma-separated positive hours, e.g. 1,2,4,6") from error
+    if not output or any(item <= 0 for item in output):
+        raise SystemExit("--cooldowns must contain at least one positive hour")
+    return output
 
 
 def _forward_validation(args: argparse.Namespace, control: ReplayResult, end: datetime) -> None:
@@ -157,7 +179,7 @@ def _validate(config: dict[str,Any]) -> None:
 
 
 def _args()->argparse.Namespace:
-    p=argparse.ArgumentParser(description="Read-only full-engine circuit-breaker replay.");p.add_argument("--since",required=True);p.add_argument("--until",required=True);p.add_argument("--config",default=str(PROJECT_ROOT/"config/config.yaml"));p.add_argument("--ledger",default=str(PROJECT_ROOT/"data/trades/trades_B.jsonl"));p.add_argument("--validation-since",default="2026-08-19T01:05:00-03:00");p.add_argument("--validation-until");p.add_argument("--capital",type=float,default=100.);p.add_argument("--cache-dir",default=str(PROJECT_ROOT/"data/studies/real_a_circuit_breaker/klines"));p.add_argument("--offline",action="store_true");p.add_argument("--market-data-url");p.add_argument("--http-timeout-seconds",type=int,default=15);p.add_argument("--round-trip-spread-bps",type=float);p.add_argument("--intrabar-path",choices=("high_first","low_first"),default="high_first");return p.parse_args()
+    p=argparse.ArgumentParser(description="Read-only full-engine circuit-breaker replay.");p.add_argument("--since",required=True);p.add_argument("--until",required=True);p.add_argument("--config",default=str(PROJECT_ROOT/"config/config.yaml"));p.add_argument("--ledger",default=str(PROJECT_ROOT/"data/trades/trades_B.jsonl"));p.add_argument("--validation-since",default="2026-08-19T01:05:00-03:00");p.add_argument("--validation-until");p.add_argument("--rules",default="all",help="all or comma-separated dd,pnl,combo; use combo for the frozen OOS candidate.");p.add_argument("--cooldowns",default="1,2,4,6",help="Comma-separated positive hours; use 6 for the frozen OOS candidate.");p.add_argument("--capital",type=float,default=100.);p.add_argument("--cache-dir",default=str(PROJECT_ROOT/"data/studies/real_a_circuit_breaker/klines"));p.add_argument("--offline",action="store_true");p.add_argument("--market-data-url");p.add_argument("--http-timeout-seconds",type=int,default=15);p.add_argument("--round-trip-spread-bps",type=float);p.add_argument("--intrabar-path",choices=("high_first","low_first"),default="high_first");return p.parse_args()
 
 
 def _ts(value:str)->datetime|None:

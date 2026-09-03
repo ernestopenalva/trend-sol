@@ -1,5 +1,5 @@
 import unittest
-from tools.real_a_circuit_breaker_replay import CircuitGuard, Rule
+from tools.real_a_circuit_breaker_replay import CircuitGuard, Rule, _cooldowns, _selected_rules
 from tools.ge_replay_study import ReplayResult, ReplayTrade
 
 class CircuitReplayTests(unittest.TestCase):
@@ -7,3 +7,7 @@ class CircuitReplayTests(unittest.TestCase):
         r=ReplayResult("x",0,0);g=CircuitGuard(Rule("x","PNL",.5,2),1,100,20)
         r.trades.append(ReplayTrade(0,60_000,1,1,1,1,-3, -3,"HARD_STOP"))
         self.assertFalse(g.allows(60_000,r)); self.assertFalse(g.allows(120_000,r)); self.assertEqual(g.crises,1)
+
+    def test_oos_selection_can_freeze_combo_6h_only(self):
+        self.assertEqual([rule.kind for rule in _selected_rules("combo")], ["COMBO"])
+        self.assertEqual(_cooldowns("6"), (6.0,))
