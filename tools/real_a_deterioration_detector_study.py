@@ -34,7 +34,7 @@ def main():
  uniform=[item for item in trades if str(item[3].get('strategy_version'))=='b_atr_v1.4' and float(item[3].get('hard_stop_pct') or 0)==1.5 and item[3].get('no_progress_enabled') is False]
  print(f'\nUNIFORM ECONOMIC SUBCOHORT | b_atr_v1.4 / HS=1.5 / NPE=false | N={len(uniform)}')
  for name in ('SLOW_GE_BASELINE','LOCAL_DD_12'):
-  raw=_candidates(rows)[name]; _report(name,'RAW',rows,raw,t0,uniform,a.capital); _report(name,'STABILIZED_2x5m',rows,_confirm(raw),t0,uniform,a.capital)
+  raw=_candidates(rows)[name]; stable=_confirm(raw); _report(name,'RAW',rows,raw,t0,uniform,a.capital); _report(name,'STABILIZED_2x5m',rows,stable,t0,uniform,a.capital); _audit_mapping(name+' STABILIZED',rows,stable,uniform)
  print('\nWEEKLY ECONOMIC STABILITY | SLOW_GE and LOCAL_DD (stabilized)')
  for name in ('SLOW_GE_BASELINE','LOCAL_DD_12'):_weekly(name,rows,_confirm(_candidates(rows)[name]),trades,a.capital)
  print('LIMITS: exploratory/in-sample; overlapping 5m observations are not independent; repricing preserves ledger entries and cannot model changed slots/admission.')
@@ -78,12 +78,21 @@ def _report(name,kind,rows,state,t0,trades,cap,brief=False):
  delay_median = f'{statistics.median(delays):.1f}' if delays else 'n/a'; delay_mean = f'{statistics.fmean(delays):.1f}' if delays else 'n/a'
  bad_mean = f'{statistics.fmean(bad):+.3f}%' if bad else 'n/a'; good_mean = f'{statistics.fmean(good):+.3f}%' if good else 'n/a'
  if brief: print(f'{name} | {kind} | delay median/mean={delay_median}/{delay_mean}m | p25/p75={statistics.quantiles(delays,n=4)[0]:.1f}/{statistics.quantiles(delays,n=4)[2]:.1f}m' if len(delays)>=4 else f'{name} | {kind} | delay median/mean={delay_median}/{delay_mean}m'); return
- print(f'{name} | {kind} | delay median/mean={delay_median}/{delay_mean}m | flips/day={flips/max(len(rows)/288,1):.2f} | state={sum(state)/len(state):.1%} | net/trade deteriorating/normal={bad_mean}/{good_mean} | $15 avoided/sacrificed/net/ratio=${loss:.3f}/${sacrificed:.3f}/${loss-sacrificed:.3f}/{loss/sacrificed if sacrificed else 0:.2f} | $10 avoided/sacrificed/net/ratio=${loss10:.3f}/${sacrificed10:.3f}/${loss10-sacrificed10:.3f}/{loss10/sacrificed10 if sacrificed10 else 0:.2f} | N={len(tagged)}')
+ print(f'{name} | {kind} | delay median/mean={delay_median}/{delay_mean}m | flips/day={flips/max(len(rows)/288,1):.2f} | state={sum(state)/len(state):.1%} | trades deteriorating/normal={len(bad)}/{len(good)} | net/trade deteriorating/normal={bad_mean}/{good_mean} | $15 avoided/sacrificed/net/ratio=${loss:.3f}/${sacrificed:.3f}/${loss-sacrificed:.3f}/{loss/sacrificed if sacrificed else 0:.2f} | $10 avoided/sacrificed/net/ratio=${loss10:.3f}/${sacrificed10:.3f}/${loss10-sacrificed10:.3f}/{loss10/sacrificed10 if sacrificed10 else 0:.2f} | N={len(tagged)}')
 def _weekly(name,rows,state,trades,cap):
  groups=defaultdict(list)
  for item in trades: groups[item[0].isocalendar()[:2]].append(item)
  for week,items in sorted(groups.items()):
-  print(f'{name} | {week[0]}-W{week[1]:02d}'); _report(name,'STABLE',rows,state,[],items,cap)
+  selected=[(row,value) for row,value in zip(rows,state) if datetime.fromtimestamp(row['t']/1000,timezone.utc).isocalendar()[:2]==week]
+  local_rows,local_state=zip(*selected) if selected else ([],[])
+  print(f'{name} | {week[0]}-W{week[1]:02d}'); _report(name,'STABLE',list(local_rows),list(local_state),[],items,cap)
+def _audit_mapping(name,rows,state,trades):
+ mapped=[]
+ for opened,_,_,_ in trades:
+  options=[i for i,row in enumerate(rows) if row['t']<=int(opened.timestamp()*1000)]
+  if options:
+   i=options[-1]; mapped.append((state[i],(opened.timestamp()*1000-rows[i]['t'])/60000))
+ print(f'MAPPING AUDIT | {name} | last closed 5m <= opened_at | trades={len(trades)} | deteriorating={sum(x[0] for x in mapped)} | normal={sum(not x[0] for x in mapped)} | candle-age min/median/max={min(x[1] for x in mapped):.2f}/{statistics.median(x[1] for x in mapped):.2f}/{max(x[1] for x in mapped):.2f}m')
 def _dt(v):return datetime.fromisoformat(v.replace('Z','+00:00')).astimezone(timezone.utc)
 def _dt0(v):
  try:return _dt(str(v))
