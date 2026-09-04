@@ -104,8 +104,13 @@ def _opened_after(x:dict[str,Any], since:datetime)->bool:
     opened = _ts(x.get('opened_at') or x.get('open_ts'))
     return bool(opened and opened >= since)
 def _real_opens(since:datetime)->list[dict[str,Any]]:
-    value=_state(PROJECT_ROOT/'data/state/open_positions.json'); rows=value if isinstance(value,list) else []
+    rows = _rows(PROJECT_ROOT/'data/state/open_positions.json')
     return [x for x in rows if x.get('status')=='OPEN' and x.get('label')=='B' and not x.get('phantom') and _opened_after(x,since)]
+
+def _rows(path:Path)->list[dict[str,Any]]:
+    try: value=json.loads(path.read_text(encoding='utf-8'))
+    except (OSError,json.JSONDecodeError): return []
+    return [item for item in value if isinstance(item,dict)] if isinstance(value,list) else []
 def _cb_opens(state:dict[str,Any], since:datetime)->list[dict[str,Any]]: return [x for x in state.get('positions',[]) if x.get('status')=='OPEN' and _opened_after(x,since)]
 def _key(x:dict[str,Any])->int|None:
     try:return int(x.get('source_candle_open_time'))

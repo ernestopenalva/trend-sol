@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from src.logging_utils import JsonlLogger
 from src.monitor.circuit_breaker_shadow import CircuitBreakerShadow
 from src.monitor.entry_engine import EntrySignal
-from tools.circuit_breaker_shadow_report import _opened_after
+from tools.circuit_breaker_shadow_report import _opened_after, _rows
 
 
 class CircuitBreakerShadowTests(unittest.TestCase):
@@ -56,6 +56,12 @@ class CircuitBreakerShadowTests(unittest.TestCase):
     def test_forward_report_accepts_open_state_timestamp(self) -> None:
         since = datetime(2026, 9, 4, 14, 20, tzinfo=timezone.utc)
         self.assertTrue(_opened_after({"open_ts": "2026-09-04T14:21:00+00:00"}, since))
+
+    def test_forward_report_reads_real_a_list_state(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "open_positions.json"
+            path.write_text('[{"status":"OPEN","label":"B"}]', encoding="utf-8")
+            self.assertEqual(_rows(path), [{"status": "OPEN", "label": "B"}])
 
 
 def _config() -> dict:
