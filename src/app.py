@@ -354,6 +354,7 @@ class Monitor:
             for name, shadow in (
                 ("dmi15_trajectory_context_shadow", self.dmi15_trajectory_context_shadow),
                 ("slow_ge_context_shadow", self.slow_ge_context_shadow),
+                ("circuit_breaker_shadow", self.circuit_breaker_shadow),
             ):
                 try:
                     shadow.on_tick(price, _market_timestamp(payload))

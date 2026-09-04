@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from src.logging_utils import JsonlLogger
 from src.monitor.circuit_breaker_shadow import CircuitBreakerShadow
 from src.monitor.entry_engine import EntrySignal
+from tools.circuit_breaker_shadow_report import _opened_after
 
 
 class CircuitBreakerShadowTests(unittest.TestCase):
@@ -44,6 +45,10 @@ class CircuitBreakerShadowTests(unittest.TestCase):
             self.assertTrue(shadow.on_approved_real_a_signal(signal, {"tf_5m": {"ema20": 100.0}}))
             self.assertEqual(len(shadow.open_positions), 1)
             self.assertEqual(shadow.latest_market_context, {"tf_5m": {"ema20": 100.0}})
+
+    def test_forward_report_accepts_open_state_timestamp(self) -> None:
+        since = datetime(2026, 9, 4, 14, 20, tzinfo=timezone.utc)
+        self.assertTrue(_opened_after({"open_ts": "2026-09-04T14:21:00+00:00"}, since))
 
 
 def _config() -> dict:
