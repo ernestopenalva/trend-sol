@@ -48,6 +48,13 @@ class CircuitBreakerShadow(RealAContextShadow):
             return self._block("ENTRY_BLOCKED_CIRCUIT_BREAKER", signal, _bucket(signal.source_candle_open_time), breaker_until=self.circuit_breaker_until)
         return super().on_signal(signal)
 
+    def on_approved_real_a_signal(
+        self, signal: EntrySignal, market_context: Dict[str, Any] | None
+    ) -> bool:
+        """Admit only a signal that survived REAL_A's operational checks."""
+        self.latest_market_context = deepcopy(market_context) if market_context else self.latest_market_context
+        return self.on_signal(signal)
+
     def on_tick(self, price: float, observed_at: str) -> None:
         if not self.enabled:
             return

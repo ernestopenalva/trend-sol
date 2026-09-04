@@ -354,7 +354,6 @@ class Monitor:
             for name, shadow in (
                 ("dmi15_trajectory_context_shadow", self.dmi15_trajectory_context_shadow),
                 ("slow_ge_context_shadow", self.slow_ge_context_shadow),
-                ("circuit_breaker_shadow", self.circuit_breaker_shadow),
             ):
                 try:
                     shadow.on_tick(price, _market_timestamp(payload))
@@ -433,6 +432,12 @@ class Monitor:
                     except Exception as exc:
                         self.logger.system(
                             "h2_exposure_shadow_signal_failed", signal_price=signal.price, error=str(exc)
+                        )
+                    try:
+                        self.circuit_breaker_shadow.on_approved_real_a_signal(signal, snapshot)
+                    except Exception as exc:
+                        self.logger.system(
+                            "circuit_breaker_shadow_signal_failed", signal_price=signal.price, error=str(exc)
                         )
                     self.registry.open_pair(signal, snapshot)
                 except BinanceClientError as exc:

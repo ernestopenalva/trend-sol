@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 
 from src.logging_utils import JsonlLogger
 from src.monitor.circuit_breaker_shadow import CircuitBreakerShadow
+from src.monitor.entry_engine import EntrySignal
 
 
 class CircuitBreakerShadowTests(unittest.TestCase):
@@ -33,6 +34,16 @@ class CircuitBreakerShadowTests(unittest.TestCase):
             shadow._evaluate_after_close(now, 100.0)
 
             self.assertFalse(shadow.circuit_breaker_active)
+
+    def test_approved_real_a_signal_keeps_context_but_uses_own_admission(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); config = _config()
+            shadow = CircuitBreakerShadow(root, config, JsonlLogger(root, config), None)
+            signal = EntrySignal("SOLUSDT", 100.0, "2026-09-04T15:51:00+00:00", 1_788_537_000_000, 0.2, "1m", 14)
+
+            self.assertTrue(shadow.on_approved_real_a_signal(signal, {"tf_5m": {"ema20": 100.0}}))
+            self.assertEqual(len(shadow.open_positions), 1)
+            self.assertEqual(shadow.latest_market_context, {"tf_5m": {"ema20": 100.0}})
 
 
 def _config() -> dict:
