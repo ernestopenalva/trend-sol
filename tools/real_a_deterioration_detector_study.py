@@ -25,9 +25,18 @@ def main():
  print(f'Frozen window: {_fmt(start)} -> {_fmt(end)} | 5m closed candles={len(rows)} | REAL_A closed trades={len(trades)}')
  print('T0 primary (retrospective ground truth): first trade close whose NEXT 4h has >=2 closes and cumulative net <= -0.5% of capital. Sensitivity: same definition, NEXT 2h. T0 is detector-independent.')
  print(f'T0 episodes: primary={len(t0)} | sensitivity_2h={len(t0s)}')
+ print('\nPRIMARY T0 4H')
  for name,raw in _candidates(rows).items():
   stable=_confirm(raw); _report(name,'RAW',rows,raw,t0,trades,a.capital); _report(name,'STABILIZED_2x5m',rows,stable,t0,trades,a.capital)
- print('\nECONOMIC SUBCOHORT: results above label each trade configuration; do not combine silent regimes. Uniform subset is largest signature among b_atr_v1.4 / HS=1.5 / NPE=false when available.')
+ print('\nSENSITIVITY T0 2H (only delay changes; economic repricing remains entry-state based)')
+ for name,raw in _candidates(rows).items():
+  _report(name,'RAW',rows,raw,t0s,trades,a.capital,brief=True); _report(name,'STABILIZED_2x5m',rows,_confirm(raw),t0s,trades,a.capital,brief=True)
+ uniform=[item for item in trades if str(item[3].get('strategy_version'))=='b_atr_v1.4' and float(item[3].get('hard_stop_pct') or 0)==1.5 and item[3].get('no_progress_enabled') is False]
+ print(f'\nUNIFORM ECONOMIC SUBCOHORT | b_atr_v1.4 / HS=1.5 / NPE=false | N={len(uniform)}')
+ for name in ('SLOW_GE_BASELINE','LOCAL_DD_12'):
+  raw=_candidates(rows)[name]; _report(name,'RAW',rows,raw,t0,uniform,a.capital); _report(name,'STABILIZED_2x5m',rows,_confirm(raw),t0,uniform,a.capital)
+ print('\nWEEKLY ECONOMIC STABILITY | SLOW_GE and LOCAL_DD (stabilized)')
+ for name in ('SLOW_GE_BASELINE','LOCAL_DD_12'):_weekly(name,rows,_confirm(_candidates(rows)[name]),trades,a.capital)
  print('LIMITS: exploratory/in-sample; overlapping 5m observations are not independent; repricing preserves ledger entries and cannot model changed slots/admission.')
 
 def _features(c,sm,em):
@@ -51,7 +60,7 @@ def _t0(trades,cap,h):
   w=[p for _,z,p,_ in trades if close<z<=close+timedelta(hours=h)]
   if len(w)>=2 and sum(w)*.2<=-.005*cap: out.append(close)
  return [x for i,x in enumerate(out) if not i or x-out[i-1]>timedelta(hours=4)]
-def _report(name,kind,rows,state,t0,trades,cap):
+def _report(name,kind,rows,state,t0,trades,cap,brief=False):
  starts=[rows[i]['t'] for i,v in enumerate(state) if v and (i==0 or not state[i-1])]; flips=sum(state[i]!=state[i-1] for i in range(1,len(state))); delays=[]
  for zero in t0:
   hit=next((x for x in starts if x>=int(zero.timestamp()*1000)),None)
@@ -68,7 +77,13 @@ def _report(name,kind,rows,state,t0,trades,cap):
  loss,sacrificed=sizing(15); loss10,sacrificed10=sizing(10)
  delay_median = f'{statistics.median(delays):.1f}' if delays else 'n/a'; delay_mean = f'{statistics.fmean(delays):.1f}' if delays else 'n/a'
  bad_mean = f'{statistics.fmean(bad):+.3f}%' if bad else 'n/a'; good_mean = f'{statistics.fmean(good):+.3f}%' if good else 'n/a'
+ if brief: print(f'{name} | {kind} | delay median/mean={delay_median}/{delay_mean}m | p25/p75={statistics.quantiles(delays,n=4)[0]:.1f}/{statistics.quantiles(delays,n=4)[2]:.1f}m' if len(delays)>=4 else f'{name} | {kind} | delay median/mean={delay_median}/{delay_mean}m'); return
  print(f'{name} | {kind} | delay median/mean={delay_median}/{delay_mean}m | flips/day={flips/max(len(rows)/288,1):.2f} | state={sum(state)/len(state):.1%} | net/trade deteriorating/normal={bad_mean}/{good_mean} | $15 avoided/sacrificed/net/ratio=${loss:.3f}/${sacrificed:.3f}/${loss-sacrificed:.3f}/{loss/sacrificed if sacrificed else 0:.2f} | $10 avoided/sacrificed/net/ratio=${loss10:.3f}/${sacrificed10:.3f}/${loss10-sacrificed10:.3f}/{loss10/sacrificed10 if sacrificed10 else 0:.2f} | N={len(tagged)}')
+def _weekly(name,rows,state,trades,cap):
+ groups=defaultdict(list)
+ for item in trades: groups[item[0].isocalendar()[:2]].append(item)
+ for week,items in sorted(groups.items()):
+  print(f'{name} | {week[0]}-W{week[1]:02d}'); _report(name,'STABLE',rows,state,[],items,cap)
 def _dt(v):return datetime.fromisoformat(v.replace('Z','+00:00')).astimezone(timezone.utc)
 def _dt0(v):
  try:return _dt(str(v))
