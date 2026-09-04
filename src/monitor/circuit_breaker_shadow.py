@@ -48,6 +48,17 @@ class CircuitBreakerShadow(RealAContextShadow):
             return self._block("ENTRY_BLOCKED_CIRCUIT_BREAKER", signal, _bucket(signal.source_candle_open_time), breaker_until=self.circuit_breaker_until)
         return super().on_signal(signal)
 
+    def on_kline(
+        self, stream: str, payload: Dict[str, Any], snapshot: Dict[str, Any] | None
+    ) -> None:
+        """Intentionally ignore candles: CB entries originate only from REAL_A fills.
+
+        The inherited context-shadow implementation evaluates its own EntryEngine.
+        That is correct for context experiments but would let this paired shadow
+        create an entry without the corresponding REAL_A position.
+        """
+        return None
+
     def on_approved_real_a_signal(
         self, signal: EntrySignal, market_context: Dict[str, Any] | None
     ) -> bool:

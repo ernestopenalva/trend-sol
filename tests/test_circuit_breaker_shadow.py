@@ -46,6 +46,13 @@ class CircuitBreakerShadowTests(unittest.TestCase):
             self.assertEqual(len(shadow.open_positions), 1)
             self.assertEqual(shadow.latest_market_context, {"tf_5m": {"ema20": 100.0}})
 
+    def test_candles_can_never_open_the_paired_shadow(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); config = _config()
+            shadow = CircuitBreakerShadow(root, config, JsonlLogger(root, config), None)
+            shadow.on_kline("solusdt@kline_1m", {"k": {"x": True}}, {"tf_5m": {}})
+            self.assertEqual(shadow.open_positions, [])
+
     def test_forward_report_accepts_open_state_timestamp(self) -> None:
         since = datetime(2026, 9, 4, 14, 20, tzinfo=timezone.utc)
         self.assertTrue(_opened_after({"open_ts": "2026-09-04T14:21:00+00:00"}, since))

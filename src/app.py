@@ -299,9 +299,6 @@ class Monitor:
             self.slow_ge_context_shadow.engine.load_history(
                 timeframe, klines, now_ms=self._server_now_ms()
             )
-            self.circuit_breaker_shadow.engine.load_history(
-                timeframe, klines, now_ms=self._server_now_ms()
-            )
 
     def _server_now_ms(self) -> int:
         import time
@@ -411,7 +408,6 @@ class Monitor:
             for name, shadow in (
                 ("dmi15_trajectory_context_shadow", self.dmi15_trajectory_context_shadow),
                 ("slow_ge_context_shadow", self.slow_ge_context_shadow),
-                ("circuit_breaker_shadow", self.circuit_breaker_shadow),
             ):
                 try:
                     shadow.on_kline(stream, payload, snapshot)
@@ -434,13 +430,14 @@ class Monitor:
                         self.logger.system(
                             "h2_exposure_shadow_signal_failed", signal_price=signal.price, error=str(exc)
                         )
-                    try:
-                        self.circuit_breaker_shadow.on_approved_real_a_signal(signal, snapshot)
-                    except Exception as exc:
-                        self.logger.system(
-                            "circuit_breaker_shadow_signal_failed", signal_price=signal.price, error=str(exc)
-                        )
-                    self.registry.open_pair(signal, snapshot)
+                    real_opened = self.registry.open_pair(signal, snapshot)
+                    if real_opened:
+                        try:
+                            self.circuit_breaker_shadow.on_approved_real_a_signal(signal, snapshot)
+                        except Exception as exc:
+                            self.logger.system(
+                                "circuit_breaker_shadow_signal_failed", signal_price=signal.price, error=str(exc)
+                            )
                 except BinanceClientError as exc:
                     self.logger.system("order_rejected", error=str(exc), signal_price=signal.price)
 

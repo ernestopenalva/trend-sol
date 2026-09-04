@@ -53,14 +53,14 @@ class PositionRegistry:
         self._load_admission_state()
         self.reconcile_with_binance()
 
-    def open_pair(self, signal: EntrySignal, market_context: Optional[Dict[str, Any]] = None) -> None:
+    def open_pair(self, signal: EntrySignal, market_context: Optional[Dict[str, Any]] = None) -> bool:
         blocked_reason = self._admission_block_reason(signal)
         if blocked_reason:
             self._log_blocked_signal(signal, blocked_reason)
-            return
+            return False
         if self.review_required:
             self.logger.system("entry_paused_needs_review", price=signal.price)
-            return
+            return False
 
         capital_cfg = self.config["capital"]
         quote_per_position = (
@@ -180,6 +180,7 @@ class PositionRegistry:
             self.logger.system("bot_position_opened", pair_id=pair_id, entry=opened[0].entry_price)
         self.save_state()
         self._save_admission_state()
+        return True
 
     def on_tick(self, price: float, market_ts: Optional[str] = None) -> None:
         observed_at = market_ts or now_iso()
