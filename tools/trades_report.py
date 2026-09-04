@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 from collections import Counter
 from datetime import date, datetime, time, timezone
@@ -26,6 +27,8 @@ def main() -> None:
     config = _load_config()
     records = TradeLedger(PROJECT_ROOT).load()
     selected = _filter(records, args)
+    if args.h2_sizing:
+        selected = _attach_h2_sizing(selected, config)
     filtered, phantoms = _partition_records(selected)
     if args.csv:
         _write_csv([*filtered, *phantoms] if args.phantoms else filtered, Path(args.csv))
@@ -60,6 +63,14 @@ def _parse_args() -> argparse.Namespace:
         "--phantoms",
         action="store_true",
         help="Mostra fantasmas em secao separada; eles nunca entram nos agregados reais.",
+    )
+    parser.add_argument(
+        "--h2-sizing",
+        action="store_true",
+        help=(
+            "Inclui o notional H2 efetivamente registrado para o mesmo candle de origem; "
+            "H2_UNMATCHED significa que não há posição H2 correspondente persistida."
+        ),
     )
     parser.add_argument("--csv", help="Exporta CSV para o caminho informado.")
     return parser.parse_args()
@@ -97,9 +108,9 @@ def _print_report(records: list[Dict[str, Any]], args: argparse.Namespace, confi
     if args.detail:
         _print_detail_sections(records)
         print()
-        _print_detail(records, config)
+        _print_detail(records, config, include_h2=args.h2_sizing)
     else:
-        _print_trades(records, config, include_context=args.context)
+        _print_trades(records, config, include_context=args.context, include_h2=args.h2_sizing)
 
 
 def _print_summary(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
@@ -210,13 +221,30 @@ def _print_exit_reason_breakdown(records: list[Dict[str, Any]], config: Dict[str
         )
 
 
-def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any], *, include_context: bool = False) -> None:
+def _print_trades(
+    records: list[Dict[str, Any]],
+    config: Dict[str, Any],
+    *,
+    include_context: bool = False,
+    include_h2: bool = False,
+) -> None:
     print("Trades:")
-    print("opened | closed | age | entry | peak | trough | exit | giveback | gross | net | reason" + (" | entry ctx | exit ctx" if include_context else ""))
+    print(
+        "opened | closed | age | entry | peak | trough | exit | giveback | gross | net | reason"
+        + (" | entry ctx | exit ctx" if include_context else "")
+        + (" | H2 entry $ | H2 step | H2 uncovered | H2 status" if include_h2 else "")
+    )
     for record in records:
         context_values = (
             f" | {_market_stack(record.get('market_context_entry'))} | {_market_stack(record.get('market_context_exit'))}"
             if include_context else ""
+        )
+        h2_values = (
+            f" | {_fmt_h2_notional(record.get('h2_effective_notional_usdt'))}"
+            f" | {record.get('h2_step', 'n/a')}"
+            f" | {record.get('h2_uncovered_count', 'n/a')}"
+            f" | {record.get('h2_status', 'H2_UNMATCHED')}"
+            if include_h2 else ""
         )
         print(
             f"{_short_time(record.get('opened_at'))} | "
@@ -231,12 +259,13 @@ def _print_trades(records: list[Dict[str, Any]], config: Dict[str, Any], *, incl
             f"{_fmt_signed_pct(_net_pnl(record, config))} | "
             f"{_exit_reason(record)}"
             f"{context_values}"
+            f"{h2_values}"
         )
     if any(record.get("trough_price") is not None and record.get("trough_tracking_complete") is False for record in records):
         print("* observed trough; tracking started after the trade opened")
 
 
-def _print_detail(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None:
+def _print_detail(records: list[Dict[str, Any]], config: Dict[str, Any], *, include_h2: bool = False) -> None:
     print("Trades detail:")
     for record in records:
         fields = [
@@ -291,6 +320,16 @@ def _print_detail(records: list[Dict[str, Any]], config: Dict[str, Any]) -> None
             f"entry_context={_market_stack(record.get('market_context_entry'))}",
             f"exit_context={_market_stack(record.get('market_context_exit'))}",
         ]
+        if include_h2:
+            fields.extend(
+                [
+                    f"h2_entry_usdt={_fmt_h2_notional(record.get('h2_effective_notional_usdt'))}",
+                    f"h2_step={record.get('h2_step', 'n/a')}",
+                    f"h2_uncovered={record.get('h2_uncovered_count', 'n/a')}",
+                    f"h2_status={record.get('h2_status', 'H2_UNMATCHED')}",
+                    f"h2_pair_id={record.get('h2_pair_id', 'n/a')}",
+                ]
+            )
         print(" | ".join(fields))
 
 
@@ -301,6 +340,71 @@ def _write_csv(records: list[Dict[str, Any]], path: Path) -> None:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(records)
+
+
+def _attach_h2_sizing(records: list[Dict[str, Any]], config: Dict[str, Any]) -> list[Dict[str, Any]]:
+    """Join actual H2 positions by the immutable source 5m candle, never by time proximity."""
+    instrumentation = config.get("instrumentation") if isinstance(config.get("instrumentation"), dict) else {}
+    h2_config = instrumentation.get("h2_exposure_shadow") if isinstance(instrumentation.get("h2_exposure_shadow"), dict) else {}
+    ledger_path = PROJECT_ROOT / str(h2_config.get("ledger_file", "data/trades/trades_h2_exposure_shadow.jsonl"))
+    state_path = PROJECT_ROOT / str(h2_config.get("state_file", "data/state/h2_exposure_shadow.json"))
+    h2_by_source = _h2_positions_by_source(ledger_path, state_path)
+
+    attached: list[Dict[str, Any]] = []
+    for record in records:
+        output = dict(record)
+        matched = h2_by_source.get(_source_candle_key(record))
+        if matched is None:
+            output["h2_status"] = "H2_UNMATCHED"
+        else:
+            output.update(matched)
+        attached.append(output)
+    return attached
+
+
+def _h2_positions_by_source(ledger_path: Path, state_path: Path) -> Dict[int, Dict[str, Any]]:
+    """Return closed and currently-open persisted H2 positions keyed by source candle."""
+    result: Dict[int, Dict[str, Any]] = {}
+    if ledger_path.exists():
+        for record in TradeLedger(PROJECT_ROOT, ledger_path).load():
+            if str(record.get("shadow_kind")) != "H2_EXPOSURE_SHADOW":
+                continue
+            _store_h2_match(result, record, status="CLOSED")
+
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    positions = state.get("positions", []) if isinstance(state, dict) else []
+    metadata = state.get("entry_metadata", {}) if isinstance(state, dict) else {}
+    if isinstance(positions, list) and isinstance(metadata, dict):
+        for position in positions:
+            if not isinstance(position, dict) or position.get("status") != "OPEN":
+                continue
+            entry_metadata = metadata.get(str(position.get("pair_id")), {})
+            record = {**position, "h2": entry_metadata if isinstance(entry_metadata, dict) else {}}
+            _store_h2_match(result, record, status="OPEN")
+    return result
+
+
+def _store_h2_match(result: Dict[int, Dict[str, Any]], record: Dict[str, Any], *, status: str) -> None:
+    source = _source_candle_key(record)
+    if source is None:
+        return
+    metadata = record.get("h2") if isinstance(record.get("h2"), dict) else {}
+    notional = _float(metadata.get("effective_notional")) or _float(record.get("position_notional_usdt"))
+    result[source] = {
+        "h2_effective_notional_usdt": notional,
+        "h2_step": metadata.get("h2_step", "n/a"),
+        "h2_uncovered_count": metadata.get("uncovered_count", "n/a"),
+        "h2_status": status,
+        "h2_pair_id": record.get("pair_id"),
+    }
+
+
+def _source_candle_key(record: Dict[str, Any]) -> Optional[int]:
+    value = _float(record.get("source_candle_open_time"))
+    return int(value) if value is not None else None
 
 
 def _load_config() -> Dict[str, Any]:
@@ -607,6 +711,11 @@ def _fmt_price(value: Any) -> str:
 def _fmt_number(value: Any) -> str:
     number = _float(value)
     return "n/a" if number is None else f"{number:.4f}"
+
+
+def _fmt_h2_notional(value: Any) -> str:
+    number = _float(value)
+    return "n/a" if number is None else f"${number:.4f}"
 
 
 def _fmt_signed_number(value: Any) -> str:
