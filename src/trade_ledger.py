@@ -91,6 +91,11 @@ class TradeLedger:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         return True
 
+    def append_closed_circuit_breaker_shadow_trade(
+        self, position: BotFullExitPosition, config: Dict[str, Any]
+    ) -> bool:
+        return self._append_closed(position, config, "CIRCUIT_BREAKER_SHADOW")
+
     def _append_closed(
         self,
         position: BotFullExitPosition,

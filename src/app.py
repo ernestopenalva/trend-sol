@@ -29,6 +29,7 @@ from src.monitor.entry_engine import EntryEngine
 from src.monitor.context_predicates import passes_dmi15_trajectory, passes_slow_ge45
 from src.monitor.context_shadow import RealAContextShadow
 from src.monitor.h2_exposure_shadow import H2ExposureShadow
+from src.monitor.circuit_breaker_shadow import CircuitBreakerShadow
 from src.monitor.gcr_shadow import GcrShadowRegistry
 from src.monitor.market_context import MarketContextEngine
 from src.monitor.human_console_reporter import HumanConsoleReporter
@@ -101,6 +102,9 @@ class Monitor:
             self.client.symbol_filters,
         )
         self.h2_exposure_shadow.announce_sizing_version()
+        self.circuit_breaker_shadow = CircuitBreakerShadow(
+            self.project_root, self.config, self.logger, self.telemetry_writer
+        )
         self.entry_engine = EntryEngine(str(self.config["symbol"]), self.config, self.logger)
         self.gcr_shadow = GcrShadowRegistry(
             self.project_root, self.config, self.logger, self.telemetry_writer
@@ -170,6 +174,8 @@ class Monitor:
             gcr_previous_must_arm_be=True,
             h2_exposure_shadow="H2_EXPOSURE_SHADOW",
             h2_exposure_rule="unchanged REAL_A signal/admission/ladder; harmonic sizing by uncovered H2 positions",
+            circuit_breaker_shadow="REAL_A_CB_SHADOW",
+            circuit_breaker_rule="own realized DD>=1.5% AND own rolling net 4h<=-0.5% AND at least 2 closes; admission-only cooldown=6h",
             dmi15_shadow="DMI15_SHADOW_C",
             dmi15_entry_rule="+DI_now>+DI_15m_ago AND -DI_now<-DI_15m_ago AND +DI_now>-DI_now",
             dmi15_spread_shadow="DMI15_SPREAD6_SHADOW_D",
@@ -293,6 +299,9 @@ class Monitor:
             self.slow_ge_context_shadow.engine.load_history(
                 timeframe, klines, now_ms=self._server_now_ms()
             )
+            self.circuit_breaker_shadow.engine.load_history(
+                timeframe, klines, now_ms=self._server_now_ms()
+            )
 
     def _server_now_ms(self) -> int:
         import time
@@ -322,6 +331,10 @@ class Monitor:
             except Exception as exc:
                 self.logger.system("h2_exposure_shadow_tick_failed", price=price, error=str(exc))
             try:
+                self.circuit_breaker_shadow.on_tick(price, _market_timestamp(payload))
+            except Exception as exc:
+                self.logger.system("circuit_breaker_shadow_tick_failed", price=price, error=str(exc))
+            try:
                 self.gcr_shadow.on_tick(price, _market_timestamp(payload))
             except Exception as exc:
                 self.logger.system("gcr_shadow_tick_failed", price=price, error=str(exc))
@@ -345,6 +358,7 @@ class Monitor:
             for name, shadow in (
                 ("dmi15_trajectory_context_shadow", self.dmi15_trajectory_context_shadow),
                 ("slow_ge_context_shadow", self.slow_ge_context_shadow),
+                ("circuit_breaker_shadow", self.circuit_breaker_shadow),
             ):
                 try:
                     shadow.on_tick(price, _market_timestamp(payload))

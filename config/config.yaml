@@ -267,6 +267,14 @@ instrumentation:
     max_open_positions: 5
     state_file: "data/state/h2_exposure_shadow.json"
     ledger_file: "data/trades/trades_h2_exposure_shadow.jsonl"
+  circuit_breaker_shadow:
+    # Forward-only REAL_A clone; frozen COMBO_DD1P5_PNL4H0P5_MIN2 + 6h.
+    enabled: true
+    accept_new_entries: true
+    initial_capital_usdt: 100
+    max_open_positions: 5
+    state_file: "data/state/circuit_breaker_shadow.json"
+    ledger_file: "data/trades/trades_circuit_breaker_shadow.jsonl"
   cohort_guard_study:
     episode_gap_hours: 6
     rules:
@@ -483,6 +491,7 @@ instrumentation:
   dmi15_combined_shadow_events_file: "data/telemetry/dmi15_combined_shadow_events.jsonl"
   context_shadow_events_file: "data/telemetry/context_shadow_events.jsonl"
   h2_exposure_shadow_events_file: "data/telemetry/h2_exposure_shadow_events.jsonl"
+  circuit_breaker_shadow_events_file: "data/telemetry/circuit_breaker_shadow_events.jsonl"
   market_context_events_file: "data/telemetry/market_context_events.jsonl"
   ema_entry_events_file: "data/telemetry/ema_entry_events.jsonl"
 
