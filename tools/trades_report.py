@@ -653,7 +653,9 @@ def _parse_since(
     if current.tzinfo is None:
         current = current.replace(tzinfo=BRASILIA_TZ)
     try:
-        if len(text) == 11 and text[2] == "/" and text[5] == " " and text[8] == ":":
+        if len(text) == 16 and text[2] == "/" and text[5] == "/" and text[10] == " " and text[13] == ":":
+            parsed = datetime.strptime(text, "%d/%m/%Y %H:%M").replace(tzinfo=BRASILIA_TZ)
+        elif len(text) == 11 and text[2] == "/" and text[5] == " " and text[8] == ":":
             parsed = datetime.strptime(
                 f"{text}/{current.astimezone(BRASILIA_TZ).year}",
                 "%d/%m %H:%M/%Y",
@@ -665,7 +667,7 @@ def _parse_since(
     except ValueError:
         raise SystemExit(
             f"Invalid --since value: {value}. "
-            "Use DD/MM HH:MM or an ISO 8601 date/time."
+            "Use DD/MM HH:MM, DD/MM/AAAA HH:MM or an ISO 8601 date/time."
         )
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=BRASILIA_TZ)

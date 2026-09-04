@@ -477,6 +477,11 @@ class BotExitOnlyTests(unittest.TestCase):
 
         self.assertEqual(parsed, datetime(2026, 8, 8, 21, 0, tzinfo=timezone.utc))
 
+    def test_trades_report_accepts_displayed_brasilia_date_time_with_year(self) -> None:
+        parsed = _parse_since("31/08/2026 18:27")
+
+        self.assertEqual(parsed, datetime(2026, 8, 31, 21, 27, tzinfo=timezone.utc))
+
     def test_trades_report_labels_be_review_stop_as_breakeven(self) -> None:
         record = {"exit_reason": "REVIEW_STOP", "final_step": "BE"}
 
