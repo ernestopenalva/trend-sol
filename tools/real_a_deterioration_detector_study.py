@@ -59,10 +59,16 @@ def _report(name,kind,rows,state,t0,trades,cap):
  tagged=[]
  for o,_,p,x in trades:
   active=next((state[i] for i in range(len(rows)-1,-1,-1) if rows[i]['t']<=int(o.timestamp()*1000)),False);tagged.append((active,p,x))
- bad=[p for active,p,_ in tagged if active]; good=[p for active,p,_ in tagged if not active]; loss=sum(-p*.2 for a,p,_ in tagged if a and p<0); sacrificed=sum(p*.2*.5 for a,p,_ in tagged if a and p>0)
+ bad=[p for active,p,_ in tagged if active]; good=[p for active,p,_ in tagged if not active]
+ def sizing(new_notional):
+  reduction=(20-new_notional)/100
+  avoided=sum(-p*reduction for active,p,_ in tagged if active and p<0)
+  sacrificed=sum(p*reduction for active,p,_ in tagged if active and p>0)
+  return avoided,sacrificed
+ loss,sacrificed=sizing(15); loss10,sacrificed10=sizing(10)
  delay_median = f'{statistics.median(delays):.1f}' if delays else 'n/a'; delay_mean = f'{statistics.fmean(delays):.1f}' if delays else 'n/a'
  bad_mean = f'{statistics.fmean(bad):+.3f}%' if bad else 'n/a'; good_mean = f'{statistics.fmean(good):+.3f}%' if good else 'n/a'
- print(f'{name} | {kind} | delay median/mean={delay_median}/{delay_mean}m | flips/day={flips/max(len(rows)/288,1):.2f} | state={sum(state)/len(state):.1%} | net/trade deteriorating/normal={bad_mean}/{good_mean} | sizing $15 avoided/sacrificed/net/ratio=${loss:.3f}/${sacrificed:.3f}/${loss-sacrificed:.3f}/{loss/sacrificed if sacrificed else 0:.2f} | N={len(tagged)}')
+ print(f'{name} | {kind} | delay median/mean={delay_median}/{delay_mean}m | flips/day={flips/max(len(rows)/288,1):.2f} | state={sum(state)/len(state):.1%} | net/trade deteriorating/normal={bad_mean}/{good_mean} | $15 avoided/sacrificed/net/ratio=${loss:.3f}/${sacrificed:.3f}/${loss-sacrificed:.3f}/{loss/sacrificed if sacrificed else 0:.2f} | $10 avoided/sacrificed/net/ratio=${loss10:.3f}/${sacrificed10:.3f}/${loss10-sacrificed10:.3f}/{loss10/sacrificed10 if sacrificed10 else 0:.2f} | N={len(tagged)}')
 def _dt(v):return datetime.fromisoformat(v.replace('Z','+00:00')).astimezone(timezone.utc)
 def _dt0(v):
  try:return _dt(str(v))
