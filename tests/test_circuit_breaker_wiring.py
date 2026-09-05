@@ -44,6 +44,9 @@ class _Probe:
     def on_tick(self, price: float, timestamp: str | None = None, **_kwargs: object) -> None:
         self.ticks.append((price, timestamp))
 
+    def record_real_admission(self, signal, outcome):
+        self.real_outcome = outcome
+
     def open_pair(self, *_args: object) -> bool:
         return self.open_result
 
@@ -55,17 +58,16 @@ class CircuitBreakerWiringTests(unittest.TestCase):
             telemetry = _Telemetry()
             shadow = CircuitBreakerShadow(root, _config(), JsonlLogger(root, _config()), telemetry)  # type: ignore[arg-type]
             now = datetime(2026, 9, 4, 16, tzinfo=timezone.utc)
-            shadow.equity, shadow.peak_equity = 98.4, 100.0
-            shadow.closed_history = [(now - timedelta(hours=2), -0.3), (now - timedelta(hours=1), -0.3)]
-
-            shadow._evaluate_after_close(now, 100.0)
+            shadow.clock.equity, shadow.clock.peak = 98.4, 100.0
+            shadow.clock.history = [[int((now-timedelta(hours=2)).timestamp()*1000), -0.3], [int((now-timedelta(hours=1)).timestamp()*1000), -0.3]]
+            shadow._advance_clock(now, 100.0)
             blocked = EntrySignal("SOLUSDT", 100.0, now.isoformat(), 1_000_000, 0.2, "1m", 14)
             self.assertFalse(shadow.on_approved_real_a_signal(blocked, {"tf_5m": {}}))
-            shadow._release_if_due(now + timedelta(hours=6), 100.0)
+            shadow._advance_clock(now + timedelta(hours=6), 100.0)
             admitted = EntrySignal("SOLUSDT", 100.0, (now + timedelta(hours=6, minutes=1)).isoformat(), 1_300_000, 0.2, "1m", 14)
             self.assertTrue(shadow.on_approved_real_a_signal(admitted, {"tf_5m": {}}))
 
-            names = [item["event"] for item in telemetry.events if "event" in item]
+            names = [item["event"] for item in shadow.audit_events]
             self.assertLess(names.index("CIRCUIT_BREAKER_TRIGGERED"), names.index("ENTRY_BLOCKED_CIRCUIT_BREAKER"))
             self.assertLess(names.index("ENTRY_BLOCKED_CIRCUIT_BREAKER"), names.index("CIRCUIT_BREAKER_RELEASED"))
             self.assertLess(names.index("CIRCUIT_BREAKER_RELEASED"), names.index("OPEN"))
@@ -101,8 +103,9 @@ class CircuitBreakerWiringTests(unittest.TestCase):
         self.assertEqual(circuit.approved, [(signal, {"tf_5m": {"ema20": 100.0}})])
         self.assertEqual(len(circuit.ticks), 1)
         self.assertEqual(circuit.klines, 0)
+        self.assertEqual(circuit.real_outcome, 'opened')
 
-    def test_monitor_does_not_admit_cb_when_real_open_did_not_complete(self) -> None:
+    def test_monitor_offers_cb_signal_even_when_real_open_did_not_complete(self) -> None:
         signal = EntrySignal("SOLUSDT", 100.0, "2026-09-04T16:01:00+00:00", 1_000_000, 0.2, "1m", 14)
         monitor = Monitor.__new__(Monitor)
         generic = _Probe()
@@ -129,8 +132,9 @@ class CircuitBreakerWiringTests(unittest.TestCase):
 
         monitor._on_ws_event("solusdt@kline_1m", {"k": {"x": True}})
 
-        self.assertEqual(circuit.approved, [])
+        self.assertEqual(circuit.approved, [(signal, {"tf_5m": {"ema20": 100.0}})])
         self.assertEqual(circuit.klines, 0)
+        self.assertEqual(circuit.real_outcome, 'blocked')
 
 
 def _config() -> dict:

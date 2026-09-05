@@ -17,9 +17,9 @@ class CircuitBreakerShadowTests(unittest.TestCase):
             root = Path(tmp); config = _config()
             shadow = CircuitBreakerShadow(root, config, JsonlLogger(root, config), None)
             now = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
-            shadow.equity, shadow.peak_equity = 98.4, 100.0
-            shadow.closed_history = [(now - timedelta(hours=2), -0.3), (now - timedelta(hours=1), -0.3)]
-            shadow._evaluate_after_close(now, 100.0)
+            shadow.clock.equity, shadow.clock.peak = 98.4, 100.0
+            shadow.clock.history = [[int((now-timedelta(hours=2)).timestamp()*1000),-.3], [int((now-timedelta(hours=1)).timestamp()*1000),-.3]]
+            shadow._advance_clock(now, 100.0)
 
             self.assertTrue(shadow.circuit_breaker_active)
             self.assertEqual(shadow.crises_triggered, 1)
@@ -30,9 +30,9 @@ class CircuitBreakerShadowTests(unittest.TestCase):
             root = Path(tmp); config = _config()
             shadow = CircuitBreakerShadow(root, config, JsonlLogger(root, config), None)
             now = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
-            shadow.equity, shadow.peak_equity = 99.0, 99.0
-            shadow.closed_history = [(now - timedelta(hours=2), -0.3), (now - timedelta(hours=1), -0.3)]
-            shadow._evaluate_after_close(now, 100.0)
+            shadow.clock.equity, shadow.clock.peak = 99.0, 99.0
+            shadow.clock.history = [[int((now-timedelta(hours=2)).timestamp()*1000),-.3], [int((now-timedelta(hours=1)).timestamp()*1000),-.3]]
+            shadow._advance_clock(now, 100.0)
 
             self.assertFalse(shadow.circuit_breaker_active)
 

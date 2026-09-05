@@ -413,6 +413,13 @@ class Monitor:
                     shadow.on_kline(stream, payload, snapshot)
                 except Exception as exc:
                     self.logger.system(f"{name}_candle_failed", error=str(exc))
+            if signal is not None:
+                try:
+                    self.circuit_breaker_shadow.on_approved_real_a_signal(signal, snapshot)
+                except Exception as exc:
+                    self.logger.system(
+                        "circuit_breaker_shadow_signal_failed", signal_price=signal.price, error=str(exc)
+                    )
             if signal is not None and self._entry_operational_pause_reason() is not None:
                 signal = None
             if signal is not None:
@@ -431,15 +438,16 @@ class Monitor:
                             "h2_exposure_shadow_signal_failed", signal_price=signal.price, error=str(exc)
                         )
                     real_opened = self.registry.open_pair(signal, snapshot)
-                    if real_opened:
-                        try:
-                            self.circuit_breaker_shadow.on_approved_real_a_signal(signal, snapshot)
-                        except Exception as exc:
-                            self.logger.system(
-                                "circuit_breaker_shadow_signal_failed", signal_price=signal.price, error=str(exc)
-                            )
+                    self._record_cb_real_outcome(signal, "opened" if real_opened else "blocked")
                 except BinanceClientError as exc:
                     self.logger.system("order_rejected", error=str(exc), signal_price=signal.price)
+                    self._record_cb_real_outcome(signal, "order_rejected")
+
+    def _record_cb_real_outcome(self, signal, outcome: str) -> None:
+        try:
+            self.circuit_breaker_shadow.record_real_admission(signal, outcome)
+        except Exception as exc:
+            self.logger.system("circuit_breaker_shadow_observation_failed", error=str(exc))
 
     def _safe_refresh_market_context(self) -> Dict[str, Any] | None:
         try:
