@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +16,18 @@ from src.position.bot_full_engine import BotFullExitPosition
 from src.position.phantom_execution import PhantomExecutionClient
 from src.telemetry_writer import TelemetryWriter
 from src.trade_ledger import TradeLedger
+
+
+class CircuitBreakerPosition(BotFullExitPosition):
+    """Keep CB audit identity while using REAL_A's economic PL floor."""
+
+    def _active_profit_lock_economic_floor(self) -> float | None:
+        kind = self.shadow_kind
+        try:
+            self.shadow_kind = None
+            return super()._active_profit_lock_economic_floor()
+        finally:
+            self.shadow_kind = kind
 
 
 class CircuitBreakerShadow(RealAContextShadow):
@@ -47,6 +60,37 @@ class CircuitBreakerShadow(RealAContextShadow):
             self.blocked_circuit_breaker += 1
             return self._block("ENTRY_BLOCKED_CIRCUIT_BREAKER", signal, _bucket(signal.source_candle_open_time), breaker_until=self.circuit_breaker_until)
         return super().on_signal(signal)
+
+    def _open(self, signal: EntrySignal, bucket: int) -> None:
+        notional = float(self.config['capital']['operational_balance_usdt']) * float(self.config['capital']['trade_size_pct']) / 100
+        client = PhantomExecutionClient()
+        client.set_price(signal.price)
+        pair_id = f'{self.pair_prefix}-{uuid.uuid4().hex[:12]}'
+        position = CircuitBreakerPosition(
+            pair_id=pair_id, symbol=str(self.config['symbol']), entry_price=float(signal.price),
+            quantity=notional / float(signal.price), entry_order={'shadow': True},
+            open_ts=now_iso(), config=self._exit_config(), client=client, logger=self.logger,
+            entry_atr=signal.entry_atr, atr_timeframe=signal.atr_timeframe, atr_period=signal.atr_period,
+            source_candle_open_time=signal.source_candle_open_time, position_notional_usdt=notional,
+            no_progress_enabled=False, no_progress_tolerance_seconds=None, no_progress_tolerance_source='DISABLED',
+        )
+        position.phantom, position.phantom_id, position.shadow_kind = True, pair_id, self.shadow_kind
+        position.market_context_entry = deepcopy(self.latest_market_context)
+        self.positions.append(position)
+        self.entries_by_bucket[bucket] = self.entries_by_bucket.get(bucket, 0) + 1
+        self.max_simultaneous_positions = max(self.max_simultaneous_positions, len(self.open_positions))
+        self.logger.trade(position._trade_event('OPEN', signal.price, 0.0, None, price_source='signal'))
+        self._event('OPEN', pair_id=pair_id, admission_bucket_open_time=bucket)
+        self._emit_ema_entry(position)
+        self._save_state()
+
+    def _load_state(self) -> None:
+        super()._load_state()
+        # Restore the CB-specific position type as well as its persisted ladder state.
+        self.positions = [
+            CircuitBreakerPosition.from_state(item.to_state(), self._exit_config(), item.client, self.logger)
+            for item in self.positions
+        ]
 
     def on_kline(
         self, stream: str, payload: Dict[str, Any], snapshot: Dict[str, Any] | None
