@@ -63,6 +63,7 @@ def main() -> None:
     print("\nNotes: PnL and fees use the runtime ledger convention (round-trip fee % applied to entry notional).")
     print("'realized max DD' is drawdown of closed-trade equity only. It is not an intratrade mark-to-market drawdown; the ledger has no continuous shared portfolio-equity series.")
     print("Open positions are excluded from closed PnL and realized balance; their committed entry notional is included in exposure metrics.")
+    _normalized_phantom_comparison(records, args.capital)
 
 
 def _portfolio(records: list[dict[str, Any]], opens: list[dict[str, Any]], capital: float, since: datetime, until: datetime) -> dict[str, float | int]:
@@ -115,6 +116,53 @@ def _net_usdt(row: dict[str, Any]) -> float:
     if saved is not None:
         return saved
     return ((_number(row.get("net_pnl_pct")) or 0.0) / 100) * (_number(row.get("position_notional_usdt")) or 0.0)
+
+
+def _normalized_phantom_comparison(records: dict[str, list[dict[str, Any]]], capital: float) -> None:
+    """Compare closed trades after replacing each exit fill with its aggTrade trigger.
+
+    This is deliberately a per-trade replay of the recorded execution convention,
+    not a slippage adjustment or a new ladder simulation.  Entry price, quantity,
+    entry notional, fee rate, trigger path, and close ordering remain as recorded.
+    """
+    normalized: dict[str, dict[str, float] | None] = {
+        arm: _phantom_realized_stats(rows, capital) for arm, rows in records.items()
+    }
+    print("\nNormalized phantom comparison")
+    print("arm | net $ | realized max DD $")
+    for arm in ARMS:
+        stats = normalized[arm]
+        if stats is None:
+            print(f"{arm} | unavailable | unavailable")
+            continue
+        print(f"{arm} | ${stats['net']:+.4f} | ${stats['drawdown']:.4f}")
+    real, h2 = normalized["REAL_A"], normalized["H2_EXPOSURE_SHADOW"]
+    if real is None or h2 is None:
+        print("H2 - REAL_A | unavailable | unavailable")
+        return
+    print(f"H2 - REAL_A | ${h2['net'] - real['net']:+.4f} | —")
+
+
+def _phantom_realized_stats(rows: list[dict[str, Any]], capital: float) -> dict[str, float] | None:
+    events: list[tuple[datetime, float]] = []
+    for row in rows:
+        entry = _number(row.get("entry_price"))
+        trigger = _number(row.get("exit_trigger_price"))
+        quantity = _number(row.get("qty"))
+        notional = _number(row.get("position_notional_usdt"))
+        fee_pct = _number(row.get("estimated_fees_pct"))
+        closed = _parse_ts(row.get("closed_at"))
+        if None in (entry, trigger, quantity, notional, fee_pct, closed):
+            return None
+        net = (trigger - entry) * quantity - notional * fee_pct / 100
+        events.append((closed, net))
+    balance = peak = capital
+    drawdown = 0.0
+    for _, pnl in sorted(events):
+        balance += pnl
+        peak = max(peak, balance)
+        drawdown = max(drawdown, peak - balance)
+    return {"net": balance - capital, "drawdown": drawdown}
 
 
 def _overlap(records: dict[str, list[dict[str, Any]]], states: dict[str, list[dict[str, Any]]]) -> None:
