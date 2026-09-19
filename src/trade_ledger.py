@@ -66,6 +66,11 @@ class TradeLedger:
     ) -> bool:
         return self._append_closed(position, config, "CONTEXT_SHADOW")
 
+    def append_closed_ladder_shadow_trade(
+        self, position: BotFullExitPosition, config: Dict[str, Any]
+    ) -> bool:
+        return self._append_closed(position, config, "LADDER_SHADOW")
+
     def append_closed_h2_exposure_shadow_trade(
         self,
         position: BotFullExitPosition,

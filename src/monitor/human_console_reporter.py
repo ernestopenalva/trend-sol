@@ -61,6 +61,8 @@ class HumanConsoleReporter:
             return f"[ENTRY] PAUSED cycle_complete | cycle={cycle_done}/{cycle_total}"
         if self.registry.review_required:
             return f"[ENTRY] PAUSED needs_review | cycle={cycle_done}/{cycle_total}"
+        if self.registry.exit_pending:
+            return f"[ENTRY] PAUSED exit_pending_reconciliation | cycle={cycle_done}/{cycle_total}"
         if self.registry.capacity_full:
             return f"[ENTRY] PAUSED capacity {self.registry.open_pair_count}/{self.registry.max_open_pairs} | cycle={cycle_done}/{cycle_total}"
         diagnostic = self.entry_engine.last_diagnostic
@@ -70,7 +72,7 @@ class HumanConsoleReporter:
 
     def _positions_line(self) -> str:
         summary = self.registry.position_summary(self.last_price())
-        if summary["pairs"] == 0:
+        if summary["pairs"] == 0 and not summary.get("exit_pending") and not summary.get("needs_review"):
             return "[POSITIONS] none"
         pnl = "n/a"
         if summary["bot_pnl_min"] is not None and summary["bot_pnl_max"] is not None:
@@ -91,6 +93,7 @@ class HumanConsoleReporter:
             f"A_open={summary['server_open']} B_open={summary['bot_open']} "
             f"price={price} entry={entry} B_pnl={pnl} stop={stop} type={summary.get('bot_stop_type', 'n/a')} "
             f"trail={summary.get('bot_trail_status', 'inactive')} needs_review={summary['needs_review']}"
+            f" exit_pending={summary.get('exit_pending', 0)}"
         )
 
     def _system_line(self) -> str:

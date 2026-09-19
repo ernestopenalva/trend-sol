@@ -41,12 +41,20 @@ class CircuitBreakerPosition(BotFullExitPosition):
 class CircuitBreakerShadow(RealAContextShadow):
     """REAL_A clone. Only admission is suspended by its own realized results."""
 
-    def __init__(self, project_root: Path, config: Dict[str, Any], logger: JsonlLogger, telemetry: TelemetryWriter | None) -> None:
+    def __init__(self, project_root: Path, config: Dict[str, Any], logger: JsonlLogger, telemetry: TelemetryWriter | None,
+                 *, settings_key: str = "circuit_breaker_shadow", strategy: str = "REAL_A_CB_SHADOW",
+                 shadow_kind: str = "REAL_A_CB_SHADOW", pair_prefix: str = "cb",
+                 be_off: bool = False, cohort_started_at: str | None = None) -> None:
+        self._be_off = be_off
+        self._configured_cohort_started_at = cohort_started_at
         super().__init__(
             project_root, config, logger, telemetry,
-            settings_key="circuit_breaker_shadow", strategy="REAL_A_CB_SHADOW",
-            shadow_kind="REAL_A_CB_SHADOW", pair_prefix="cb", predicate=lambda _engine, _snapshot: True,
+            settings_key=settings_key, strategy=strategy,
+            shadow_kind=shadow_kind, pair_prefix=pair_prefix, predicate=lambda _engine, _snapshot: True,
         )
+        self.audit_path = project_root / str(self.settings.get(
+            "events_file", "data/telemetry/circuit_breaker_shadow_events.jsonl"
+        ))
         self.capital = float(self.settings.get("initial_capital_usdt", config["capital"]["operational_balance_usdt"]))
         self.equity = self.peak_equity = self.capital
         self.closed_history: list[tuple[datetime, float]] = []
@@ -71,6 +79,19 @@ class CircuitBreakerShadow(RealAContextShadow):
         if self.enabled:
             self._load_cb_state()
             self._recover_pending_input()
+
+    def announce_cohort(self) -> None:
+        if self._configured_cohort_started_at and self.cohort_started_at is None:
+            self.cohort_started_at = self._configured_cohort_started_at
+            self._event_at(_parse_ts(self.cohort_started_at) or datetime.now(timezone.utc), "COHORT_STARTED",
+                           cohort_started_at=self.cohort_started_at, variant="BE_OFF_CB")
+            self._save_state()
+
+    def _exit_config(self) -> Dict[str, Any]:
+        value = deepcopy(super()._exit_config())
+        if self._be_off:
+            value["breakeven"] = {"mode": "off"}
+        return value
 
     def on_signal(self, signal: EntrySignal) -> bool:
         return self._run_input({'kind':'signal', 'signal':asdict(signal),
@@ -385,7 +406,7 @@ class CircuitBreakerShadow(RealAContextShadow):
         """
         for path, records in (
             (self.ledger.path, self.closed_records),
-            (self.project_root/'data/telemetry/circuit_breaker_shadow_events.jsonl', self.audit_events),
+            (self.audit_path, self.audit_events),
         ):
             content = ''.join(json.dumps(x, ensure_ascii=False)+'\n' for x in records)
             if getattr(self, '_projected_'+str(path), None) == content:

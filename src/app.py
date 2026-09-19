@@ -18,7 +18,7 @@ from src.config_profiles import effective_config
 from src.console_utils import BRASILIA_TZ, console_line
 from src.exchange.binance_client import BinanceClient, BinanceClientError
 from src.exchange.binance_market_data import BinanceMarketDataClient
-from src.logging_utils import JsonlLogger
+from src.logging_utils import JsonlLogger, now_iso
 from src.monitor.cycle_manager import CycleManager
 from src.monitor.dmi15_shadow import Dmi15ShadowRegistry
 from src.monitor.dmi15_spread_shadow import Dmi15SpreadShadowRegistry
@@ -30,6 +30,7 @@ from src.monitor.context_predicates import passes_dmi15_trajectory, passes_slow_
 from src.monitor.context_shadow import RealAContextShadow
 from src.monitor.h2_exposure_shadow import H2ExposureShadow
 from src.monitor.circuit_breaker_shadow import CircuitBreakerShadow
+from src.monitor.ladder_shadow import RealALadderShadow
 from src.monitor.gcr_shadow import GcrShadowRegistry
 from src.monitor.market_context import MarketContextEngine
 from src.monitor.human_console_reporter import HumanConsoleReporter
@@ -104,6 +105,22 @@ class Monitor:
         self.h2_exposure_shadow.announce_sizing_version()
         self.circuit_breaker_shadow = CircuitBreakerShadow(
             self.project_root, self.config, self.logger, self.telemetry_writer
+        )
+        self.ladder_shadow_cohort_started_at = now_iso()
+        self.be030_shadow = RealALadderShadow(
+            self.project_root, self.config, self.logger, self.telemetry_writer,
+            settings_key="be030_shadow", strategy="BE030_SHADOW", shadow_kind="BE030_SHADOW",
+            pair_prefix="be030", variant="BE030", cohort_started_at=self.ladder_shadow_cohort_started_at,
+        )
+        self.be_off_shadow = RealALadderShadow(
+            self.project_root, self.config, self.logger, self.telemetry_writer,
+            settings_key="be_off_shadow", strategy="BE_OFF_SHADOW", shadow_kind="BE_OFF_SHADOW",
+            pair_prefix="beoff", variant="BE_OFF", cohort_started_at=self.ladder_shadow_cohort_started_at,
+        )
+        self.be_off_cb_shadow = CircuitBreakerShadow(
+            self.project_root, self.config, self.logger, self.telemetry_writer,
+            settings_key="be_off_cb_shadow", strategy="BE_OFF_CB_SHADOW", shadow_kind="BE_OFF_CB_SHADOW",
+            pair_prefix="beoffcb", be_off=True, cohort_started_at=self.ladder_shadow_cohort_started_at,
         )
         self.entry_engine = EntryEngine(str(self.config["symbol"]), self.config, self.logger)
         self.gcr_shadow = GcrShadowRegistry(
@@ -226,6 +243,9 @@ class Monitor:
 
     def run(self) -> None:
         self.telemetry_writer.start()
+        self.be030_shadow.announce_cohort()
+        self.be_off_shadow.announce_cohort()
+        self.be_off_cb_shadow.announce_cohort()
         try:
             self.logger.system("validating_startup")
             self._validate_startup()
@@ -352,8 +372,13 @@ class Monitor:
                 ("dmi15_trajectory_context_shadow", self.dmi15_trajectory_context_shadow),
                 ("slow_ge_context_shadow", self.slow_ge_context_shadow),
                 ("circuit_breaker_shadow", self.circuit_breaker_shadow),
+                ("be030_shadow", getattr(self, "be030_shadow", None)),
+                ("be_off_shadow", getattr(self, "be_off_shadow", None)),
+                ("be_off_cb_shadow", getattr(self, "be_off_cb_shadow", None)),
             ):
                 try:
+                    if shadow is None:
+                        continue
                     shadow.on_tick(price, _market_timestamp(payload))
                 except Exception as exc:
                     self.logger.system(f"{name}_tick_failed", price=price, error=str(exc))
@@ -420,6 +445,17 @@ class Monitor:
                     self.logger.system(
                         "circuit_breaker_shadow_signal_failed", signal_price=signal.price, error=str(exc)
                     )
+                for name, shadow in (
+                    ("be030_shadow", getattr(self, "be030_shadow", None)),
+                    ("be_off_shadow", getattr(self, "be_off_shadow", None)),
+                    ("be_off_cb_shadow", getattr(self, "be_off_cb_shadow", None)),
+                ):
+                    try:
+                        if shadow is None:
+                            continue
+                        shadow.on_approved_real_a_signal(signal, snapshot)
+                    except Exception as exc:
+                        self.logger.system(f"{name}_signal_failed", signal_price=signal.price, error=str(exc))
             if signal is not None and self._entry_operational_pause_reason() is not None:
                 signal = None
             if signal is not None:
@@ -500,6 +536,9 @@ class Monitor:
         if self.registry.review_required:
             self.entry_engine.set_paused("PAUSED_NEEDS_REVIEW")
             return "PAUSED_NEEDS_REVIEW"
+        if self.registry.exit_pending:
+            self.entry_engine.set_paused("PAUSED_EXIT_PENDING")
+            return "PAUSED_EXIT_PENDING"
         if self.ws_manager and self.ws_manager.status != "connected":
             self.entry_engine.set_paused("PAUSED_WEBSOCKET")
             return "PAUSED_WEBSOCKET"

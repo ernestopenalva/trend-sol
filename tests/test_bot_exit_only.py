@@ -73,6 +73,7 @@ class FakeClient:
         return {
             "orderId": 3,
             "clientOrderId": client_order_id,
+            "status": "FILLED",
             "executedQty": str(quantity),
             "cummulativeQuoteQty": str(quantity * 97),
             "fills": [{"price": "97", "qty": str(quantity)}],
@@ -83,6 +84,9 @@ class FakeClient:
 
     def all_orders(self, symbol: str, limit: int = 100):
         return []
+
+    def get_order(self, symbol: str, order_id=None, client_order_id=None):
+        raise BinanceClientError('Binance error 400: {"code":-2013,"msg":"Order does not exist."}')
 
 
 class FakeTelemetryWriter:
@@ -105,6 +109,22 @@ class FailingSellClient(FakeClient):
         if self.sell_attempts == self.fail_on_attempt:
             raise BinanceClientError("ambiguous market sell failure")
         return super().market_sell(symbol, quantity, client_order_id)
+
+
+class AcceptedResponseLostClient(FakeClient):
+    def market_sell(self, symbol: str, quantity: float, client_order_id: str):
+        self.sells.append((symbol, quantity, client_order_id))
+        raise BinanceClientError("Binance error 502: Bad Gateway")
+
+    def get_order(self, symbol: str, order_id=None, client_order_id=None):
+        return {
+            "orderId": 99,
+            "clientOrderId": client_order_id,
+            "status": "FILLED",
+            "executedQty": "1",
+            "cummulativeQuoteQty": "97",
+            "fills": [{"price": "97", "qty": "1"}],
+        }
 
 
 class BotExitOnlyTests(unittest.TestCase):
@@ -188,7 +208,7 @@ class BotExitOnlyTests(unittest.TestCase):
             self.assertEqual({record["hard_stop_pct"] for record in records}, {3.0})
             self.assertEqual({record["hard_stop_applied_on_restore"] for record in records}, {False})
 
-    def test_hard_stop_sell_error_pauses_entries_and_continues_other_positions(self) -> None:
+    def test_hard_stop_sell_error_reconciles_with_one_idempotent_retry(self) -> None:
         with TemporaryDirectory() as tmp:
             config = _config()
             config["capital"] = {"operational_balance_usdt": 100, "trade_size_pct": 20, "max_open_positions": 3}
@@ -214,10 +234,49 @@ class BotExitOnlyTests(unittest.TestCase):
 
             self.assertEqual(client.sell_attempts, 3)
             self.assertEqual(len(client.sells), 2)
-            self.assertTrue(registry.review_required)
+            self.assertFalse(registry.review_required)
             self.assertEqual(len(registry.positions), 1)
-            self.assertEqual(registry.positions[0].status, "NEEDS_REVIEW")
+            self.assertEqual(registry.positions[0].status, "EXIT_PENDING")
+            self.assertTrue(registry.exit_pending)
             self.assertEqual(len(ledger.load()), 2)
+
+            registry.on_tick(96.8, market_ts="2026-07-13T22:00:01+00:00")
+
+            self.assertEqual(client.sell_attempts, 4)
+            self.assertEqual(len(client.sells), 3)
+            self.assertEqual(registry.positions, [])
+            self.assertFalse(registry.exit_pending)
+            self.assertEqual(len(ledger.load()), 3)
+
+    def test_pending_exit_uses_existing_fill_without_second_sell(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config = _config()
+            config["risk"]["hard_stop"] = {"enabled": True, "stop_pct": 3.0}
+            root = Path(tmp)
+            logger = JsonlLogger(root, config)
+            state = StateManager(root)
+            client = AcceptedResponseLostClient()
+            ledger = TradeLedger(root)
+            registry = PositionRegistry(
+                config,
+                client,  # type: ignore[arg-type]
+                logger,
+                CycleManager(root, config, logger, state),
+                state,
+                ledger,
+            )
+            registry.open_pair(EntrySignal("SOLUSDT", 100, "ts", 0, 0.2, "1m", 14))
+
+            registry.on_tick(96.9, market_ts="2026-07-13T22:00:00+00:00")
+            self.assertTrue(registry.exit_pending)
+            persisted = state.load_open_positions()
+            self.assertEqual(persisted[0]["status"], "EXIT_PENDING")
+
+            registry.on_tick(96.8, market_ts="2026-07-13T22:00:01+00:00")
+
+            self.assertEqual(len(client.sells), 1)
+            self.assertEqual(registry.positions, [])
+            self.assertEqual(len(ledger.load()), 1)
 
     def test_admission_blocks_second_entry_in_same_candle(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -275,6 +275,29 @@ instrumentation:
     max_open_positions: 5
     state_file: "data/state/circuit_breaker_shadow.json"
     ledger_file: "data/trades/trades_circuit_breaker_shadow.jsonl"
+  be030_shadow:
+    # Forward-only ladder control: only the BE economic margin is 0.10%.
+    enabled: true
+    accept_new_entries: true
+    max_open_positions: 5
+    state_file: "data/state/be030_shadow.json"
+    ledger_file: "data/trades/trades_be030_shadow.jsonl"
+  be_off_shadow:
+    # Forward-only ladder variant: BREAKEVEN is absent; PL/TRAIL remain unchanged.
+    enabled: true
+    accept_new_entries: true
+    max_open_positions: 5
+    state_file: "data/state/be_off_shadow.json"
+    ledger_file: "data/trades/trades_be_off_shadow.jsonl"
+  be_off_cb_shadow:
+    # BE_OFF with its own frozen COMBO circuit breaker and 6h cooldown.
+    enabled: true
+    accept_new_entries: true
+    initial_capital_usdt: 100
+    max_open_positions: 5
+    state_file: "data/state/be_off_cb_shadow.json"
+    ledger_file: "data/trades/trades_be_off_cb_shadow.jsonl"
+    events_file: "data/telemetry/be_off_cb_shadow_events.jsonl"
   cohort_guard_study:
     episode_gap_hours: 6
     rules:
@@ -492,6 +515,7 @@ instrumentation:
   context_shadow_events_file: "data/telemetry/context_shadow_events.jsonl"
   h2_exposure_shadow_events_file: "data/telemetry/h2_exposure_shadow_events.jsonl"
   circuit_breaker_shadow_events_file: "data/telemetry/circuit_breaker_shadow_events.jsonl"
+  ladder_shadow_events_file: "data/telemetry/ladder_shadow_events.jsonl"
   market_context_events_file: "data/telemetry/market_context_events.jsonl"
   ema_entry_events_file: "data/telemetry/ema_entry_events.jsonl"
 

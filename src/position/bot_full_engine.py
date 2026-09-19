@@ -162,6 +162,17 @@ class BotFullExitPosition(PositionBase):
         self.market_context_entry: Optional[Dict[str, Any]] = None
         self.market_context_exit: Optional[Dict[str, Any]] = None
         self.shadow_kind: Optional[str] = None
+        # A transport failure after submitting a market sell is ambiguous: Binance
+        # may have accepted the order even though the response was lost.  Keep the
+        # intended exit durable and reconcile by its stable client order id before
+        # considering another submission.
+        self.exit_pending_client_order_id: Optional[str] = None
+        self.exit_pending_reason: Optional[str] = None
+        self.exit_pending_trigger_price: Optional[float] = None
+        self.exit_pending_trigger_reference: Optional[float] = None
+        self.exit_pending_ts: Optional[str] = None
+        self.exit_pending_error: Optional[str] = None
+        self.exit_pending_retry_submitted = False
 
     @classmethod
     def from_state(
@@ -312,10 +323,19 @@ class BotFullExitPosition(PositionBase):
         position.market_context_entry = state.get("market_context_entry")
         position.market_context_exit = state.get("market_context_exit")
         position.shadow_kind = state.get("shadow_kind")
+        position.exit_pending_client_order_id = state.get("exit_pending_client_order_id")
+        position.exit_pending_reason = state.get("exit_pending_reason")
+        position.exit_pending_trigger_price = _optional_float(state.get("exit_pending_trigger_price"))
+        position.exit_pending_trigger_reference = _optional_float(state.get("exit_pending_trigger_reference"))
+        position.exit_pending_ts = state.get("exit_pending_ts")
+        position.exit_pending_error = state.get("exit_pending_error")
+        position.exit_pending_retry_submitted = bool(state.get("exit_pending_retry_submitted", False))
         position._refresh_effective_stop()
         return position
 
     def on_tick(self, price: float, market_ts: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        if self.status == "EXIT_PENDING":
+            return self._reconcile_pending_exit()
         if self.status != "OPEN":
             return None
 
@@ -426,7 +446,90 @@ class BotFullExitPosition(PositionBase):
     ) -> Dict[str, Any]:
         client_order_id = f"ts-{self.pair_id}-B-close"
         self.validate_sell_quantity(self.reserved_qty)
-        order = self.client.market_sell(self.symbol, self.reserved_qty, client_order_id)
+        try:
+            order = self.client.market_sell(self.symbol, self.reserved_qty, client_order_id)
+        except Exception as exc:
+            self._mark_exit_pending(client_order_id, price, reason, ts, trigger_reference, exc)
+            return None
+        return self._finalize_market_close(order, price, reason, ts, trigger_reference)
+
+    def _mark_exit_pending(
+        self,
+        client_order_id: str,
+        price: float,
+        reason: str,
+        ts: str,
+        trigger_reference: float,
+        error: Exception,
+    ) -> None:
+        self.status = "EXIT_PENDING"
+        self.exit_pending_client_order_id = client_order_id
+        self.exit_pending_reason = reason
+        self.exit_pending_trigger_price = price
+        self.exit_pending_trigger_reference = trigger_reference
+        self.exit_pending_ts = ts
+        self.exit_pending_error = str(error)
+        self.logger.system(
+            "position_exit_pending_reconciliation",
+            pair_id=self.pair_id,
+            position_id=self.position_id,
+            client_order_id=client_order_id,
+            error=str(error),
+        )
+
+    def _reconcile_pending_exit(self) -> Optional[Dict[str, Any]]:
+        client_order_id = self.exit_pending_client_order_id
+        if not client_order_id:
+            self.status = "NEEDS_REVIEW"
+            self.logger.system(
+                "position_needs_review",
+                pair_id=self.pair_id,
+                position_id=self.position_id,
+                reason="exit_pending_without_client_order_id",
+            )
+            return None
+        try:
+            order = self.client.get_order(self.symbol, client_order_id=client_order_id)
+        except Exception as exc:
+            if not _order_not_found(exc) or self.exit_pending_retry_submitted:
+                self.exit_pending_error = str(exc)
+                return None
+            # Binance explicitly reports that the original id does not exist.  One
+            # re-submission with that same id is safe: an accepted original order
+            # cannot be duplicated under the idempotency key.
+            self.exit_pending_retry_submitted = True
+            try:
+                order = self.client.market_sell(self.symbol, self.reserved_qty, client_order_id)
+            except Exception as retry_exc:
+                self.exit_pending_error = str(retry_exc)
+                self.logger.system(
+                    "position_exit_pending_retry_failed",
+                    pair_id=self.pair_id,
+                    position_id=self.position_id,
+                    client_order_id=client_order_id,
+                    error=str(retry_exc),
+                )
+                return None
+
+        if str(order.get("status", "")).upper() != "FILLED":
+            self.exit_pending_error = f"close order status={order.get('status', 'unknown')}"
+            return None
+        return self._finalize_market_close(
+            order,
+            self.exit_pending_trigger_price or self.entry_price,
+            self.exit_pending_reason or "REVIEW_STOP",
+            self.exit_pending_ts or now_iso(),
+            self.exit_pending_trigger_reference or self.effective_stop,
+        )
+
+    def _finalize_market_close(
+        self,
+        order: Dict[str, Any],
+        price: float,
+        reason: str,
+        ts: str,
+        trigger_reference: float,
+    ) -> Dict[str, Any]:
         executed_price = _average_fill_price(order) or price
         self.exit_trigger_price = price
         self.exit_trigger_price_source = "aggTrade"
@@ -1008,6 +1111,13 @@ class BotFullExitPosition(PositionBase):
                 "market_context_entry": self.market_context_entry,
                 "market_context_exit": self.market_context_exit,
                 "shadow_kind": self.shadow_kind,
+                "exit_pending_client_order_id": self.exit_pending_client_order_id,
+                "exit_pending_reason": self.exit_pending_reason,
+                "exit_pending_trigger_price": self.exit_pending_trigger_price,
+                "exit_pending_trigger_reference": self.exit_pending_trigger_reference,
+                "exit_pending_ts": self.exit_pending_ts,
+                "exit_pending_error": self.exit_pending_error,
+                "exit_pending_retry_submitted": self.exit_pending_retry_submitted,
             }
         )
         return state
@@ -1025,6 +1135,11 @@ def _average_fill_price(order: Dict[str, Any]) -> Optional[float]:
         if total_qty > 0:
             return total_quote / total_qty
     return None
+
+
+def _order_not_found(error: Exception) -> bool:
+    """Return true only for Binance's definitive absent-order response."""
+    return "-2013" in str(error) or "Order does not exist" in str(error)
 
 
 def _float_or_zero(value: Any) -> float:

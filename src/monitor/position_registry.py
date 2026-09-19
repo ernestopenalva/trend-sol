@@ -58,8 +58,11 @@ class PositionRegistry:
         if blocked_reason:
             self._log_blocked_signal(signal, blocked_reason)
             return False
-        if self.review_required:
-            self.logger.system("entry_paused_needs_review", price=signal.price)
+        if self.review_required or self.exit_pending:
+            self.logger.system(
+                "entry_paused_exit_pending" if self.exit_pending else "entry_paused_needs_review",
+                price=signal.price,
+            )
             return False
 
         capital_cfg = self.config["capital"]
@@ -206,6 +209,11 @@ class PositionRegistry:
                     self.save_state()
                     continue
                 self._record_trough_event(position)
+                if position.status == "EXIT_PENDING":
+                    # Make the ambiguous-submit intent durable before any other
+                    # position can be processed or a process restart can occur.
+                    self.save_state()
+                    continue
             else:
                 event = None
             if event:
@@ -430,6 +438,10 @@ class PositionRegistry:
         return len({position.pair_id for position in self.positions if position.status == "OPEN"})
 
     @property
+    def exit_pending(self) -> bool:
+        return any(position.status == "EXIT_PENDING" for position in self.positions)
+
+    @property
     def max_open_pairs(self) -> int:
         return self.max_open_positions
 
@@ -456,6 +468,7 @@ class PositionRegistry:
             "server_open": sum(1 for position in open_positions if position.label == "A"),
             "bot_open": len(bot_positions),
             "needs_review": sum(1 for position in self.positions if position.status == "NEEDS_REVIEW"),
+            "exit_pending": sum(1 for position in self.positions if position.status == "EXIT_PENDING"),
             "bot_pnl_min": min(pnl_values) if pnl_values else None,
             "bot_pnl_max": max(pnl_values) if pnl_values else None,
             **(_bot_position_details(bot_positions[0], current_price) if bot_positions else {}),
