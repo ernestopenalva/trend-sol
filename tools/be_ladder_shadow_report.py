@@ -80,29 +80,54 @@ def _normalized(rows: dict[str, list[dict[str, Any]]], capital: float) -> None:
     for name, values in rows.items():
         events=[]
         for row in values:
-            source=row.get("source_candle_open_time")
-            entry=_num(row.get("signal_price"))
-            if entry is None and name == "REAL_A" and source is not None:
-                entry=by_source.get(int(source))
-            exit_price=_num(row.get("exit_trigger_price")) if name == "REAL_A" else _num(row.get("exit_price"))
-            notional,fee,closed=_num(row.get("position_notional_usdt")),_num(row.get("estimated_fees_pct")),_parse(row.get("closed_at"))
-            if None in (entry,exit_price,notional,fee,closed): continue
-            net=(exit_price-entry)*(notional/entry)-notional*fee/100
-            events.append((closed,net))
+            event=_normalized_event(row, name, by_source)
+            if event is not None: events.append(event)
         if len(events) != len(values):
             print(f"{name} | unavailable ({len(events)}/{len(values)} exact signal prices) | — | — | — | —")
             continue
-        balance=peak=capital;dd=0.; wins=losses=0.
-        for _,net in sorted(events):
-            balance+=net;peak=max(peak,balance);dd=max(dd,peak-balance)
-            wins+=max(net,0);losses+=max(-net,0)
-        net=balance-capital
+        net, dd, pf = _economic_summary(events, capital)
         totals[name] = net
-        print(f"{name} | {len(events)} | ${net:+.4f} | ${net/len(events) if events else 0:+.4f} | ${dd:.4f} | {wins/losses if losses else float('inf'):.4f}")
+        print(f"{name} | {len(events)} | ${net:+.4f} | ${net/len(events) if events else 0:+.4f} | ${dd:.4f} | {pf:.4f}")
     if "REAL_A" in totals:
         for name in ("BE030_SHADOW", "BE_OFF_SHADOW", "BE_OFF_CB_SHADOW"):
             if name in totals:
                 print(f"{name} - REAL_A | ${totals[name] - totals['REAL_A']:+.4f}")
+    real_by_source={row.get("source_candle_open_time"):row for row in rows["REAL_A"] if row.get("source_candle_open_time") is not None}
+    print("Pairwise normalized comparison (primary where both arms opened the same source candle)")
+    print("pair | common closed | REAL_A net $ / max DD $ | shadow net $ / max DD $ | shadow - REAL_A $")
+    for name in ("BE030_SHADOW", "BE_OFF_SHADOW", "BE_OFF_CB_SHADOW"):
+        shadow_by_source={row.get("source_candle_open_time"):row for row in rows[name] if row.get("source_candle_open_time") is not None}
+        common=sorted(set(real_by_source) & set(shadow_by_source))
+        real_events=[event for source in common if (event:=_normalized_event(real_by_source[source], "REAL_A", by_source)) is not None]
+        shadow_events=[event for source in common if (event:=_normalized_event(shadow_by_source[source], name, by_source)) is not None]
+        if len(real_events) != len(common) or len(shadow_events) != len(common):
+            print(f"REAL_A x {name} | unavailable ({len(real_events)}/{len(common)} exact pairs) | — | — | —")
+            continue
+        real_net, real_dd, _ = _economic_summary(real_events, capital)
+        shadow_net, shadow_dd, _ = _economic_summary(shadow_events, capital)
+        print(f"REAL_A x {name} | {len(common)} | ${real_net:+.4f} / ${real_dd:.4f} | ${shadow_net:+.4f} / ${shadow_dd:.4f} | ${shadow_net-real_net:+.4f}")
+
+def _normalized_event(row: dict[str, Any], name: str, by_source: dict[int, float | None]) -> tuple[datetime, float] | None:
+    source=row.get("source_candle_open_time")
+    entry=_num(row.get("signal_price"))
+    if entry is None:
+        if name == "REAL_A" and source is not None:
+            entry=by_source.get(int(source))
+        elif name != "REAL_A":
+            # Historical phantom ledgers predate signal_price.  Their recorded
+            # entry_price is precisely the phantom EntrySignal price.
+            entry=_num(row.get("entry_price"))
+    exit_price=_num(row.get("exit_trigger_price")) if name == "REAL_A" else _num(row.get("exit_price"))
+    notional,fee,closed=_num(row.get("position_notional_usdt")),_num(row.get("estimated_fees_pct")),_parse(row.get("closed_at"))
+    if None in (entry,exit_price,notional,fee,closed): return None
+    return closed, (exit_price-entry)*(notional/entry)-notional*fee/100
+
+def _economic_summary(events: list[tuple[datetime, float]], capital: float) -> tuple[float, float, float]:
+    balance=peak=capital;dd=0.;wins=losses=0.
+    for _,net in sorted(events):
+        balance+=net;peak=max(peak,balance);dd=max(dd,peak-balance)
+        wins+=max(net,0);losses+=max(-net,0)
+    return balance-capital, dd, wins/losses if losses else float("inf")
 
 def _audit_opened(rows: dict[str, list[dict[str, Any]]], opened: datetime | None) -> None:
     if opened is None: return
@@ -112,12 +137,24 @@ def _audit_opened(rows: dict[str, list[dict[str, Any]]], opened: datetime | None
         print(f"\nEntry audit: no REAL_A trade opened at {_fmt_brt(target)}")
         return
     source=real[0].get("source_candle_open_time")
+    shadow_signal = next(
+        (
+            _num(row.get("signal_price")) or _num(row.get("entry_price"))
+            for name, values in rows.items() if name != "REAL_A"
+            for row in values if row.get("source_candle_open_time") == source
+        ),
+        None,
+    )
     print(f"\nEntry audit | REAL_A opened {_fmt_brt(target)} | source candle={source}")
     print("arm | source candle BRT | admission/opened_at | signal price | recorded entry | entry source | delta from signal")
     for name, values in rows.items():
         for row in values:
             if row.get("source_candle_open_time") != source: continue
-            signal=_num(row.get("signal_price")) or _num(row.get("entry_price")); entry=_num(row.get("entry_price")); delta=(entry-signal) if entry is not None and signal is not None else None
+            entry=_num(row.get("entry_price"))
+            signal=_num(row.get("signal_price"))
+            if signal is None:
+                signal=shadow_signal if name == "REAL_A" else entry
+            delta=(entry-signal) if entry is not None and signal is not None else None
             entry_source="Testnet market fill" if name == "REAL_A" else "phantom signal"
             print(f"{name} | {_fmt_ms(source)} | {row.get('opened_at')} | {signal if signal is not None else 'unavailable'} | {entry} | {entry_source} | {delta if delta is not None else 'n/a'}")
 
