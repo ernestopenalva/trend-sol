@@ -17,6 +17,7 @@ class LadderShadowTests(unittest.TestCase):
             shadow = _shadow(Path(tmp), "be030_shadow", "BE030_SHADOW", "BE030")
             shadow.on_signal(_signal())
             position = shadow.open_positions[0]
+            self.assertEqual(position.signal_price, 100.0)
             shadow.on_tick(100.8, "2026-10-01T00:01:00+00:00")
             self.assertAlmostEqual(position.be_net_floor or 0, 100.3)
             self.assertEqual(position.hard_stop_pct, 1.5)

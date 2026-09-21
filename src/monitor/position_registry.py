@@ -124,6 +124,7 @@ class PositionRegistry:
                     no_progress_tolerance_source=no_progress.get("source"),
                 )
                 position.market_context_entry = deepcopy(market_context)
+                position.signal_price = float(signal.price)
                 if market_context:
                     self._submit_telemetry(
                         "market_context",

@@ -181,6 +181,7 @@ class TradeLedger:
             "closed_at": position.close_ts,
             "age_seconds": _age_seconds(position.open_ts, position.close_ts),
             "entry_price": entry_price,
+            "signal_price": _float_or_none(getattr(position, "signal_price", None)),
             "exit_price": exit_price,
             "exit_price_source": "phantom_tick" if phantom else ("market_fill" if position.exit_order else None),
             "exit_trigger_price": _float_or_none(getattr(position, "exit_trigger_price", None)),

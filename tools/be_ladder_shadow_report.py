@@ -28,16 +28,22 @@ def main() -> None:
     p.add_argument("--since", required=True, help="BRT DD/MM/AAAA HH:MM or ISO timestamp")
     p.add_argument("--until")
     p.add_argument("--capital", type=float, default=100.0)
+    p.add_argument("--audit-opened", help="BRT/ISO opening minute to audit across matching source candles.")
     a = p.parse_args(); since, until = _time(a.since), _time(a.until)
     print("TREND-SOL | REAL_A ladder forward cohort")
     print(f"Cohort opened_at: {a.since}" + (f" -> {a.until}" if a.until else ""))
-    print("arm | closed | open | gross $/trade | net $/trade | realized max DD $ | PF | HS | BE | PL | TRAIL | avg/median age min | capacity | spacing | same-5m | avg/max simultaneous")
     rows: dict[str, list[dict[str, Any]]] = {}
     for name, ledger, state_file in ARMS:
         rows[name] = _records(ROOT / ledger, since, until, real=name == "REAL_A")
+    _normalized(rows, a.capital)
+    print("\nOperational ledger/Testnet view (secondary; REAL_A uses exchange fills)")
+    print("arm | closed | open | gross $/trade | net $/trade | realized max DD $ | PF | HS | BE | PL | TRAIL | avg/median age min | capacity | spacing | same-5m | avg/max simultaneous")
+    for name, _ledger, state_file in ARMS:
         _line(name, rows[name], _state(ROOT / state_file), a.capital, real=name == "REAL_A")
     _transitions(rows["REAL_A"], rows["BE030_SHADOW"], "REAL_A -> BE030")
     _transitions(rows["REAL_A"], rows["BE_OFF_SHADOW"], "REAL_A -> BE_OFF")
+    if a.audit_opened:
+        _audit_opened(rows, _time(a.audit_opened))
 
 def _records(path: Path, since: datetime | None, until: datetime | None, *, real: bool) -> list[dict[str, Any]]:
     records = TradeLedger(ROOT, path).load()
@@ -54,6 +60,66 @@ def _line(name: str, rows: list[dict[str, Any]], state: dict[str, Any], capital:
     opens=_opens(state, real); fields=("blocked_capacity","blocked_spacing","blocked_same_5m","max_simultaneous_positions")
     counters="-/-/-/-" if real else "/".join(str(state.get(x,0)) for x in fields)
     print(f"{name} | {n} | {opens} | ${sum(gross):+.4f}/${_mean(gross):+.4f} | ${sum(net):+.4f}/${_mean(net):+.4f} | ${dd:.4f} | {wins/losses if losses else float('inf'):.4f} | " + " | ".join(f"{reasons[r]} ({(reasons[r]/n*100 if n else 0):.1f}%)" for r in REASONS) + f" | {_mean(ages):.1f}/{median(ages) if ages else 0:.1f} | {counters}")
+
+def _normalized(rows: dict[str, list[dict[str, Any]]], capital: float) -> None:
+    """Primary economic view: signal entry and tick/trigger exit in every arm.
+
+    REAL_A's Testnet quantity and fills are deliberately not reused. Each row is
+    repriced at its recorded EntrySignal price and fixed recorded notional.
+    Older REAL_A rows can use a same-source ladder shadow's signal price; rows
+    lacking either source are reported as unavailable rather than estimated.
+    """
+    by_source = {
+        int(row["source_candle_open_time"]): _num(row.get("signal_price")) or _num(row.get("entry_price"))
+        for name, values in rows.items() if name != "REAL_A" for row in values
+        if row.get("source_candle_open_time") is not None
+    }
+    print("Normalized phantom comparison (primary; homogeneous signal-entry / tick-exit convention)")
+    print("arm | normalized closed | net $ | net/trade $ | realized max DD $ | PF")
+    totals: dict[str, float] = {}
+    for name, values in rows.items():
+        events=[]
+        for row in values:
+            source=row.get("source_candle_open_time")
+            entry=_num(row.get("signal_price"))
+            if entry is None and name == "REAL_A" and source is not None:
+                entry=by_source.get(int(source))
+            exit_price=_num(row.get("exit_trigger_price")) if name == "REAL_A" else _num(row.get("exit_price"))
+            notional,fee,closed=_num(row.get("position_notional_usdt")),_num(row.get("estimated_fees_pct")),_parse(row.get("closed_at"))
+            if None in (entry,exit_price,notional,fee,closed): continue
+            net=(exit_price-entry)*(notional/entry)-notional*fee/100
+            events.append((closed,net))
+        if len(events) != len(values):
+            print(f"{name} | unavailable ({len(events)}/{len(values)} exact signal prices) | — | — | — | —")
+            continue
+        balance=peak=capital;dd=0.; wins=losses=0.
+        for _,net in sorted(events):
+            balance+=net;peak=max(peak,balance);dd=max(dd,peak-balance)
+            wins+=max(net,0);losses+=max(-net,0)
+        net=balance-capital
+        totals[name] = net
+        print(f"{name} | {len(events)} | ${net:+.4f} | ${net/len(events) if events else 0:+.4f} | ${dd:.4f} | {wins/losses if losses else float('inf'):.4f}")
+    if "REAL_A" in totals:
+        for name in ("BE030_SHADOW", "BE_OFF_SHADOW", "BE_OFF_CB_SHADOW"):
+            if name in totals:
+                print(f"{name} - REAL_A | ${totals[name] - totals['REAL_A']:+.4f}")
+
+def _audit_opened(rows: dict[str, list[dict[str, Any]]], opened: datetime | None) -> None:
+    if opened is None: return
+    target=opened.replace(second=0,microsecond=0)
+    real=[row for row in rows["REAL_A"] if (_parse(row.get("opened_at")) or target).replace(second=0,microsecond=0)==target]
+    if not real:
+        print(f"\nEntry audit: no REAL_A trade opened at {_fmt_brt(target)}")
+        return
+    source=real[0].get("source_candle_open_time")
+    print(f"\nEntry audit | REAL_A opened {_fmt_brt(target)} | source candle={source}")
+    print("arm | source candle BRT | admission/opened_at | signal price | recorded entry | entry source | delta from signal")
+    for name, values in rows.items():
+        for row in values:
+            if row.get("source_candle_open_time") != source: continue
+            signal=_num(row.get("signal_price")) or _num(row.get("entry_price")); entry=_num(row.get("entry_price")); delta=(entry-signal) if entry is not None and signal is not None else None
+            entry_source="Testnet market fill" if name == "REAL_A" else "phantom signal"
+            print(f"{name} | {_fmt_ms(source)} | {row.get('opened_at')} | {signal if signal is not None else 'unavailable'} | {entry} | {entry_source} | {delta if delta is not None else 'n/a'}")
 
 def _transitions(base: list[dict[str, Any]], arm: list[dict[str, Any]], title: str) -> None:
     def key(x: dict[str,Any]): return x.get("source_candle_open_time")
@@ -87,4 +153,8 @@ def _num(v:Any)->float|None:
     try:return float(v)
     except (TypeError,ValueError):return None
 def _mean(v:list[float])->float:return sum(v)/len(v) if v else 0.
+def _fmt_brt(value:datetime)->str:return value.astimezone(BRASILIA_TZ).strftime("%d/%m/%Y %H:%M:%S BRT")
+def _fmt_ms(value:Any)->str:
+    try:return _fmt_brt(datetime.fromtimestamp(int(value)/1000,timezone.utc))
+    except (TypeError,ValueError):return "unavailable"
 if __name__=="__main__":main()

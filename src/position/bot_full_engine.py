@@ -162,6 +162,9 @@ class BotFullExitPosition(PositionBase):
         self.market_context_entry: Optional[Dict[str, Any]] = None
         self.market_context_exit: Optional[Dict[str, Any]] = None
         self.shadow_kind: Optional[str] = None
+        # Informational only: the common EntrySignal price, distinct from a
+        # Testnet market fill. It permits homogeneous forward reporting.
+        self.signal_price: Optional[float] = None
         # A transport failure after submitting a market sell is ambiguous: Binance
         # may have accepted the order even though the response was lost.  Keep the
         # intended exit durable and reconcile by its stable client order id before
@@ -323,6 +326,7 @@ class BotFullExitPosition(PositionBase):
         position.market_context_entry = state.get("market_context_entry")
         position.market_context_exit = state.get("market_context_exit")
         position.shadow_kind = state.get("shadow_kind")
+        position.signal_price = _optional_float(state.get("signal_price"))
         position.exit_pending_client_order_id = state.get("exit_pending_client_order_id")
         position.exit_pending_reason = state.get("exit_pending_reason")
         position.exit_pending_trigger_price = _optional_float(state.get("exit_pending_trigger_price"))
@@ -1111,6 +1115,7 @@ class BotFullExitPosition(PositionBase):
                 "market_context_entry": self.market_context_entry,
                 "market_context_exit": self.market_context_exit,
                 "shadow_kind": self.shadow_kind,
+                "signal_price": self.signal_price,
                 "exit_pending_client_order_id": self.exit_pending_client_order_id,
                 "exit_pending_reason": self.exit_pending_reason,
                 "exit_pending_trigger_price": self.exit_pending_trigger_price,

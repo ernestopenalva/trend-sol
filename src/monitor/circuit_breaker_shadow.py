@@ -133,6 +133,7 @@ class CircuitBreakerShadow(RealAContextShadow):
             no_progress_enabled=False, no_progress_tolerance_seconds=None, no_progress_tolerance_source='DISABLED',
         )
         position.phantom, position.phantom_id, position.shadow_kind = True, pair_id, self.shadow_kind
+        position.signal_price = float(signal.price)
         position.market_context_entry = deepcopy(self.latest_market_context)
         self.positions.append(position)
         self.entries_by_bucket[bucket] = self.entries_by_bucket.get(bucket, 0) + 1
