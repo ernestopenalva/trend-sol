@@ -56,13 +56,25 @@ ema_observations:
   enabled: true
   slope_window_minutes: 30
   variants:
+    - period: 5
+      interval: "15m"
+    - period: 10
+      interval: "15m"
     - period: 50
       interval: "15m"
     - period: 20
       interval: "15m"
+    - period: 200
+      interval: "15m"
+    - period: 5
+      interval: "5m"
+    - period: 10
+      interval: "5m"
     - period: 50
       interval: "5m"
     - period: 20
+      interval: "5m"
+    - period: 200
       interval: "5m"
 
 entry:
@@ -236,6 +248,8 @@ instrumentation:
   market_context:
     enabled: true
     timeframes: ["5m", "15m"]
+    # Observational only; these values are never read by execution logic.
+    ema_observation_periods: [5, 10, 200]
     ema_fast_period: 20
     ema_slow_period: 50
     ema_long_period: 100

@@ -891,9 +891,11 @@ def _parse_ts(value: Any) -> Optional[datetime]:
 def _ema_entry_values(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     values = snapshot.get("tf_5m") if isinstance(snapshot.get("tf_5m"), dict) else {}
     fields = (
+        "ema5", "ema5_t_minus_3", "ema10", "ema10_t_minus_3",
         "ema20", "ema20_t_minus_3", "ema50", "ema50_t_minus_3", "ema100", "ema100_t_minus_3",
-        "ema20_delta_pct", "ema50_delta_pct", "ema100_delta_pct", "ema20_rising", "ema50_rising",
-        "ema100_rising", "ema_trend_score", "ema_trend_label",
+        "ema200", "ema200_t_minus_3", "ema5_delta_pct", "ema10_delta_pct", "ema20_delta_pct",
+        "ema50_delta_pct", "ema100_delta_pct", "ema200_delta_pct", "ema5_rising", "ema10_rising",
+        "ema20_rising", "ema50_rising", "ema100_rising", "ema200_rising", "ema_trend_score", "ema_trend_label",
     )
     return {field: values.get(field) for field in fields}
 

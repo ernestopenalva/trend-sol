@@ -86,6 +86,12 @@ def _validate_market_context(config: Dict[str, Any]) -> None:
         value = settings.get(field)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"instrumentation.market_context.{field} must be a positive integer")
+    periods = settings.get("ema_observation_periods", [5, 10, 200])
+    if not isinstance(periods, list) or any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        for value in periods
+    ):
+        raise ValueError("instrumentation.market_context.ema_observation_periods must be positive integers")
 
 
 def _validate_trend_observations(config: Dict[str, Any]) -> None:

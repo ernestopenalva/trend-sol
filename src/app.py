@@ -209,7 +209,7 @@ class Monitor:
             slow_ge_context_rule="GE45 THEN unchanged REAL_A: GE15 + G2 + G3 + G4",
             market_context_telemetry_only=True,
             market_context_timeframes=context_settings.get("timeframes"),
-            market_context_indicators=["EMA20", "EMA50", "EMA20_SLOPE", "EMA50_SLOPE", "ADX14", "+DI14", "-DI14", "RSI14", "RSI14_SMA14_5M", "RVOL", "GE15"],
+            market_context_indicators=["EMA5", "EMA10", "EMA20", "EMA50", "EMA100", "EMA200", "EMA20_SLOPE", "EMA50_SLOPE", "ADX14", "+DI14", "-DI14", "RSI14", "RSI14_SMA14_5M", "RVOL", "GE15"],
         )
         self.market_shadow = MultiMarketShadow(
             self.project_root,

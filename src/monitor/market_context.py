@@ -62,9 +62,21 @@ class MarketContextEngine:
         highs = [item.high for item in closed]
         lows = [item.low for item in closed]
         volumes = [item.volume for item in closed]
-        ema20 = ema(closes, int(self.settings.get("ema_fast_period", 20)))
-        ema50 = ema(closes, int(self.settings.get("ema_slow_period", 50)))
-        ema100 = ema(closes, int(self.settings.get("ema_long_period", 100)))
+        periods = {
+            5,
+            10,
+            200,
+            int(self.settings.get("ema_fast_period", 20)),
+            int(self.settings.get("ema_slow_period", 50)),
+            int(self.settings.get("ema_long_period", 100)),
+            *self.settings.get("ema_observation_periods", (5, 10, 200)),
+        }
+        ema_series = {period: ema(closes, period) for period in periods}
+        ema5, ema10 = ema_series[5], ema_series[10]
+        ema20 = ema_series[int(self.settings.get("ema_fast_period", 20))]
+        ema50 = ema_series[int(self.settings.get("ema_slow_period", 50))]
+        ema100 = ema_series[int(self.settings.get("ema_long_period", 100))]
+        ema200 = ema_series[200]
         rsi14 = rsi(closes, int(self.settings.get("rsi_period", 14)))
         rsi_ma = _rsi_based_ma(
             rsi14,
@@ -81,14 +93,23 @@ class MarketContextEngine:
         baseline_avg = sum(baseline) / len(baseline) if baseline else None
         latest_volume = volumes[-1] if volumes else None
         ema_values = {
+            "ema5": _last(ema5),
+            "ema5_t_minus_3": _lookback(ema5, 3),
+            "ema10": _last(ema10),
+            "ema10_t_minus_3": _lookback(ema10, 3),
             "ema20": _last(ema20),
             "ema20_t_minus_3": _lookback(ema20, 3),
             "ema50": _last(ema50),
             "ema50_t_minus_3": _lookback(ema50, 3),
             "ema100": _last(ema100),
             "ema100_t_minus_3": _lookback(ema100, 3),
+            "ema200": _last(ema200),
+            "ema200_t_minus_3": _lookback(ema200, 3),
         }
-        for label, values in (("ema20", ema20), ("ema50", ema50), ("ema100", ema100)):
+        for label, values in (
+            ("ema5", ema5), ("ema10", ema10), ("ema20", ema20),
+            ("ema50", ema50), ("ema100", ema100), ("ema200", ema200),
+        ):
             current, previous = _last(values), _lookback(values, 3)
             ema_values[f"{label}_delta_pct"] = _delta_pct(current, previous)
             ema_values[f"{label}_rising"] = (current > previous) if current is not None and previous is not None else None

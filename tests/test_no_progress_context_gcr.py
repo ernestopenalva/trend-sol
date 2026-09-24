@@ -69,13 +69,17 @@ class NewPackageTests(unittest.TestCase):
     def test_market_context_has_symmetric_5m_and_15m_fields(self) -> None:
         with TemporaryDirectory() as tmp:
             engine = EntryEngine("SOLUSDT", _context_config(), _logger(Path(tmp)))
-            candles = [_candle(index, 100 + index * 0.1) for index in range(80)]
+            candles = [_candle(index, 100 + index * 0.1) for index in range(240)]
             engine.auxiliary_candles["5m"] = candles
             engine.trend_candles = candles
             context = MarketContextEngine(engine, _context_config()).refresh()
-            expected = {"ema20", "ema50", "ema100", "ema20_slope_pct", "ema50_slope_pct", "adx14", "plus_di14", "minus_di14", "rsi14", "relative_volume", "ema20_t_minus_3", "ema50_t_minus_3", "ema100_t_minus_3", "ema20_delta_pct", "ema50_delta_pct", "ema100_delta_pct", "ema20_rising", "ema50_rising", "ema100_rising", "ema_trend_score", "ema_trend_label"}
+            expected = {"ema5", "ema10", "ema20", "ema50", "ema100", "ema200", "ema20_slope_pct", "ema50_slope_pct", "adx14", "plus_di14", "minus_di14", "rsi14", "relative_volume", "ema5_t_minus_3", "ema10_t_minus_3", "ema20_t_minus_3", "ema50_t_minus_3", "ema100_t_minus_3", "ema200_t_minus_3", "ema5_delta_pct", "ema10_delta_pct", "ema20_delta_pct", "ema50_delta_pct", "ema100_delta_pct", "ema200_delta_pct", "ema5_rising", "ema10_rising", "ema20_rising", "ema50_rising", "ema100_rising", "ema200_rising", "ema_trend_score", "ema_trend_label"}
             self.assertTrue(expected.issubset(context["tf_5m"]))
             self.assertTrue(expected.issubset(context["tf_15m"]))
+            self.assertIsNotNone(context["tf_5m"]["ema5"])
+            self.assertIsNotNone(context["tf_5m"]["ema10"])
+            self.assertIsNotNone(context["tf_5m"]["ema200"])
+            self.assertIsNotNone(context["tf_5m"]["ema200_t_minus_3"])
             self.assertIsNotNone(context["tf_5m"]["plus_di14_15m_ago"])
             self.assertIsNotNone(context["tf_5m"]["minus_di14_15m_ago"])
             self.assertIsNotNone(context["tf_5m"]["rsi14_15m_ago"])
