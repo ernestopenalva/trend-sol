@@ -31,6 +31,7 @@ from src.monitor.context_shadow import RealAContextShadow
 from src.monitor.h2_exposure_shadow import H2ExposureShadow
 from src.monitor.circuit_breaker_shadow import CircuitBreakerShadow
 from src.monitor.ladder_shadow import RealALadderShadow
+from src.monitor.forward_experiment_shadows import ExperimentalRiskShadow, PolicyShadow
 from src.monitor.gcr_shadow import GcrShadowRegistry
 from src.monitor.market_context import MarketContextEngine
 from src.monitor.human_console_reporter import HumanConsoleReporter
@@ -122,6 +123,28 @@ class Monitor:
             settings_key="be_off_cb_shadow", strategy="BE_OFF_CB_SHADOW", shadow_kind="BE_OFF_CB_SHADOW",
             pair_prefix="beoffcb", be_off=True, cohort_started_at=self.ladder_shadow_cohort_started_at,
         )
+        self.forward_experiment_shadows = [
+            ExperimentalRiskShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
+                settings_key="hs_bull_elastic_shadow", strategy="HS_BULL_ELASTIC_SHADOW",
+                pair_prefix="hsbullelastic", experiment="HS_BULL_ELASTIC",
+                cohort_started_at=self.ladder_shadow_cohort_started_at),
+            ExperimentalRiskShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
+                settings_key="hs_bear_cluster_exit_shadow", strategy="HS_BEAR_CLUSTER_EXIT_SHADOW",
+                pair_prefix="hsbearcluster", experiment="HS_BEAR_CLUSTER_EXIT",
+                cohort_started_at=self.ladder_shadow_cohort_started_at),
+            ExperimentalRiskShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
+                settings_key="cb_exit_all_shadow", strategy="CB_EXIT_ALL_SHADOW",
+                pair_prefix="cbexitall", experiment="CB_EXIT_ALL",
+                cohort_started_at=self.ladder_shadow_cohort_started_at),
+            PolicyShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
+                settings_key="be_off_cb_macd_bu_minus_shadow", strategy="BE_OFF_CB_MACD_BU_MINUS_SHADOW",
+                pair_prefix="macdbuminus", policy="MACD_BU_MINUS",
+                cohort_started_at=self.ladder_shadow_cohort_started_at),
+            PolicyShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
+                settings_key="be_off_cb_ema_macd_shadow", strategy="BE_OFF_CB_EMA_MACD_SHADOW",
+                pair_prefix="emamacd", policy="EMA_MACD",
+                cohort_started_at=self.ladder_shadow_cohort_started_at),
+        ]
         self.entry_engine = EntryEngine(str(self.config["symbol"]), self.config, self.logger)
         self.gcr_shadow = GcrShadowRegistry(
             self.project_root, self.config, self.logger, self.telemetry_writer
@@ -246,6 +269,8 @@ class Monitor:
         self.be030_shadow.announce_cohort()
         self.be_off_shadow.announce_cohort()
         self.be_off_cb_shadow.announce_cohort()
+        for shadow in getattr(self, "forward_experiment_shadows", []):
+            shadow.announce_cohort()
         try:
             self.logger.system("validating_startup")
             self._validate_startup()
@@ -375,6 +400,7 @@ class Monitor:
                 ("be030_shadow", getattr(self, "be030_shadow", None)),
                 ("be_off_shadow", getattr(self, "be_off_shadow", None)),
                 ("be_off_cb_shadow", getattr(self, "be_off_cb_shadow", None)),
+                *((shadow.settings_key, shadow) for shadow in getattr(self, "forward_experiment_shadows", [])),
             ):
                 try:
                     if shadow is None:
@@ -395,6 +421,11 @@ class Monitor:
                 snapshot = self._safe_refresh_market_context()
                 if timeframe == "5m":
                     self.registry.record_market_context(snapshot)
+                    for shadow in getattr(self, "forward_experiment_shadows", []):
+                        try:
+                            shadow.on_closed_5m(snapshot)
+                        except Exception as exc:
+                            self.logger.system(f"{shadow.settings_key}_candle_failed", error=str(exc))
                     self.gcr_shadow.record_market_context(snapshot)
                     try:
                         self.dmi15_shadow.on_closed_5m(
@@ -449,6 +480,7 @@ class Monitor:
                     ("be030_shadow", getattr(self, "be030_shadow", None)),
                     ("be_off_shadow", getattr(self, "be_off_shadow", None)),
                     ("be_off_cb_shadow", getattr(self, "be_off_cb_shadow", None)),
+                    *((shadow.settings_key, shadow) for shadow in getattr(self, "forward_experiment_shadows", [])),
                 ):
                     try:
                         if shadow is None:

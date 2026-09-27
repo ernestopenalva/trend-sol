@@ -233,6 +233,10 @@ def _ema_entry_values(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "ema200", "ema200_t_minus_3", "ema5_delta_pct", "ema10_delta_pct", "ema20_delta_pct",
         "ema50_delta_pct", "ema100_delta_pct", "ema200_delta_pct", "ema5_rising", "ema10_rising",
         "ema20_rising", "ema50_rising", "ema100_rising", "ema200_rising", "ema_trend_score", "ema_trend_label",
+        "ema50_previous", "ema50_direction", "ema100_previous", "ema100_direction",
+        "ema200_previous", "ema200_direction", "ema_context", "macd_line", "macd_line_previous",
+        "macd_direction", "macd_position", "macd_context", "latest_open_at_ms", "latest_closed_at_ms",
+        "context_source_timeframe",
     )
     return {key: values.get(key) for key in fields}
 

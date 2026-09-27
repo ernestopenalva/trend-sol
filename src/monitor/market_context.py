@@ -65,6 +65,8 @@ class MarketContextEngine:
         periods = {
             5,
             10,
+            12,
+            26,
             200,
             int(self.settings.get("ema_fast_period", 20)),
             int(self.settings.get("ema_slow_period", 50)),
@@ -77,6 +79,8 @@ class MarketContextEngine:
         ema50 = ema_series[int(self.settings.get("ema_slow_period", 50))]
         ema100 = ema_series[int(self.settings.get("ema_long_period", 100))]
         ema200 = ema_series[200]
+        ema12 = ema_series[12]
+        ema26 = ema_series[26]
         rsi14 = rsi(closes, int(self.settings.get("rsi_period", 14)))
         rsi_ma = _rsi_based_ma(
             rsi14,
@@ -113,6 +117,19 @@ class MarketContextEngine:
             current, previous = _last(values), _lookback(values, 3)
             ema_values[f"{label}_delta_pct"] = _delta_pct(current, previous)
             ema_values[f"{label}_rising"] = (current > previous) if current is not None and previous is not None else None
+            immediate_previous = _lookback(values, 1)
+            ema_values[f"{label}_previous"] = immediate_previous
+            ema_values[f"{label}_direction"] = _direction(current, immediate_previous)
+        macd = [
+            (float(fast) - float(slow)) if fast is not None and slow is not None else None
+            for fast, slow in zip(ema12, ema26)
+        ]
+        macd_line, macd_previous = _last(macd), _lookback(macd, 1)
+        ema_context = classify_ema_context(
+            ema_values["ema50"], ema_values["ema100"], ema_values["ema200"],
+            ema_values["ema50_direction"], ema_values["ema100_direction"], ema_values["ema200_direction"],
+        )
+        macd_context = classify_macd_context(macd_line, macd_previous)
         rising_values = [ema_values[f"{label}_rising"] for label in ("ema20", "ema50", "ema100")]
         if any(value is None for value in rising_values):
             score, trend_label = None, "UNAVAILABLE"
@@ -124,6 +141,15 @@ class MarketContextEngine:
             "latest_closed_at_ms": closed[-1].close_time if closed else None,
             "close": closes[-1] if closes else None,
             **ema_values,
+            "ema_context": ema_context,
+            "macd_line": macd_line,
+            "macd_line_previous": macd_previous,
+            "macd_direction": _direction(macd_line, macd_previous),
+            "macd_position": "ABOVE_ZERO" if macd_line is not None and macd_line > 0 else (
+                "BELOW_ZERO" if macd_line is not None and macd_line < 0 else "ZERO" if macd_line == 0 else "UNAVAILABLE"
+            ),
+            "macd_context": macd_context,
+            "context_source_timeframe": timeframe,
             "ema_trend_score": score,
             "ema_trend_label": trend_label,
             "ema20_slope_pct": _slope_pct(ema20, slope_lookback),
@@ -174,6 +200,44 @@ def _delta_pct(current: Optional[float], previous: Optional[float]) -> Optional[
     if current is None or previous in (None, 0):
         return None
     return (float(current) / float(previous) - 1) * 100
+
+
+def _direction(current: Optional[float], previous: Optional[float]) -> str:
+    if current is None or previous is None:
+        return "UNAVAILABLE"
+    if current > previous:
+        return "UP"
+    if current < previous:
+        return "DOWN"
+    return "FLAT"
+
+
+def classify_ema_context(
+    ema50: Optional[float], ema100: Optional[float], ema200: Optional[float],
+    direction50: str, direction100: str, direction200: str,
+) -> str:
+    if None in (ema50, ema100, ema200) or "UNAVAILABLE" in (direction50, direction100, direction200):
+        return "UNAVAILABLE"
+    if ema50 > ema100 > ema200 and (direction50, direction100, direction200) == ("UP", "UP", "UP"):
+        return "LON"
+    if ema50 < ema100 < ema200 and (direction50, direction100, direction200) == ("DOWN", "DOWN", "DOWN"):
+        return "SHO"
+    if direction50 == "UP" and direction100 == "UP":
+        return "BUL"
+    if direction50 == "UP" and direction100 == "DOWN":
+        return "MUP"
+    if direction50 == "DOWN" and direction100 == "UP":
+        return "MDO"
+    if direction50 == "DOWN":
+        return "BEA"
+    return "MIX"
+
+
+def classify_macd_context(current: Optional[float], previous: Optional[float]) -> str:
+    direction = _direction(current, previous)
+    if current is None or direction not in ("UP", "DOWN") or current == 0:
+        return "UNAVAILABLE"
+    return ("BU" if current > 0 else "BE") + ("+" if direction == "UP" else "-")
 
 
 def _rsi_based_ma(

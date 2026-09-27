@@ -108,23 +108,45 @@ class CircuitBreakerShadow(RealAContextShadow):
         if self.last_signal_source is not None and signal.source_candle_open_time <= self.last_signal_source:
             return False
         self.last_signal_source = signal.source_candle_open_time
+        context = self._context_fields()
         self._event('SIGNAL_OPPORTUNITY', source_candle_open_time=signal.source_candle_open_time,
-                    price=signal.price, detector_boundary_ms=self.clock.last_boundary)
+                    price=signal.price, detector_boundary_ms=self.clock.last_boundary, **context)
         if self.circuit_breaker_active:
             self.blocked_circuit_breaker += 1
             return self._block("ENTRY_BLOCKED_CIRCUIT_BREAKER", signal, _bucket(signal.source_candle_open_time), breaker_until=self.circuit_breaker_until)
         bucket = _bucket(signal.source_candle_open_time)
+        allowed, reason = self._entry_policy(context)
+        if not allowed:
+            return self._block(reason, signal, bucket, **context)
         if len(self.open_positions) >= int(self.settings.get('max_open_positions', 5)):
             self.blocked_capacity += 1
             return self._block('ENTRY_BLOCKED_SHADOW_CAPACITY', signal, bucket)
         return super().on_signal(signal)
+
+    def _entry_policy(self, context: Dict[str, Any]) -> tuple[bool, str]:
+        """Variant hook. The frozen controls always admit the shared opportunity."""
+        return True, "ENTRY_ACCEPTED"
+
+    def _context_fields(self) -> Dict[str, Any]:
+        snapshot = self.latest_market_context if isinstance(self.latest_market_context, dict) else {}
+        values = snapshot.get("tf_5m") if isinstance(snapshot.get("tf_5m"), dict) else {}
+        keys = (
+            "latest_open_at_ms", "latest_closed_at_ms", "ema50", "ema50_previous", "ema50_direction",
+            "ema100", "ema100_previous", "ema100_direction", "ema200", "ema200_previous",
+            "ema200_direction", "ema_context", "macd_line", "macd_line_previous", "macd_direction",
+            "macd_position", "macd_context", "context_source_timeframe",
+        )
+        return {key: values.get(key) for key in keys}
+
+    def _block(self, event: str, signal: EntrySignal, bucket: int, **fields: Any) -> bool:
+        return super()._block(event, signal, bucket, decision="NAO", decision_reason=event, **fields)
 
     def _open(self, signal: EntrySignal, bucket: int) -> None:
         notional = float(self.config['capital']['operational_balance_usdt']) * float(self.config['capital']['trade_size_pct']) / 100
         client = PhantomExecutionClient()
         client.set_price(signal.price)
         pair_id = f'{self.pair_prefix}-{signal.source_candle_open_time}'
-        position = CircuitBreakerPosition(
+        position = self._position_type()(
             pair_id=pair_id, symbol=str(self.config['symbol']), entry_price=float(signal.price),
             quantity=notional / float(signal.price), entry_order={'shadow': True},
             open_ts=signal.ts, config=self._exit_config(), client=client, logger=self.logger,
@@ -140,15 +162,18 @@ class CircuitBreakerShadow(RealAContextShadow):
         self.max_simultaneous_positions = max(self.max_simultaneous_positions, len(self.open_positions))
         self.logger.trade(position._trade_event('OPEN', signal.price, 0.0, None, price_source='signal'))
         self._event('OPEN', pair_id=pair_id, source_candle_open_time=signal.source_candle_open_time,
-                    admission_bucket_open_time=bucket)
+                    admission_bucket_open_time=bucket, decision="SIM", decision_reason="ADMITTED", **self._context_fields())
         self._emit_ema_entry(position)
         self._save_state()
+
+    def _position_type(self):
+        return CircuitBreakerPosition
 
     def _load_state(self) -> None:
         super()._load_state()
         # Restore the CB-specific position type as well as its persisted ladder state.
         self.positions = [
-            CircuitBreakerPosition.from_state(item.to_state(), self._exit_config(), item.client, self.logger)
+            self._position_type().from_state(item.to_state(), self._exit_config(), item.client, self.logger)
             for item in self.positions
         ]
 
@@ -157,6 +182,12 @@ class CircuitBreakerShadow(RealAContextShadow):
     ) -> None:
         """Never evaluate a second entry engine; only the shared signal is used."""
         return None
+
+    def on_closed_5m(self, snapshot: Dict[str, Any] | None) -> None:
+        """Refresh shared closed-candle context without running another entry engine."""
+        if self.enabled and snapshot:
+            self.latest_market_context = deepcopy(snapshot)
+            self._save_state()
 
     def on_approved_real_a_signal(
         self, signal: EntrySignal, market_context: Dict[str, Any] | None

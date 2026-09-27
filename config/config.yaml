@@ -312,6 +312,46 @@ instrumentation:
     state_file: "data/state/be_off_cb_shadow.json"
     ledger_file: "data/trades/trades_be_off_cb_shadow.jsonl"
     events_file: "data/telemetry/be_off_cb_shadow_events.jsonl"
+  hs_bull_elastic_shadow:
+    enabled: true
+    accept_new_entries: true
+    initial_capital_usdt: 100
+    max_open_positions: 5
+    state_file: "data/state/hs_bull_elastic_shadow.json"
+    ledger_file: "data/trades/trades_hs_bull_elastic_shadow.jsonl"
+    events_file: "data/telemetry/hs_bull_elastic_shadow_events.jsonl"
+  hs_bear_cluster_exit_shadow:
+    enabled: true
+    accept_new_entries: true
+    initial_capital_usdt: 100
+    max_open_positions: 5
+    state_file: "data/state/hs_bear_cluster_exit_shadow.json"
+    ledger_file: "data/trades/trades_hs_bear_cluster_exit_shadow.jsonl"
+    events_file: "data/telemetry/hs_bear_cluster_exit_shadow_events.jsonl"
+  cb_exit_all_shadow:
+    enabled: true
+    accept_new_entries: true
+    initial_capital_usdt: 100
+    max_open_positions: 5
+    state_file: "data/state/cb_exit_all_shadow.json"
+    ledger_file: "data/trades/trades_cb_exit_all_shadow.jsonl"
+    events_file: "data/telemetry/cb_exit_all_shadow_events.jsonl"
+  be_off_cb_macd_bu_minus_shadow:
+    enabled: true
+    accept_new_entries: true
+    initial_capital_usdt: 100
+    max_open_positions: 5
+    state_file: "data/state/be_off_cb_macd_bu_minus_shadow.json"
+    ledger_file: "data/trades/trades_be_off_cb_macd_bu_minus_shadow.jsonl"
+    events_file: "data/telemetry/be_off_cb_macd_bu_minus_shadow_events.jsonl"
+  be_off_cb_ema_macd_shadow:
+    enabled: true
+    accept_new_entries: true
+    initial_capital_usdt: 100
+    max_open_positions: 5
+    state_file: "data/state/be_off_cb_ema_macd_shadow.json"
+    ledger_file: "data/trades/trades_be_off_cb_ema_macd_shadow.jsonl"
+    events_file: "data/telemetry/be_off_cb_ema_macd_shadow_events.jsonl"
   cohort_guard_study:
     episode_gap_hours: 6
     rules:
