@@ -18,7 +18,10 @@ if str(ROOT) not in sys.path:
 from src.console_utils import BRASILIA_TZ
 
 
-DEFAULT_SINCE_TEXT = "27/09/2026 20:07:29"
+COHORT_STARTED_TEXT = "27/09/2026 20:07:29"
+COMPARABILITY_FLOOR_TEXT = "28/09/2026 01:47:00"
+# Kept as a compatibility alias for imports made by earlier versions/tests.
+DEFAULT_SINCE_TEXT = COHORT_STARTED_TEXT
 SUMMARY_HEADER = "arm | closed | open | net $/trade | PF | HS | PL | TRAIL | median age | max simultaneous"
 
 
@@ -28,6 +31,14 @@ class Arm:
     ledger: str
     state: str
     events: str
+
+
+@dataclass(frozen=True)
+class ComparableWindow:
+    cohort_started: datetime
+    comparable_since: datetime | None
+    observed_at: datetime
+    pending_reason: str | None = None
 
 
 CONTROL = Arm("BE_OFF_CB_SHADOW", "data/trades/trades_be_off_cb_shadow.jsonl",
@@ -49,14 +60,23 @@ EXPERIMENTS = {
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--experiment", choices=tuple(EXPERIMENTS))
-    parser.add_argument("--since", default=DEFAULT_SINCE_TEXT, help="BRT DD/MM/AAAA HH:MM:SS or ISO timestamp")
     parser.add_argument("--list-accepted", action="store_true", help="With ema_macd, list admitted trades for plotting")
     args = parser.parse_args()
-    since = parse_time(args.since)
-    if since is None:
-        raise SystemExit("invalid --since")
+    cohort_started = parse_time(COHORT_STARTED_TEXT)
+    floor = parse_time(COMPARABILITY_FLOOR_TEXT)
+    if cohort_started is None or floor is None:  # pragma: no cover - constants are tested
+        raise SystemExit("invalid report window constants")
+    window = determine_comparable_window(cohort_started, floor)
     if args.list_accepted and args.experiment != "ema_macd":
         raise SystemExit("--list-accepted is only valid with --experiment ema_macd")
+    _print_window(window)
+    _print_warmup(window)
+    if window.comparable_since is None:
+        print("\nCOMPARABLE WINDOW | PENDING")
+        print(f"reason | {window.pending_reason}")
+        print("comparative metrics | N/A (warm-up is excluded)")
+        return
+    since = window.comparable_since
     if args.experiment is None:
         print_summary(since)
         return
@@ -74,8 +94,139 @@ def main() -> None:
         print_forced_exit_detail(arm, since, "CB_EXIT_ALL_TRIGGERED", "CIRCUIT_BREAKER_EXIT_ALL")
 
 
+def determine_comparable_window(
+    cohort_started: datetime,
+    floor: datetime,
+    *,
+    observed_at: datetime | None = None,
+    arms: Iterable[Arm] | None = None,
+) -> ComparableWindow:
+    """Find the first recorded instant at/after the floor with no inherited state.
+
+    A position is inherited when it was opened before the candidate instant and
+    remains open at that instant.  The same rule is applied to recorded CB
+    cooldown intervals.  We never infer a missing close: an unresolved position
+    keeps the comparable window pending.
+    """
+    observed_at = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    selected = tuple(arms or (CONTROL, *EXPERIMENTS.values()))
+    if observed_at < floor:
+        carryovers = _unresolved_before(selected, floor)
+        suffix = f"; {carryovers} pre-floor position(s) still open" if carryovers else ""
+        return ComparableWindow(cohort_started, None, observed_at,
+                                f"waiting for comparability floor {_fmt(floor)}{suffix}")
+
+    intervals = _position_intervals(selected)
+    cooldowns = _cooldown_intervals(selected)
+    candidate, pending = first_comparable_instant(intervals, cooldowns, floor, observed_at)
+    return ComparableWindow(cohort_started, candidate, observed_at, pending)
+
+
+def first_comparable_instant(
+    position_intervals: Iterable[tuple[datetime, datetime | None, str]],
+    cooldown_intervals: Iterable[tuple[datetime, datetime | None, str]],
+    floor: datetime,
+    observed_at: datetime,
+) -> tuple[datetime | None, str | None]:
+    """Resolve the first flat, cooldown-free instant supported by observations."""
+    intervals = list(position_intervals)
+    cooldowns = list(cooldown_intervals)
+    candidate = floor
+    while True:
+        position_blockers = [interval for interval in intervals if _covers_prior(interval, candidate)]
+        cooldown_blockers = [interval for interval in cooldowns if _covers_prior(interval, candidate)]
+        blockers = [*position_blockers, *cooldown_blockers]
+        if not blockers:
+            return candidate, None
+        if any(end is None for _, end, _ in blockers):
+            names = sorted({label for _, end, label in blockers if end is None})
+            return None, "inherited position(s) still open: " + ", ".join(names)
+        next_candidate = max(end for _, end, _ in blockers if end is not None)
+        if next_candidate > observed_at:
+            return None, f"inherited cooldown/position persists through {_fmt(next_candidate)}"
+        if next_candidate <= candidate:  # defensive guard for malformed intervals
+            return None, "unable to resolve inherited state interval"
+        candidate = next_candidate
+
+
+def _covers_prior(interval: tuple[datetime, datetime | None, str], instant: datetime) -> bool:
+    start, end, _ = interval
+    return start < instant and (end is None or end > instant)
+
+
+def _position_intervals(arms: Iterable[Arm]) -> list[tuple[datetime, datetime | None, str]]:
+    intervals: list[tuple[datetime, datetime | None, str]] = []
+    closed_ids: set[tuple[str, str]] = set()
+    for arm in arms:
+        for row in _jsonl(ROOT / arm.ledger):
+            opened = parse_time(row.get("opened_at") or row.get("open_ts"))
+            closed = parse_time(row.get("closed_at") or row.get("close_ts"))
+            if opened is None or closed is None:
+                continue
+            pair_id = str(row.get("pair_id") or "N/A")
+            closed_ids.add((arm.name, pair_id))
+            intervals.append((opened, closed, f"{arm.name}:{pair_id}"))
+        for row in _state(arm).get("positions", []):
+            if row.get("status") != "OPEN":
+                continue
+            pair_id = str(row.get("pair_id") or "N/A")
+            if (arm.name, pair_id) in closed_ids:
+                continue
+            opened = parse_time(row.get("open_ts") or row.get("opened_at"))
+            if opened is not None:
+                intervals.append((opened, None, f"{arm.name}:{pair_id}"))
+    return intervals
+
+
+def _cooldown_intervals(arms: Iterable[Arm]) -> list[tuple[datetime, datetime | None, str]]:
+    intervals: list[tuple[datetime, datetime | None, str]] = []
+    for arm in arms:
+        for event in _jsonl(ROOT / arm.events):
+            if event.get("event") != "CIRCUIT_BREAKER_TRIGGERED":
+                continue
+            started = parse_time(event.get("trigger_time") or event.get("ts"))
+            ended = parse_time(event.get("cooldown_until") or event.get("breaker_until"))
+            if started is not None:
+                intervals.append((started, ended, f"{arm.name}:CB"))
+        state = _state(arm)
+        if state.get("circuit_breaker_active"):
+            started = parse_time(state.get("circuit_breaker_started_at"))
+            ended = parse_time(state.get("circuit_breaker_until"))
+            if started is not None:
+                intervals.append((started, ended, f"{arm.name}:CB"))
+    return intervals
+
+
+def _unresolved_before(arms: Iterable[Arm], instant: datetime) -> int:
+    return sum(1 for start, end, _ in _position_intervals(arms)
+               if start < instant and (end is None or end > instant))
+
+
+def _print_window(window: ComparableWindow) -> None:
+    print("FORWARD EXPERIMENT COHORT")
+    print(f"cohort_started | {_fmt(window.cohort_started)}")
+    print(f"comparable_since | {_fmt(window.comparable_since) if window.comparable_since else 'PENDING'}")
+    print(f"observed_at | {_fmt(window.observed_at)}")
+
+
+def _print_warmup(window: ComparableWindow) -> None:
+    end = window.comparable_since or window.observed_at
+    print(f"\nWARM-UP / NON-COMPARABLE | {_fmt(window.cohort_started)} to {_fmt(end)}")
+    print("arm | opportunities | opens | blocks | closed | currently open")
+    for arm in (CONTROL, *EXPERIMENTS.values()):
+        events = _events_between(arm, window.cohort_started, end)
+        opportunities = sum(row.get("event") == "SIGNAL_OPPORTUNITY" for row in events)
+        opens = sum(row.get("event") == "OPEN" for row in events)
+        blocks = sum(str(row.get("event") or "").startswith("ENTRY_BLOCKED") for row in events)
+        closed = len(_records_between(arm, window.cohort_started, end))
+        current = len([row for row in _open_positions(_state(arm), window.cohort_started)
+                       if (stamp := parse_time(row.get("open_ts") or row.get("opened_at"))) is not None and stamp < end])
+        print(f"{arm.name} | {opportunities} | {opens} | {blocks} | {closed} | {current}")
+    print("warm-up economics/pairing | excluded")
+
+
 def print_summary(since: datetime) -> None:
-    print(f"FORWARD EXPERIMENT COHORT | since {_fmt(since)}")
+    print(f"\nCOMPARABLE SUMMARY | since {_fmt(since)}")
     print(SUMMARY_HEADER)
     for arm in (CONTROL, *EXPERIMENTS.values()):
         if arm is not CONTROL:
@@ -98,8 +249,8 @@ def summary_line(arm: Arm, since: datetime) -> str:
     pl = sum(count for reason, count in reasons.items() if reason.startswith("PROFIT_LOCK"))
     trail = sum(count for reason, count in reasons.items() if reason.startswith("TRAILING"))
     opened = len(_open_positions(state, since))
-    maximum = state.get("max_simultaneous_positions")
-    return f"{arm.name} | {len(rows)} | {opened} | {net_trade} | {pf} | {hs} | {pl} | {trail} | {med_age} | {maximum if maximum is not None else 'N/A'}"
+    maximum = max_simultaneous(arm, since)
+    return f"{arm.name} | {len(rows)} | {opened} | {net_trade} | {pf} | {hs} | {pl} | {trail} | {med_age} | {maximum}"
 
 
 def print_macd_bu_minus(arm: Arm, since: datetime) -> None:
@@ -154,7 +305,7 @@ def print_hs_bull(arm: Arm, since: datetime) -> None:
     worst = [value for value in worst if value is not None]
     extra = [_elastic_seconds(row) for row in elastic_positions]
     extra = [value for value in extra if value is not None]
-    print(f"HS_BULL_ELASTIC | since {_fmt(since)}")
+    print(f"\nHS_BULL_ELASTIC | comparable since {_fmt(since)}")
     print(f"HS reached -1.5% in LON | {len(started)}")
     print(f"entered HS_ELASTIC | {len(started)}")
     print(f"recovered and restored normal HS | {len(recovered)}")
@@ -180,7 +331,7 @@ def print_forced_exit_detail(arm: Arm, since: datetime, trigger_name: str, exit_
     resolved = [(row, control_row) for row, control_row in paired if control_row is not None]
     reasons = Counter(str(control_row.get("exit_reason") or "") for _, control_row in resolved)
     label = "HS_BEAR" if trigger_name.startswith("HS_BEAR") else "CB_EXIT"
-    print(f"{label} | since {_fmt(since)}")
+    print(f"\n{label} | comparable since {_fmt(since)}")
     if label == "HS_BEAR":
         print(f"HS_BEAR_CLUSTER_TRIGGERED events | {len(triggers)}")
         print(f"negative positions closed early | {len(victims)}")
@@ -200,7 +351,7 @@ def print_forced_exit_detail(arm: Arm, since: datetime, trigger_name: str, exit_
 
 
 def _comparison(control: Arm, experiment: Arm, since: datetime) -> None:
-    print(f"FORWARD EXPERIMENT | since {_fmt(since)}")
+    print(f"\nCOMPARABLE EXPERIMENT | since {_fmt(since)}")
     print(SUMMARY_HEADER)
     print(summary_line(control, since))
     print(summary_line(experiment, since))
@@ -282,8 +433,19 @@ def _records(arm: Arm, since: datetime) -> list[dict[str, Any]]:
     return [row for row in _jsonl(ROOT / arm.ledger) if (stamp := parse_time(row.get("opened_at"))) is not None and stamp >= since]
 
 
+def _records_between(arm: Arm, start: datetime, end: datetime) -> list[dict[str, Any]]:
+    return [row for row in _jsonl(ROOT / arm.ledger)
+            if (stamp := parse_time(row.get("opened_at") or row.get("open_ts"))) is not None
+            and start <= stamp < end]
+
+
 def _events(arm: Arm, since: datetime) -> list[dict[str, Any]]:
     return [row for row in _jsonl(ROOT / arm.events) if (stamp := parse_time(row.get("ts"))) is not None and stamp >= since]
+
+
+def _events_between(arm: Arm, start: datetime, end: datetime) -> list[dict[str, Any]]:
+    return [row for row in _jsonl(ROOT / arm.events)
+            if (stamp := parse_time(row.get("ts"))) is not None and start <= stamp < end]
 
 
 def _state(arm: Arm) -> dict[str, Any]:
@@ -308,6 +470,38 @@ def _admitted_sources(arm: Arm, since: datetime) -> set[int]:
     closed_sources = {_source(row) for row in _records(arm, since)}
     event_sources = {_source(row) for row in _events(arm, since) if row.get("event") == "OPEN"}
     return (state_sources | closed_sources | event_sources) - {None}
+
+
+def max_simultaneous(arm: Arm, since: datetime) -> int:
+    return calculate_max_simultaneous(_records(arm, since), _open_positions(_state(arm), since), since)
+
+
+def calculate_max_simultaneous(
+    closed_rows: Iterable[dict[str, Any]],
+    open_rows: Iterable[dict[str, Any]],
+    since: datetime,
+) -> int:
+    """Recalculate concurrency using only positions admitted in this window."""
+    points: list[tuple[datetime, int]] = []
+    seen: set[str] = set()
+    for row in [*closed_rows, *open_rows]:
+        pair_id = str(row.get("pair_id") or id(row))
+        if pair_id in seen:
+            continue
+        seen.add(pair_id)
+        opened = parse_time(row.get("opened_at") or row.get("open_ts"))
+        if opened is None or opened < since:
+            continue
+        points.append((opened, 1))
+        closed = parse_time(row.get("closed_at") or row.get("close_ts"))
+        if closed is not None:
+            points.append((closed, -1))
+    current = maximum = 0
+    # A close at the same instant as an open frees its slot first.
+    for _, delta in sorted(points, key=lambda item: (item[0], item[1])):
+        current += delta
+        maximum = max(maximum, current)
+    return maximum
 
 
 def pair_by_source(control: Iterable[dict[str, Any]], experiment: Iterable[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any]]]:

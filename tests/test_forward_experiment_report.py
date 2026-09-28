@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from tools.forward_experiment_report import event_counts, filter_since, pair_by_source, parse_time
+from tools.forward_experiment_report import (
+    calculate_max_simultaneous,
+    event_counts,
+    filter_since,
+    first_comparable_instant,
+    pair_by_source,
+    parse_time,
+)
 
 
 COHORT = datetime(2026, 9, 27, 23, 7, 29, tzinfo=timezone.utc)
@@ -50,6 +57,37 @@ class ForwardExperimentReportTests(unittest.TestCase):
                 "HS_BEAR_CLUSTER_TRIGGERED": 1,
             },
         )
+
+    def test_comparable_instant_waits_for_overlapping_inherited_positions_and_cooldown(self) -> None:
+        floor = datetime(2026, 9, 28, 4, 47, tzinfo=timezone.utc)
+        positions = [
+            (floor-timedelta(hours=1), floor+timedelta(minutes=5), "arm-a:p1"),
+            (floor+timedelta(minutes=2), floor+timedelta(minutes=9), "arm-b:p2"),
+        ]
+        cooldowns = [(floor-timedelta(minutes=10), floor+timedelta(minutes=7), "control:CB")]
+        instant, reason = first_comparable_instant(
+            positions, cooldowns, floor, floor+timedelta(minutes=20)
+        )
+        self.assertEqual(instant, floor+timedelta(minutes=9))
+        self.assertIsNone(reason)
+
+    def test_comparable_instant_does_not_invent_close_for_open_carryover(self) -> None:
+        floor = datetime(2026, 9, 28, 4, 47, tzinfo=timezone.utc)
+        instant, reason = first_comparable_instant(
+            [(floor-timedelta(minutes=1), None, "arm:p1")], [], floor, floor+timedelta(hours=1)
+        )
+        self.assertIsNone(instant)
+        self.assertIn("arm:p1", reason or "")
+
+    def test_max_simultaneous_is_recomputed_only_from_window_admissions(self) -> None:
+        since = datetime(2026, 9, 28, 5, 0, tzinfo=timezone.utc)
+        closed = [
+            {"pair_id": "old", "opened_at": "2026-09-28T04:59:00Z", "closed_at": "2026-09-28T05:30:00Z"},
+            {"pair_id": "a", "opened_at": "2026-09-28T05:01:00Z", "closed_at": "2026-09-28T05:10:00Z"},
+            {"pair_id": "b", "opened_at": "2026-09-28T05:02:00Z", "closed_at": "2026-09-28T05:03:00Z"},
+        ]
+        opened = [{"pair_id": "c", "open_ts": "2026-09-28T05:10:00Z", "status": "OPEN"}]
+        self.assertEqual(calculate_max_simultaneous(closed, opened, since), 2)
 
 
 if __name__ == "__main__":
