@@ -60,7 +60,8 @@ EXPERIMENTS = {
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--experiment", choices=tuple(EXPERIMENTS))
-    parser.add_argument("--list-accepted", action="store_true", help="With ema_macd, list admitted trades for plotting")
+    parser.add_argument("--list-accepted", action="store_true",
+                        help="Compatibility flag; ema_macd always lists admitted trades once comparable")
     args = parser.parse_args()
     cohort_started = parse_time(COHORT_STARTED_TEXT)
     floor = parse_time(COMPARABILITY_FLOOR_TEXT)
@@ -71,7 +72,7 @@ def main() -> None:
         raise SystemExit("--list-accepted is only valid with --experiment ema_macd")
     _print_window(window)
     _print_warmup(window)
-    if args.experiment in {"hs_bull", "hs_bear", "cb_exit"}:
+    if args.experiment is not None:
         _print_operational_warmup(args.experiment, EXPERIMENTS[args.experiment], window)
     if window.comparable_since is None:
         print("\nCOMPARABLE WINDOW | PENDING")
@@ -247,11 +248,15 @@ def _print_operational_warmup(experiment: str, arm: Arm, window: ComparableWindo
         print(f"HS_BEAR_CLUSTER_TRIGGERED | {counts['HS_BEAR_CLUSTER_TRIGGERED']}")
         print(f"EXPERIMENTAL_CLOSE | {counts['EXPERIMENTAL_CLOSE']}")
         print(f"positions closed by cluster | {counts['positions closed by cluster']}")
-    else:
+    elif experiment == "cb_exit":
         print(f"CIRCUIT_BREAKER_TRIGGERED | {counts['CIRCUIT_BREAKER_TRIGGERED']}")
         print(f"CB_EXIT_ALL_TRIGGERED | {counts['CB_EXIT_ALL_TRIGGERED']}")
         print(f"EXPERIMENTAL_CLOSE | {counts['EXPERIMENTAL_CLOSE']}")
         print(f"positions liquidated by CB | {counts['positions liquidated by CB']}")
+    elif experiment == "macd_bu_minus":
+        _print_macd_warmup(events)
+    elif experiment == "ema_macd":
+        _print_ema_macd_warmup(events)
     print("comparative net/PF/DD versus BE_OFF_CB_SHADOW | N/A")
 
 
@@ -268,6 +273,63 @@ def operational_warmup_counts(
     elif experiment == "cb_exit":
         counts["positions liquidated by CB"] = exits["CIRCUIT_BREAKER_EXIT_ALL"]
     return counts
+
+
+def _print_macd_warmup(events: list[dict[str, Any]]) -> None:
+    opportunities = [row for row in events if row.get("event") == "SIGNAL_OPPORTUNITY"]
+    opens = {_source(row) for row in events if row.get("event") == "OPEN"} - {None}
+    bu_minus = [row for row in opportunities if row.get("macd_context") == "BU-"]
+    bu_blocked = [row for row in events if row.get("event") == "ENTRY_BLOCKED_MACD_BU_MINUS"]
+    accepted_non_bu = sum(_source(row) in opens and row.get("macd_context") != "BU-" for row in opportunities)
+    other_blocks = Counter(str(row.get("event")) for row in events
+                           if str(row.get("event") or "").startswith("ENTRY_BLOCKED")
+                           and row.get("event") != "ENTRY_BLOCKED_MACD_BU_MINUS")
+    distribution = Counter(str(row.get("macd_context") or "UNAVAILABLE") for row in opportunities)
+    print(f"total opportunities | {len(opportunities)}")
+    print(f"BU- opportunities | {len(bu_minus)}")
+    print(f"BU- blocked | {len(bu_blocked)}")
+    print(f"accepted non-BU- opportunities | {accepted_non_bu}")
+    print("other block reasons")
+    if other_blocks:
+        for reason, count in sorted(other_blocks.items()):
+            print(f"  {reason} | {count}")
+    else:
+        print("  none | 0")
+    print("MACD context distribution")
+    for context in ("BU+", "BU-", "BE+", "BE-"):
+        print(f"  {context} | {distribution[context]}")
+    unavailable = sum(count for context, count in distribution.items()
+                      if context not in {"BU+", "BU-", "BE+", "BE-"})
+    if unavailable:
+        print(f"  UNAVAILABLE/OTHER | {unavailable}")
+
+
+def _print_ema_macd_warmup(events: list[dict[str, Any]]) -> None:
+    opportunities = [row for row in events if row.get("event") == "SIGNAL_OPPORTUNITY"]
+    accepted = [row for row in events if row.get("event") == "OPEN"]
+    blocked = [row for row in events if str(row.get("event") or "").startswith("ENTRY_BLOCKED")]
+    combos = Counter((str(row.get("ema_context") or "UNAVAILABLE"),
+                      str(row.get("macd_context") or "UNAVAILABLE")) for row in opportunities)
+    reasons = Counter(str(row.get("event")) for row in blocked)
+    print(f"total opportunities | {len(opportunities)}")
+    print(f"accepted | {len(accepted)}")
+    print(f"blocked | {len(blocked)}")
+    print("block reasons")
+    if reasons:
+        for reason, count in sorted(reasons.items()):
+            print(f"  {reason} | {count}")
+    else:
+        print("  none | 0")
+    print("EMA + MACD matrix")
+    for ema_context in ("LON", "BUL", "BEA", "SHO", "MUP", "MDO", "MIX"):
+        values = " | ".join(f"{macd_context}={combos[(ema_context, macd_context)]}"
+                            for macd_context in ("BU+", "BU-", "BE+", "BE-"))
+        print(f"  {ema_context} | {values}")
+    unavailable = sum(count for (ema, macd), count in combos.items()
+                      if ema not in {"LON", "BUL", "BEA", "SHO", "MUP", "MDO", "MIX"}
+                      or macd not in {"BU+", "BU-", "BE+", "BE-"})
+    if unavailable:
+        print(f"  UNAVAILABLE/OTHER | {unavailable}")
 
 
 def print_summary(since: datetime) -> None:
@@ -305,14 +367,16 @@ def print_macd_bu_minus(arm: Arm, since: datetime) -> None:
     bu_minus = [event for event in opportunities if event.get("macd_context") == "BU-"]
     blocked = [event for event in events if event.get("event") == "ENTRY_BLOCKED_MACD_BU_MINUS"]
     blocked_sources = {_source(event) for event in blocked} - {None}
+    control_opened_sources = blocked_sources & _admitted_sources(CONTROL, since)
     control_rows = _records_by_source(CONTROL, since)
-    outcomes = [control_rows[source] for source in blocked_sources if source in control_rows]
+    outcomes = [control_rows[source] for source in control_opened_sources if source in control_rows]
     print("\nMACD BU- hypothesis")
     print(f"opportunities BU- | {len(bu_minus)}")
     print(f"blocked BU- | {len(blocked)}")
     print(f"total opportunities | {len(opportunities)}")
-    print("blocked opportunities in control | " + _control_result(outcomes, len(blocked_sources)))
     _print_overlap(CONTROL, arm, since)
+    print("BU- blocked by experiment and opened by control | "
+          + _control_result(outcomes, len(control_opened_sources)))
 
 
 def print_ema_macd(arm: Arm, since: datetime, list_accepted: bool) -> None:
@@ -321,8 +385,14 @@ def print_ema_macd(arm: Arm, since: datetime, list_accepted: bool) -> None:
     opportunities = [event for event in events if event.get("event") == "SIGNAL_OPPORTUNITY"]
     accepted = [event for event in events if event.get("event") == "OPEN"]
     blocked = [event for event in events if str(event.get("event") or "").startswith("ENTRY_BLOCKED")]
+    matrix_blocked = [event for event in blocked
+                      if str(event.get("event") or "").startswith("ENTRY_BLOCKED_EMA_MACD_")]
     combos = Counter((str(event.get("ema_context") or "N/A"), str(event.get("macd_context") or "N/A")) for event in opportunities)
     reasons = Counter(str(event.get("event")) for event in blocked)
+    blocked_sources = {_source(event) for event in matrix_blocked} - {None}
+    control_opened_sources = blocked_sources & _admitted_sources(CONTROL, since)
+    control_rows = _records_by_source(CONTROL, since)
+    control_outcomes = [control_rows[source] for source in control_opened_sources if source in control_rows]
     print("\nEMA + MACD hypothesis")
     print(f"accepted opportunities | {len(accepted)}")
     print(f"blocked opportunities | {len(blocked)}")
@@ -333,8 +403,9 @@ def print_ema_macd(arm: Arm, since: datetime, list_accepted: bool) -> None:
     for reason, count in sorted(reasons.items()):
         print(f"  {reason} | {count}")
     _print_overlap(CONTROL, arm, since)
-    if list_accepted:
-        _print_accepted(arm, accepted, since)
+    print("matrix-blocked opportunities opened by control | "
+          + _control_result(control_outcomes, len(control_opened_sources)))
+    _print_accepted(arm, accepted, since)
 
 
 def print_hs_bull(arm: Arm, since: datetime) -> None:

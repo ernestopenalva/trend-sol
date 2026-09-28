@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 
 from tools.forward_experiment_report import (
     calculate_max_simultaneous,
     event_counts,
     filter_since,
     first_comparable_instant,
+    _print_ema_macd_warmup,
+    _print_macd_warmup,
     operational_warmup_counts,
     pair_by_source,
     parse_time,
@@ -105,6 +109,42 @@ class ForwardExperimentReportTests(unittest.TestCase):
         self.assertEqual(counts["EXPERIMENTAL_CLOSE"], 2)
         self.assertEqual(counts["positions closed by cluster"], 2)
         self.assertNotIn("net", counts)
+
+    def test_macd_warmup_shows_context_and_non_policy_blocks(self) -> None:
+        events = [
+            {"event": "SIGNAL_OPPORTUNITY", "source_candle_open_time": 1, "macd_context": "BU-"},
+            {"event": "ENTRY_BLOCKED_MACD_BU_MINUS", "source_candle_open_time": 1},
+            {"event": "SIGNAL_OPPORTUNITY", "source_candle_open_time": 2, "macd_context": "BE+"},
+            {"event": "OPEN", "source_candle_open_time": 2},
+            {"event": "SIGNAL_OPPORTUNITY", "source_candle_open_time": 3, "macd_context": "BU+"},
+            {"event": "ENTRY_BLOCKED_SHADOW_CAPACITY", "source_candle_open_time": 3},
+        ]
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_macd_warmup(events)
+        text = output.getvalue()
+        self.assertIn("BU- opportunities | 1", text)
+        self.assertIn("accepted non-BU- opportunities | 1", text)
+        self.assertIn("ENTRY_BLOCKED_SHADOW_CAPACITY | 1", text)
+        self.assertIn("BE+ | 1", text)
+
+    def test_ema_macd_warmup_prints_full_seven_by_four_matrix(self) -> None:
+        events = [
+            {"event": "SIGNAL_OPPORTUNITY", "source_candle_open_time": 1,
+             "ema_context": "LON", "macd_context": "BU+"},
+            {"event": "OPEN", "source_candle_open_time": 1},
+            {"event": "SIGNAL_OPPORTUNITY", "source_candle_open_time": 2,
+             "ema_context": "SHO", "macd_context": "BE-"},
+            {"event": "ENTRY_BLOCKED_EMA_MACD_SHO_BE-", "source_candle_open_time": 2},
+        ]
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_ema_macd_warmup(events)
+        text = output.getvalue()
+        self.assertIn("accepted | 1", text)
+        self.assertIn("blocked | 1", text)
+        self.assertIn("LON | BU+=1 | BU-=0 | BE+=0 | BE-=0", text)
+        self.assertIn("MIX | BU+=0 | BU-=0 | BE+=0 | BE-=0", text)
 
 
 if __name__ == "__main__":
