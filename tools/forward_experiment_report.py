@@ -71,6 +71,8 @@ def main() -> None:
         raise SystemExit("--list-accepted is only valid with --experiment ema_macd")
     _print_window(window)
     _print_warmup(window)
+    if args.experiment in {"hs_bull", "hs_bear", "cb_exit"}:
+        _print_operational_warmup(args.experiment, EXPERIMENTS[args.experiment], window)
     if window.comparable_since is None:
         print("\nCOMPARABLE WINDOW | PENDING")
         print(f"reason | {window.pending_reason}")
@@ -223,6 +225,49 @@ def _print_warmup(window: ComparableWindow) -> None:
                        if (stamp := parse_time(row.get("open_ts") or row.get("opened_at"))) is not None and stamp < end])
         print(f"{arm.name} | {opportunities} | {opens} | {blocks} | {closed} | {current}")
     print("warm-up economics/pairing | excluded")
+
+
+def _print_operational_warmup(experiment: str, arm: Arm, window: ComparableWindow) -> None:
+    end = window.comparable_since or window.observed_at
+    events = _events_between(arm, window.cohort_started, end)
+    records = _records_between(arm, window.cohort_started, end)
+    counts = operational_warmup_counts(experiment, events, records)
+    print("\nOPERATIONAL EVENTS DURING NON-COMPARABLE WARM-UP")
+    print("not valid for comparison versus control")
+    if experiment == "hs_bull":
+        for name in ("HS_ELASTIC_STARTED", "HS_ELASTIC_ENDED_RECOVERED",
+                     "HS_ELASTIC_EXIT_CONTEXT_LOST", "EXPERIMENTAL_CLOSE"):
+            print(f"{name} | {counts[name]}")
+        elastic = [row for row in _open_positions(_state(arm), window.cohort_started)
+                   if row.get("hs_elastic") and
+                   (stamp := parse_time(row.get("open_ts") or row.get("opened_at"))) is not None and stamp < end]
+        pair_ids = ", ".join(str(row.get("pair_id") or "N/A") for row in elastic) or "none"
+        print(f"positions currently in HS_ELASTIC | {len(elastic)} | {pair_ids}")
+    elif experiment == "hs_bear":
+        print(f"HS_BEAR_CLUSTER_TRIGGERED | {counts['HS_BEAR_CLUSTER_TRIGGERED']}")
+        print(f"EXPERIMENTAL_CLOSE | {counts['EXPERIMENTAL_CLOSE']}")
+        print(f"positions closed by cluster | {counts['positions closed by cluster']}")
+    else:
+        print(f"CIRCUIT_BREAKER_TRIGGERED | {counts['CIRCUIT_BREAKER_TRIGGERED']}")
+        print(f"CB_EXIT_ALL_TRIGGERED | {counts['CB_EXIT_ALL_TRIGGERED']}")
+        print(f"EXPERIMENTAL_CLOSE | {counts['EXPERIMENTAL_CLOSE']}")
+        print(f"positions liquidated by CB | {counts['positions liquidated by CB']}")
+    print("comparative net/PF/DD versus BE_OFF_CB_SHADOW | N/A")
+
+
+def operational_warmup_counts(
+    experiment: str,
+    events: Iterable[dict[str, Any]],
+    records: Iterable[dict[str, Any]],
+) -> Counter[str]:
+    """Count own-arm operational evidence without producing economics or pairs."""
+    counts = Counter(str(row.get("event") or "") for row in events)
+    exits = Counter(str(row.get("exit_reason") or "") for row in records)
+    if experiment == "hs_bear":
+        counts["positions closed by cluster"] = exits["HS_BEAR_CLUSTER_EXIT"]
+    elif experiment == "cb_exit":
+        counts["positions liquidated by CB"] = exits["CIRCUIT_BREAKER_EXIT_ALL"]
+    return counts
 
 
 def print_summary(since: datetime) -> None:

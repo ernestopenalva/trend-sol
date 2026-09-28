@@ -8,6 +8,7 @@ from tools.forward_experiment_report import (
     event_counts,
     filter_since,
     first_comparable_instant,
+    operational_warmup_counts,
     pair_by_source,
     parse_time,
 )
@@ -88,6 +89,22 @@ class ForwardExperimentReportTests(unittest.TestCase):
         ]
         opened = [{"pair_id": "c", "open_ts": "2026-09-28T05:10:00Z", "status": "OPEN"}]
         self.assertEqual(calculate_max_simultaneous(closed, opened, since), 2)
+
+    def test_operational_warmup_counts_own_arm_events_without_economics(self) -> None:
+        events = [
+            {"event": "HS_BEAR_CLUSTER_TRIGGERED"},
+            {"event": "EXPERIMENTAL_CLOSE"},
+            {"event": "EXPERIMENTAL_CLOSE"},
+        ]
+        records = [
+            {"exit_reason": "HS_BEAR_CLUSTER_EXIT", "net_pnl_pct": -1.0},
+            {"exit_reason": "HS_BEAR_CLUSTER_EXIT", "net_pnl_pct": -2.0},
+        ]
+        counts = operational_warmup_counts("hs_bear", events, records)
+        self.assertEqual(counts["HS_BEAR_CLUSTER_TRIGGERED"], 1)
+        self.assertEqual(counts["EXPERIMENTAL_CLOSE"], 2)
+        self.assertEqual(counts["positions closed by cluster"], 2)
+        self.assertNotIn("net", counts)
 
 
 if __name__ == "__main__":
