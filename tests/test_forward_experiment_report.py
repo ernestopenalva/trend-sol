@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import unittest
+import json
+import tempfile
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from io import StringIO
+from pathlib import Path
 from unittest.mock import patch
 
+import tools.forward_experiment_report as report
 from tools.forward_experiment_report import (
     accepted_trade_rows,
     calculate_max_simultaneous,
@@ -18,6 +22,7 @@ from tools.forward_experiment_report import (
     operational_warmup_counts,
     pair_by_source,
     parse_time,
+    realized_max_drawdown,
 )
 
 
@@ -179,6 +184,94 @@ class ForwardExperimentReportTests(unittest.TestCase):
             main()
         self.assertIn("ACCEPTED TRADES", output.getvalue())
         self.assertIn("opened_at BRT | source_candle | EMA | MACD", output.getvalue())
+
+    def test_resolved_comparable_outputs_include_net_pf_dd_and_time_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def arm(name: str) -> report.Arm:
+                key = name.lower()
+                return report.Arm(name, f"{key}.ledger", f"{key}.state", f"{key}.events")
+
+            def write(target: str, rows: list[dict]) -> None:
+                path = root / target
+                path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+            control = arm("BE_OFF_CB_SHADOW")
+            macd = arm("BE_OFF_CB_MACD_BU_MINUS_SHADOW")
+            ema = arm("BE_OFF_CB_EMA_MACD_SHADOW")
+            old = {"pair_id": "old", "source_candle_open_time": 50,
+                   "opened_at": "2026-09-28T04:00:00Z", "closed_at": "2026-09-28T04:30:00Z",
+                   "net_pnl_pct": -50, "position_notional_usdt": 20, "exit_reason": "HARD_STOP",
+                   "age_seconds": 1800}
+            win = {"pair_id": "c1", "source_candle_open_time": 100,
+                   "opened_at": "2026-09-28T05:00:00Z", "closed_at": "2026-09-28T05:10:00Z",
+                   "net_pnl_pct": 5, "position_notional_usdt": 20, "exit_reason": "PROFIT_LOCK",
+                   "age_seconds": 600}
+            loss = {"pair_id": "c2", "source_candle_open_time": 200,
+                    "opened_at": "2026-09-28T05:05:00Z", "closed_at": "2026-09-28T05:20:00Z",
+                    "net_pnl_pct": -2.5, "position_notional_usdt": 20, "exit_reason": "HARD_STOP",
+                    "age_seconds": 900}
+            experiment_win = dict(win, pair_id="e1")
+            control_events = [
+                {"ts": "2026-09-28T05:00:00Z", "event": "OPEN", "source_candle_open_time": 100},
+                {"ts": "2026-09-28T05:05:00Z", "event": "OPEN", "source_candle_open_time": 200},
+            ]
+            macd_events = [
+                {"ts": "2026-09-28T05:00:00Z", "event": "SIGNAL_OPPORTUNITY",
+                 "source_candle_open_time": 100, "macd_context": "BU+"},
+                {"ts": "2026-09-28T05:00:01Z", "event": "OPEN", "source_candle_open_time": 100},
+                {"ts": "2026-09-28T05:05:00Z", "event": "SIGNAL_OPPORTUNITY",
+                 "source_candle_open_time": 200, "macd_context": "BU-"},
+                {"ts": "2026-09-28T05:05:01Z", "event": "ENTRY_BLOCKED_MACD_BU_MINUS",
+                 "source_candle_open_time": 200},
+            ]
+            ema_events = [
+                {"ts": "2026-09-28T05:00:00Z", "event": "SIGNAL_OPPORTUNITY",
+                 "source_candle_open_time": 100, "ema_context": "LON", "macd_context": "BU+"},
+                {"ts": "2026-09-28T05:00:01Z", "event": "OPEN", "source_candle_open_time": 100},
+                {"ts": "2026-09-28T05:05:00Z", "event": "SIGNAL_OPPORTUNITY",
+                 "source_candle_open_time": 200, "ema_context": "SHO", "macd_context": "BE-"},
+                {"ts": "2026-09-28T05:05:01Z", "event": "ENTRY_BLOCKED_EMA_MACD_SHO_BE-",
+                 "source_candle_open_time": 200},
+            ]
+            for item, ledger, events in (
+                (control, [old, win, loss], control_events),
+                (macd, [experiment_win], macd_events),
+                (ema, [experiment_win], ema_events),
+            ):
+                write(item.ledger, ledger)
+                (root / item.state).write_text(json.dumps({"positions": []}), encoding="utf-8")
+                write(item.events, events)
+
+            cohort = datetime(2026, 9, 27, 23, 7, 29, tzinfo=timezone.utc)
+            floor = datetime(2026, 9, 28, 4, 47, tzinfo=timezone.utc)
+            observed = datetime(2026, 9, 28, 6, 0, tzinfo=timezone.utc)
+            with patch.object(report, "ROOT", root), patch.object(report, "CONTROL", control):
+                window = report.determine_comparable_window(
+                    cohort, floor, observed_at=observed, arms=(control, macd, ema)
+                )
+                self.assertEqual(window.comparable_since, floor)
+                self.assertEqual(realized_max_drawdown([win, loss]), 0.5)
+                macd_output = StringIO()
+                with redirect_stdout(macd_output):
+                    report.print_macd_bu_minus(macd, floor)
+                ema_output = StringIO()
+                with redirect_stdout(ema_output):
+                    report.print_ema_macd(ema, floor, False)
+
+            expected_header = "arm | closed | open | net $/trade | PF | DD $ | HS | PL | TRAIL | median age | max simultaneous"
+            expected_control = "BE_OFF_CB_SHADOW | 2 | 0 | $+0.2500 | 2.000 | $0.5000 | 1 | 1 | 0 | 12.5m | 2"
+            for text in (macd_output.getvalue(), ema_output.getvalue()):
+                self.assertIn(expected_header, text)
+                self.assertIn(expected_control, text)
+                self.assertNotIn("$-10.0000", text)
+            self.assertIn("trades common | 1", macd_output.getvalue())
+            self.assertIn("control-only | 1", macd_output.getvalue())
+            self.assertIn("net=$-0.5000", macd_output.getvalue())
+            self.assertIn("trades common | 1", ema_output.getvalue())
+            self.assertIn("control-only | 1", ema_output.getvalue())
+            self.assertIn("net=$-0.5000", ema_output.getvalue())
 
 
 if __name__ == "__main__":

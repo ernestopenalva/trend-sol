@@ -22,7 +22,7 @@ COHORT_STARTED_TEXT = "27/09/2026 20:07:29"
 COMPARABILITY_FLOOR_TEXT = "28/09/2026 01:47:00"
 # Kept as a compatibility alias for imports made by earlier versions/tests.
 DEFAULT_SINCE_TEXT = COHORT_STARTED_TEXT
-SUMMARY_HEADER = "arm | closed | open | net $/trade | PF | HS | PL | TRAIL | median age | max simultaneous"
+SUMMARY_HEADER = "arm | closed | open | net $/trade | PF | DD $ | HS | PL | TRAIL | median age | max simultaneous"
 
 
 @dataclass(frozen=True)
@@ -355,13 +355,15 @@ def summary_line(arm: Arm, since: datetime) -> str:
     gains, losses = sum(value for value in net if value > 0), -sum(value for value in net if value < 0)
     pf = "N/A" if not rows or not net else ("inf" if losses == 0 and gains > 0 else f"{gains/losses:.3f}" if losses else "N/A")
     net_trade = f"${sum(net)/len(net):+.4f}" if net and len(net) == len(rows) else "N/A"
+    drawdown = realized_max_drawdown(rows)
+    dd = f"${drawdown:.4f}" if drawdown is not None else "N/A"
     med_age = f"{median(ages)/60:.1f}m" if ages else "N/A"
     hs = sum(count for reason, count in reasons.items() if reason.startswith("HARD_STOP"))
     pl = sum(count for reason, count in reasons.items() if reason.startswith("PROFIT_LOCK"))
     trail = sum(count for reason, count in reasons.items() if reason.startswith("TRAILING"))
     opened = len(_open_positions(state, since))
     maximum = max_simultaneous(arm, since)
-    return f"{arm.name} | {len(rows)} | {opened} | {net_trade} | {pf} | {hs} | {pl} | {trail} | {med_age} | {maximum}"
+    return f"{arm.name} | {len(rows)} | {opened} | {net_trade} | {pf} | {dd} | {hs} | {pl} | {trail} | {med_age} | {maximum}"
 
 
 def print_macd_bu_minus(arm: Arm, since: datetime) -> None:
@@ -576,6 +578,25 @@ def _fmt_price(value: float | None) -> str:
 def _net_dollars(row: dict[str, Any]) -> float | None:
     net_pct, notional = _number(row.get("net_pnl_pct")), _number(row.get("position_notional_usdt"))
     return net_pct * notional / 100 if net_pct is not None and notional is not None else None
+
+
+def realized_max_drawdown(rows: Iterable[dict[str, Any]]) -> float | None:
+    """Peak-to-trough drawdown of closed-trade realized equity, starting at zero."""
+    ordered = []
+    for row in rows:
+        closed_at = parse_time(row.get("closed_at") or row.get("close_ts"))
+        net = _net_dollars(row)
+        if closed_at is None or net is None:
+            return None
+        ordered.append((closed_at, net))
+    if not ordered:
+        return None
+    equity = peak = max_drawdown = 0.0
+    for _, net in sorted(ordered, key=lambda item: item[0]):
+        equity += net
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, peak-equity)
+    return max_drawdown
 
 
 def _elastic_seconds(row: dict[str, Any]) -> float | None:
