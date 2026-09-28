@@ -61,15 +61,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--experiment", choices=tuple(EXPERIMENTS))
     parser.add_argument("--list-accepted", action="store_true",
-                        help="Compatibility flag; ema_macd always lists admitted trades once comparable")
+                        help="List accepted trades for ema_macd or macd_bu_minus")
     args = parser.parse_args()
     cohort_started = parse_time(COHORT_STARTED_TEXT)
     floor = parse_time(COMPARABILITY_FLOOR_TEXT)
     if cohort_started is None or floor is None:  # pragma: no cover - constants are tested
         raise SystemExit("invalid report window constants")
     window = determine_comparable_window(cohort_started, floor)
-    if args.list_accepted and args.experiment != "ema_macd":
-        raise SystemExit("--list-accepted is only valid with --experiment ema_macd")
+    if args.list_accepted and args.experiment not in {"ema_macd", "macd_bu_minus"}:
+        raise SystemExit("--list-accepted is only valid with --experiment ema_macd or macd_bu_minus")
     _print_window(window)
     _print_warmup(window)
     if args.experiment is not None:
@@ -79,7 +79,7 @@ def main() -> None:
         print(f"reason | {window.pending_reason}")
         print("comparative metrics | N/A (warm-up is excluded)")
         if args.list_accepted:
-            _print_accepted(EXPERIMENTS["ema_macd"], window.cohort_started, window.observed_at)
+            _print_accepted(EXPERIMENTS[args.experiment], window.cohort_started, window.observed_at)
         return
     since = window.comparable_since
     if args.experiment is None:

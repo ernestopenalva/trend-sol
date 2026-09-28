@@ -4,6 +4,7 @@ import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from io import StringIO
+from unittest.mock import patch
 
 from tools.forward_experiment_report import (
     accepted_trade_rows,
@@ -11,6 +12,7 @@ from tools.forward_experiment_report import (
     event_counts,
     filter_since,
     first_comparable_instant,
+    main,
     _print_ema_macd_warmup,
     _print_macd_warmup,
     operational_warmup_counts,
@@ -169,6 +171,14 @@ class ForwardExperimentReportTests(unittest.TestCase):
         self.assertEqual(rows[0]["net"], 0.2)
         self.assertEqual(rows[1]["status"], "OPEN")
         self.assertIsNone(rows[1]["exit"])
+
+    def test_list_accepted_is_allowed_for_macd_bu_minus(self) -> None:
+        output = StringIO()
+        with patch("sys.argv", ["forward_experiment_report.py", "--experiment", "macd_bu_minus",
+                                "--list-accepted"]), redirect_stdout(output):
+            main()
+        self.assertIn("ACCEPTED TRADES", output.getvalue())
+        self.assertIn("opened_at BRT | source_candle | EMA | MACD", output.getvalue())
 
 
 if __name__ == "__main__":
