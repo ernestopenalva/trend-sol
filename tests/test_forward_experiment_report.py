@@ -163,6 +163,7 @@ class ForwardExperimentReportTests(unittest.TestCase):
         ]
         closed = [{
             "source_candle_open_time": 1000, "opened_at": "2026-09-28T03:00:00Z",
+            "closed_at": "2026-09-28T03:10:00Z",
             "entry_price": 150, "exit_price": 152, "exit_reason": "PROFIT_LOCK",
             "net_pnl_pct": 1, "position_notional_usdt": 20,
         }]
@@ -174,8 +175,10 @@ class ForwardExperimentReportTests(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "CLOSED")
         self.assertEqual(rows[0]["exit"], 152)
         self.assertEqual(rows[0]["net"], 0.2)
+        self.assertEqual(rows[0]["closed_at"], datetime(2026, 9, 28, 3, 10, tzinfo=timezone.utc))
         self.assertEqual(rows[1]["status"], "OPEN")
         self.assertIsNone(rows[1]["exit"])
+        self.assertIsNone(rows[1]["closed_at"])
 
     def test_list_accepted_is_allowed_for_macd_bu_minus(self) -> None:
         output = StringIO()
@@ -183,7 +186,18 @@ class ForwardExperimentReportTests(unittest.TestCase):
                                 "--list-accepted"]), redirect_stdout(output):
             main()
         self.assertIn("ACCEPTED TRADES", output.getvalue())
-        self.assertIn("opened_at BRT | source_candle | EMA | MACD", output.getvalue())
+        self.assertIn("opened_at BRT | closed_at BRT | source_candle | EMA | MACD", output.getvalue())
+        self.assertNotIn("WARM-UP / NON-COMPARABLE", output.getvalue())
+
+    def test_warmup_is_hidden_by_default_and_available_on_request(self) -> None:
+        hidden = StringIO()
+        with patch("sys.argv", ["forward_experiment_report.py"]), redirect_stdout(hidden):
+            main()
+        shown = StringIO()
+        with patch("sys.argv", ["forward_experiment_report.py", "--show-warmup"]), redirect_stdout(shown):
+            main()
+        self.assertNotIn("WARM-UP / NON-COMPARABLE", hidden.getvalue())
+        self.assertIn("WARM-UP / NON-COMPARABLE", shown.getvalue())
 
     def test_resolved_comparable_outputs_include_net_pf_dd_and_time_filter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

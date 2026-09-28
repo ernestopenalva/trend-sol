@@ -62,6 +62,8 @@ def main() -> None:
     parser.add_argument("--experiment", choices=tuple(EXPERIMENTS))
     parser.add_argument("--list-accepted", action="store_true",
                         help="List accepted trades for ema_macd or macd_bu_minus")
+    parser.add_argument("--show-warmup", action="store_true",
+                        help="Show non-comparable warm-up counts and operational events")
     args = parser.parse_args()
     cohort_started = parse_time(COHORT_STARTED_TEXT)
     floor = parse_time(COMPARABILITY_FLOOR_TEXT)
@@ -71,9 +73,10 @@ def main() -> None:
     if args.list_accepted and args.experiment not in {"ema_macd", "macd_bu_minus"}:
         raise SystemExit("--list-accepted is only valid with --experiment ema_macd or macd_bu_minus")
     _print_window(window)
-    _print_warmup(window)
-    if args.experiment is not None:
-        _print_operational_warmup(args.experiment, EXPERIMENTS[args.experiment], window)
+    if args.show_warmup:
+        _print_warmup(window)
+        if args.experiment is not None:
+            _print_operational_warmup(args.experiment, EXPERIMENTS[args.experiment], window)
     if window.comparable_since is None:
         print("\nCOMPARABLE WINDOW | PENDING")
         print(f"reason | {window.pending_reason}")
@@ -494,13 +497,13 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime) -> None:
               if (stamp := parse_time(row.get("open_ts") or row.get("opened_at"))) is not None and stamp < until]
     rows = accepted_trade_rows(accepted, closed, opened)
     print("\nACCEPTED TRADES")
-    print("opened_at BRT | source_candle | EMA | MACD | entry | exit | exit_reason | net | status")
+    print("opened_at BRT | closed_at BRT | source_candle | EMA | MACD | entry | exit | exit_reason | net | status")
     for item in rows:
-        print(f"{_fmt(item['opened_at'])} | {_fmt_ms(item['source'])} | {item['ema']} | {item['macd']} | "
+        print(f"{_fmt(item['opened_at'])} | {_fmt(item['closed_at'])} | {_fmt_ms(item['source'])} | {item['ema']} | {item['macd']} | "
               f"{_fmt_price(item['entry'])} | {_fmt_price(item['exit'])} | {item['exit_reason']} | "
               f"{_fmt_net(item['net'])} | {item['status']}")
     if not rows:
-        print("N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A")
+        print("N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A")
 
 
 def accepted_trade_rows(
@@ -522,6 +525,7 @@ def accepted_trade_rows(
         row = final or opened.get(source) or {}
         output.append({
             "opened_at": parse_time(row.get("opened_at") or row.get("open_ts") or event.get("ts")),
+            "closed_at": parse_time(final.get("closed_at") or final.get("close_ts")) if final else None,
             "source": source,
             "ema": str(event.get("ema_context") or "N/A"),
             "macd": str(event.get("macd_context") or "N/A"),
