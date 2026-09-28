@@ -78,6 +78,8 @@ def main() -> None:
         print("\nCOMPARABLE WINDOW | PENDING")
         print(f"reason | {window.pending_reason}")
         print("comparative metrics | N/A (warm-up is excluded)")
+        if args.list_accepted:
+            _print_accepted(EXPERIMENTS["ema_macd"], window.cohort_started, window.observed_at)
         return
     since = window.comparable_since
     if args.experiment is None:
@@ -95,6 +97,8 @@ def main() -> None:
         print_forced_exit_detail(arm, since, "HS_BEAR_CLUSTER_TRIGGERED", "HS_BEAR_CLUSTER_EXIT")
     else:
         print_forced_exit_detail(arm, since, "CB_EXIT_ALL_TRIGGERED", "CIRCUIT_BREAKER_EXIT_ALL")
+    if args.list_accepted:
+        _print_accepted(arm, since, window.observed_at)
 
 
 def determine_comparable_window(
@@ -405,7 +409,6 @@ def print_ema_macd(arm: Arm, since: datetime, list_accepted: bool) -> None:
     _print_overlap(CONTROL, arm, since)
     print("matrix-blocked opportunities opened by control | "
           + _control_result(control_outcomes, len(control_opened_sources)))
-    _print_accepted(arm, accepted, since)
 
 
 def print_hs_bull(arm: Arm, since: datetime) -> None:
@@ -481,16 +484,52 @@ def _print_overlap(control: Arm, experiment: Arm, since: datetime) -> None:
     print(f"experiment-only | {len(experiment_sources-common)}")
 
 
-def _print_accepted(arm: Arm, accepted: list[dict[str, Any]], since: datetime) -> None:
-    closed, state = _records_by_source(arm, since), _state(arm)
-    opened = {_source(row): row for row in _open_positions(state, since)}
-    print("accepted trades")
-    print("timestamp | source candle | EMA | MACD | exit | net")
-    for event in accepted:
+def _print_accepted(arm: Arm, since: datetime, until: datetime) -> None:
+    accepted = [event for event in _events_between(arm, since, until) if event.get("event") == "OPEN"]
+    closed = [row for row in _records(arm, since)
+              if (stamp := parse_time(row.get("opened_at") or row.get("open_ts"))) is not None and stamp < until]
+    opened = [row for row in _open_positions(_state(arm), since)
+              if (stamp := parse_time(row.get("open_ts") or row.get("opened_at"))) is not None and stamp < until]
+    rows = accepted_trade_rows(accepted, closed, opened)
+    print("\nACCEPTED TRADES")
+    print("opened_at BRT | source_candle | EMA | MACD | entry | exit | exit_reason | net | status")
+    for item in rows:
+        print(f"{_fmt(item['opened_at'])} | {_fmt_ms(item['source'])} | {item['ema']} | {item['macd']} | "
+              f"{_fmt_price(item['entry'])} | {_fmt_price(item['exit'])} | {item['exit_reason']} | "
+              f"{_fmt_net(item['net'])} | {item['status']}")
+    if not rows:
+        print("N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A")
+
+
+def accepted_trade_rows(
+    accepted_events: Iterable[dict[str, Any]],
+    closed_rows: Iterable[dict[str, Any]],
+    open_rows: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Join accepted OPEN telemetry to its current or final position record."""
+    closed = {_source(row): row for row in closed_rows if _source(row) is not None}
+    opened = {_source(row): row for row in open_rows if _source(row) is not None}
+    output = []
+    seen: set[int] = set()
+    for event in accepted_events:
         source = _source(event)
-        row = closed.get(source) or opened.get(source) or {}
-        print(f"{_fmt(parse_time(event.get('ts')))} | {_fmt_ms(source)} | {event.get('ema_context') or 'N/A'} | "
-              f"{event.get('macd_context') or 'N/A'} | {row.get('exit_reason') or 'OPEN'} | {_fmt_net(_net_dollars(row))}")
+        if source is None or source in seen:
+            continue
+        seen.add(source)
+        final = closed.get(source)
+        row = final or opened.get(source) or {}
+        output.append({
+            "opened_at": parse_time(row.get("opened_at") or row.get("open_ts") or event.get("ts")),
+            "source": source,
+            "ema": str(event.get("ema_context") or "N/A"),
+            "macd": str(event.get("macd_context") or "N/A"),
+            "entry": _number(row.get("entry_price") if row.get("entry_price") is not None else event.get("price")),
+            "exit": _number(final.get("exit_price")) if final else None,
+            "exit_reason": str(final.get("exit_reason") or "N/A") if final else "N/A",
+            "net": _net_dollars(final) if final else None,
+            "status": "CLOSED" if final else "OPEN",
+        })
+    return sorted(output, key=lambda row: (row["opened_at"] or datetime.min.replace(tzinfo=timezone.utc), row["source"]))
 
 
 def _control_result(rows: list[dict[str, Any]], expected: int) -> str:
@@ -528,6 +567,10 @@ def _sum_net(rows: Iterable[dict[str, Any]]) -> str:
 
 def _fmt_net(value: float | None) -> str:
     return f"${value:+.4f}" if value is not None else "N/A"
+
+
+def _fmt_price(value: float | None) -> str:
+    return f"{value:.4f}" if value is not None else "N/A"
 
 
 def _net_dollars(row: dict[str, Any]) -> float | None:

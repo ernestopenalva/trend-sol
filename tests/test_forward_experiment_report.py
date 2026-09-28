@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from io import StringIO
 
 from tools.forward_experiment_report import (
+    accepted_trade_rows,
     calculate_max_simultaneous,
     event_counts,
     filter_since,
@@ -145,6 +146,29 @@ class ForwardExperimentReportTests(unittest.TestCase):
         self.assertIn("blocked | 1", text)
         self.assertIn("LON | BU+=1 | BU-=0 | BE+=0 | BE-=0", text)
         self.assertIn("MIX | BU+=0 | BU-=0 | BE+=0 | BE-=0", text)
+
+    def test_list_accepted_joins_open_and_closed_trade_fields(self) -> None:
+        events = [
+            {"event": "OPEN", "ts": "2026-09-28T03:00:00Z", "source_candle_open_time": 1000,
+             "ema_context": "LON", "macd_context": "BU+", "price": 150},
+            {"event": "OPEN", "ts": "2026-09-28T03:05:00Z", "source_candle_open_time": 2000,
+             "ema_context": "BUL", "macd_context": "BE+", "price": 151},
+        ]
+        closed = [{
+            "source_candle_open_time": 1000, "opened_at": "2026-09-28T03:00:00Z",
+            "entry_price": 150, "exit_price": 152, "exit_reason": "PROFIT_LOCK",
+            "net_pnl_pct": 1, "position_notional_usdt": 20,
+        }]
+        opened = [{
+            "source_candle_open_time": 2000, "open_ts": "2026-09-28T03:05:00Z",
+            "entry_price": 151, "status": "OPEN",
+        }]
+        rows = accepted_trade_rows(events, closed, opened)
+        self.assertEqual(rows[0]["status"], "CLOSED")
+        self.assertEqual(rows[0]["exit"], 152)
+        self.assertEqual(rows[0]["net"], 0.2)
+        self.assertEqual(rows[1]["status"], "OPEN")
+        self.assertIsNone(rows[1]["exit"])
 
 
 if __name__ == "__main__":
