@@ -381,7 +381,10 @@ def _print_ema_macd_warmup(events: list[dict[str, Any]]) -> None:
 def print_summary(since: datetime) -> None:
     print(f"\nCOMPARABLE SUMMARY | since {_fmt(since)}")
     print(SUMMARY_HEADER)
-    for arm in (REAL_A, CONTROL, *EXPERIMENTS.values(), DMI15_CONTEXT):
+    ordered_experiments = [arm for key, arm in EXPERIMENTS.items() if key != 'ema_macd_hist_1m']
+    ordered_experiments.insert(ordered_experiments.index(EXPERIMENTS['ema_macd']) + 1,
+                               EXPERIMENTS['ema_macd_hist_1m'])
+    for arm in (REAL_A, CONTROL, *ordered_experiments, DMI15_CONTEXT):
         if arm not in (CONTROL, REAL_A):
             _validate_experiment_cohort(arm, since)
         print(summary_line(arm, since))
@@ -517,7 +520,13 @@ def _comparison(control: Arm, experiment: Arm, since: datetime) -> None:
     print(f"\nCOMPARABLE EXPERIMENT | since {_fmt(since)}")
     print(SUMMARY_HEADER)
     print(summary_line(control, since))
-    print(summary_line(experiment, since))
+    if experiment.name in (EXPERIMENTS['ema_macd'].name, EXPERIMENTS['ema_macd_hist_1m'].name):
+        ema_arm = experiment if experiment.name == EXPERIMENTS['ema_macd'].name else EXPERIMENTS['ema_macd']
+        hist_arm = experiment if experiment.name == EXPERIMENTS['ema_macd_hist_1m'].name else EXPERIMENTS['ema_macd_hist_1m']
+        print(summary_line(ema_arm, since))
+        print(summary_line(hist_arm, since))
+    else:
+        print(summary_line(experiment, since))
 
 
 def _print_overlap(control: Arm, experiment: Arm, since: datetime) -> None:

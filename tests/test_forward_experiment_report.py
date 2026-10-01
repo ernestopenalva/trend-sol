@@ -30,6 +30,24 @@ COHORT = datetime(2026, 9, 27, 23, 7, 29, tzinfo=timezone.utc)
 
 
 class ForwardExperimentReportTests(unittest.TestCase):
+    def test_ema_chain_order_in_general_and_both_experiment_summaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for experiment in (None, 'ema_macd', 'ema_macd_hist_1m'):
+                output = StringIO()
+                argv = ['report', '--since', '30/09/2026 22:03:09']
+                if experiment:
+                    argv += ['--experiment', experiment]
+                with self.subTest(experiment=experiment), patch.object(report, 'ROOT', Path(tmp)), patch('sys.argv', argv), redirect_stdout(output):
+                    main()
+                lines = output.getvalue().splitlines()
+                ema = next(i for i, line in enumerate(lines) if line.startswith('BE_OFF_CB_EMA_MACD_SHADOW |'))
+                hist = next(i for i, line in enumerate(lines) if line.startswith('EMA_MACD_HIST_1M_SHADOW |'))
+                self.assertEqual(hist, ema+1)
+                if experiment:
+                    control = next(i for i, line in enumerate(lines) if line.startswith('BE_OFF_CB_SHADOW |'))
+                    self.assertEqual(ema, control+1)
+                    self.assertEqual(lines.count(report.SUMMARY_HEADER), 1)
+
     def test_trade_list_prints_exit_return_and_open_hs_percent(self):
         arm = report.EXPERIMENTS['fast_drop']
         events = [{'event':'OPEN', 'source_candle_open_time':source,
