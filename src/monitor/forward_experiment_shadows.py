@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -10,6 +11,102 @@ from src.logging_utils import JsonlLogger
 from src.monitor.circuit_breaker_shadow import CircuitBreakerPosition, CircuitBreakerShadow, _bucket, _iso, _parse_ts
 from src.position.phantom_execution import PhantomExecutionClient
 from src.telemetry_writer import TelemetryWriter
+
+
+class FastDropPosition(CircuitBreakerPosition):
+    fast_drop_evaluated = False
+
+    def to_state(self):
+        return {**super().to_state(), 'fast_drop_evaluated': self.fast_drop_evaluated}
+
+    @classmethod
+    def from_state(cls, state, config, client, logger):
+        value = super().from_state(state, config, client, logger)
+        value.fast_drop_evaluated = bool(state.get('fast_drop_evaluated', False))
+        return value
+
+
+class FastDropEmaShadow(CircuitBreakerShadow):
+    """Fixed June/July/August 2026 selection; forward is first out-of-sample test."""
+
+    def __init__(self, project_root, config, logger, telemetry, *, cohort_started_at):
+        key = 'be_off_cb_fast_drop_ema_shadow'
+        self.minute_closes = {}
+        path = project_root / config.get('instrumentation', {}).get(key, {}).get(
+            'state_file', 'data/state/be_off_cb_fast_drop_ema_shadow.json')
+        if path.exists():
+            raw = json.loads(path.read_text(encoding='utf8'))
+            self.minute_closes = {int(k): float(v) for k, v in raw.get('fast_drop_minute_closes', {}).items()}
+        super().__init__(project_root, config, logger, telemetry, settings_key=key,
+                         strategy='BE_OFF_CB_FAST_DROP_EMA_SHADOW',
+                         shadow_kind='BE_OFF_CB_FAST_DROP_EMA_SHADOW', pair_prefix='fastdropema',
+                         be_off=True, cohort_started_at=cohort_started_at)
+
+    def _position_type(self):
+        return FastDropPosition
+
+    def _load_state(self):
+        super()._load_state()
+        if self.state_path.exists():
+            raw = json.loads(self.state_path.read_text(encoding='utf8'))
+            flags = {p['pair_id']: bool(p.get('fast_drop_evaluated', False)) for p in raw.get('positions', [])}
+            for position in self.positions:
+                position.fast_drop_evaluated = flags.get(position.pair_id, False)
+
+    def _extra_state(self):
+        return {'fast_drop_minute_closes': self.minute_closes}
+
+    def on_closed_1m(self, payload):
+        if payload.get('x'):
+            self._run_input({'kind': 'reference_1m', 'boundary': int(payload['T']) + 1,
+                             'close': float(payload['c'])})
+
+    def _process_reference_1m(self, item):
+        boundary = int(item['boundary'])
+        if self.minute_closes and boundary < max(self.minute_closes):
+            return False
+        self.minute_closes[boundary] = float(item['close'])
+        self.minute_closes = {k: v for k, v in self.minute_closes.items() if k >= boundary - 10 * 60_000}
+        return True
+
+    def _process_tick(self, price, observed_at):
+        moment = _parse_ts(observed_at)
+        self._event_moment = moment
+        stamp = int(moment.timestamp() * 1000)
+        # Match the study's minute-end label for the minute containing the tick.
+        boundary = stamp - stamp % 60_000 + 60_000
+        reference = self.minute_closes.get(boundary - 5 * 60_000)
+        context = self._context_fields().get('ema_context')
+        for position in list(self.open_positions):
+            if position.fast_drop_evaluated or position.pnl_pct(price) > -0.50 + 1e-12:
+                continue
+            # First loss-level crossing only, exactly as the fixed replay.
+            position.fast_drop_evaluated = True
+            target = position.entry_price * .995
+            velocity = (target / reference - 1) * 100 / 5 if reference else None
+            # A previously armed higher PL/TRAIL stop precedes this loss level.
+            if position.effective_stop >= target:
+                continue
+            if velocity is None or velocity > -.10 + 1e-12 or context not in ('SHO', 'BEA'):
+                continue
+            position._update_trough(price, observed_at)
+            position.market_context_exit = deepcopy(self.latest_market_context)
+            position.client.set_price(price)
+            position._cb_market_ts = observed_at
+            event = position._close_at_market(price, 'FAST_DROP', observed_at, target)
+            if event and position.status == 'CLOSED':
+                record = self.ledger._record(position, self.config, 'CIRCUIT_BREAKER_SHADOW')
+                details = {'loss_at_trigger_pct': position.pnl_pct(price),
+                           'velocity_5m_pct_per_min': velocity, 'ema_context': context,
+                           'trigger_at': observed_at, 'exit_price': position.exit_price}
+                record.update(details)
+                self.closed_records.append(record)
+                net = float(record['net_pnl_pct']) * float(position.position_notional_usdt) / 100
+                self.pending_closes.append({'boundary': boundary, 'net': net, 'pair_id': position.pair_id})
+                self._event('FAST_DROP', pair_id=position.pair_id,
+                            source_candle_open_time=position.source_candle_open_time, **details)
+        self.positions = [p for p in self.positions if p.status == 'OPEN']
+        super()._process_tick(price, observed_at)
 
 
 class PolicyShadow(CircuitBreakerShadow):
@@ -34,6 +131,75 @@ class PolicyShadow(CircuitBreakerShadow):
             return False, "ENTRY_BLOCKED_CONTEXT_UNAVAILABLE"
         allowed = ema_context in ("LON", "BUL", "BEA") and macd_context in ("BU+", "BE+")
         return (True, "ENTRY_ACCEPTED_EMA_MACD") if allowed else (False, f"ENTRY_BLOCKED_EMA_MACD_{ema_context}_{macd_context}")
+
+
+class EmaMacdHist1mShadow(PolicyShadow):
+    """EMA_MACD admission plus closed 5m histogram and closed 1m confirmation."""
+
+    def __init__(self, project_root, config, logger, telemetry, *, cohort_started_at):
+        key = 'ema_macd_hist_1m_shadow'
+        path = project_root / config.get('instrumentation', {}).get(key, {}).get(
+            'state_file', 'data/state/ema_macd_hist_1m_shadow.json')
+        raw = json.loads(path.read_text(encoding='utf8')) if path.exists() else {}
+        self.tactical_candles = raw.get('tactical_candles', [])
+        self.admission_audit = {}
+        super().__init__(project_root, config, logger, telemetry, settings_key=key,
+                         strategy='EMA_MACD_HIST_1M_SHADOW', pair_prefix='emamacdhist1m',
+                         policy='EMA_MACD', cohort_started_at=cohort_started_at)
+
+    def _extra_state(self):
+        return {'tactical_candles': self.tactical_candles}
+
+    def on_closed_1m(self, payload):
+        if payload.get('x'):
+            candle = {'open_time': int(payload['t']), 'close_time': int(payload['T']),
+                      **{name: float(payload[key]) for name, key in
+                         (('open', 'o'), ('high', 'h'), ('low', 'l'), ('close', 'c'))}}
+            self._run_input({'kind': 'reference_1m', 'candle': candle})
+
+    def _process_reference_1m(self, item):
+        candle = item['candle']
+        by_open = {row['open_time']: row for row in self.tactical_candles}
+        by_open[candle['open_time']] = candle
+        self.tactical_candles = sorted(by_open.values(), key=lambda row: row['close_time'])[-10:]
+        return True
+
+    def _process_signal(self, signal):
+        if self.last_signal_source is not None and signal.source_candle_open_time <= self.last_signal_source:
+            return super()._process_signal(signal)
+        moment = _parse_ts(signal.ts)
+        timestamp = int(moment.timestamp() * 1000)
+        context = self._context_fields()
+        snapshot = (self.latest_market_context or {}).get('tf_5m') or {}
+        eligible = [row for row in self.tactical_candles if row['close_time'] <= timestamp]
+        previous, current = (eligible[-2], eligible[-1]) if len(eligible) >= 2 else (None, None)
+        base_pass, base_reason = super()._entry_policy(context)
+        hist, prior_hist = snapshot.get('macd_histogram'), snapshot.get('macd_histogram_previous')
+        closed_5m = snapshot.get('latest_closed_at_ms')
+        hist_pass = (closed_5m is not None and closed_5m <= timestamp and hist is not None
+                     and prior_hist is not None and hist > 0 and hist > prior_hist)
+        tactical_pass = bool(current and previous and current['close'] > previous['close']
+                             and current['close'] > current['open'])
+        self.admission_audit = {
+            **context, **{key: snapshot.get(key) for key in
+                ('previous_open_at_ms', 'previous_closed_at_ms', 'macd_signal', 'macd_signal_previous',
+                 'macd_histogram', 'macd_histogram_previous')},
+            'one_minute_previous': previous, 'one_minute_current': current,
+            'ema_macd_pass': base_pass, 'histogram_pass': bool(hist_pass),
+            'confirmation_1m_pass': tactical_pass,
+        }
+        self._admission_reason = (base_reason if not base_pass else
+            'ENTRY_BLOCKED_HISTOGRAM' if not hist_pass else
+            'ENTRY_BLOCKED_CONFIRMATION_1M' if not tactical_pass else 'ENTRY_ACCEPTED_EMA_MACD_HIST_1M')
+        result = super()._process_signal(signal)
+        self._event_at(moment, 'ADMISSION_FILTERS', source_candle_open_time=signal.source_candle_open_time,
+                       **self.admission_audit, final_decision='admitted' if result else 'blocked',
+                       filter_reason=self._admission_reason)
+        return result
+
+    def _entry_policy(self, context):
+        return (all(self.admission_audit.get(key, False) for key in
+                    ('ema_macd_pass', 'histogram_pass', 'confirmation_1m_pass')), self._admission_reason)
 
 
 class ElasticPosition(CircuitBreakerPosition):

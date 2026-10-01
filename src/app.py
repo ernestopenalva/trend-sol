@@ -31,7 +31,7 @@ from src.monitor.context_shadow import RealAContextShadow
 from src.monitor.h2_exposure_shadow import H2ExposureShadow
 from src.monitor.circuit_breaker_shadow import CircuitBreakerShadow
 from src.monitor.ladder_shadow import RealALadderShadow
-from src.monitor.forward_experiment_shadows import ExperimentalRiskShadow, PolicyShadow
+from src.monitor.forward_experiment_shadows import ExperimentalRiskShadow, PolicyShadow, FastDropEmaShadow, EmaMacdHist1mShadow
 from src.monitor.gcr_shadow import GcrShadowRegistry
 from src.monitor.market_context import MarketContextEngine
 from src.monitor.human_console_reporter import HumanConsoleReporter
@@ -124,6 +124,10 @@ class Monitor:
             pair_prefix="beoffcb", be_off=True, cohort_started_at=self.ladder_shadow_cohort_started_at,
         )
         self.forward_experiment_shadows = [
+            EmaMacdHist1mShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
+                               cohort_started_at=self.ladder_shadow_cohort_started_at),
+            FastDropEmaShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
+                             cohort_started_at=self.ladder_shadow_cohort_started_at),
             ExperimentalRiskShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
                 settings_key="hs_bull_elastic_shadow", strategy="HS_BULL_ELASTIC_SHADOW",
                 pair_prefix="hsbullelastic", experiment="HS_BULL_ELASTIC",
@@ -417,6 +421,13 @@ class Monitor:
             signal = self.entry_engine.on_kline(stream, payload)
             kline = payload.get("k") if isinstance(payload.get("k"), dict) else {}
             timeframe = stream.rsplit("@kline_", 1)[-1]
+            if bool(kline.get('x')) and timeframe == '1m':
+                for shadow in getattr(self, 'forward_experiment_shadows', []):
+                    if isinstance(shadow, (FastDropEmaShadow, EmaMacdHist1mShadow)):
+                        try:
+                            shadow.on_closed_1m(kline)
+                        except Exception as exc:
+                            self.logger.system(f'{shadow.settings_key}_candle_failed', error=str(exc))
             if bool(kline.get("x")) and timeframe in ("5m", "15m"):
                 snapshot = self._safe_refresh_market_context()
                 if timeframe == "5m":

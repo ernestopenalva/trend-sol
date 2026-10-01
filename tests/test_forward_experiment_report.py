@@ -30,6 +30,46 @@ COHORT = datetime(2026, 9, 27, 23, 7, 29, tzinfo=timezone.utc)
 
 
 class ForwardExperimentReportTests(unittest.TestCase):
+    def test_histogram_mode_reports_sequential_block_counts(self):
+        arm = report.EXPERIMENTS['ema_macd_hist_1m']
+        events = [{'event':'ADMISSION_FILTERS', 'ema_macd_pass':base,
+                   'histogram_pass':hist, 'confirmation_1m_pass':tactical,
+                   'final_decision':decision} for base,hist,tactical,decision in
+                  ((False,False,False,'blocked'), (True,False,False,'blocked'),
+                   (True,True,False,'blocked'), (True,True,True,'admitted'))]
+        window = report.ComparableWindow(COHORT, COHORT, COHORT+timedelta(days=1))
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(report,'ROOT',Path(tmp)), patch.object(report,'determine_comparable_window',return_value=window), patch.object(report,'_events',return_value=events), patch('sys.argv',['report','--experiment','ema_macd_hist_1m']), redirect_stdout(output):
+            main()
+        for line in ('total oportunidades | 4', 'bloqueadas por EMA_MACD | 1',
+                     'bloqueadas adicionalmente por histogram | 1',
+                     'bloqueadas adicionalmente por 1m | 1', 'admitidas finais | 1'):
+            self.assertIn(line, output.getvalue())
+
+    def test_every_experiment_shows_control_and_trade_list_without_real_a(self):
+        window = report.ComparableWindow(COHORT, COHORT, COHORT + timedelta(days=1))
+        for name in report.EXPERIMENTS:
+            with self.subTest(experiment=name), tempfile.TemporaryDirectory() as tmp:
+                output = StringIO()
+                with patch.object(report, 'ROOT', Path(tmp)), patch.object(report, 'determine_comparable_window', return_value=window), patch('sys.argv', ['report', '--experiment', name]), redirect_stdout(output):
+                    main()
+                value = output.getvalue()
+                self.assertIn(report.CONTROL.name + ' |', value)
+                self.assertIn(report.EXPERIMENTS[name].name + ' |', value)
+                self.assertNotIn('REAL_A |', value)
+                self.assertNotIn('WARM-UP / NON-COMPARABLE', value)
+                self.assertIn('source_candle | entry BRT | entry price | exit BRT | exit price | net | EMA context | MACD context | reason / exit type', value)
+
+    def test_general_summary_includes_operational_benchmark_and_fast(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = StringIO()
+            with patch.object(report, 'ROOT', Path(tmp)), redirect_stdout(output):
+                report.print_summary(COHORT)
+            self.assertIn('REAL_A |', output.getvalue())
+            self.assertIn('BE_OFF_CB_FAST_DROP_EMA_SHADOW |', output.getvalue())
+            self.assertIn(' | net | net $/trade |', output.getvalue())
+            self.assertIn(' | FAST |', output.getvalue())
+
     def test_default_brt_cohort_timestamp_is_exact(self) -> None:
         self.assertEqual(parse_time("27/09/2026 20:07:29"), COHORT)
 
@@ -186,18 +226,18 @@ class ForwardExperimentReportTests(unittest.TestCase):
                                 "--list-accepted"]), redirect_stdout(output):
             main()
         self.assertIn("ACCEPTED TRADES", output.getvalue())
-        self.assertIn("opened_at BRT | closed_at BRT | source_candle | EMA | MACD", output.getvalue())
+        self.assertIn("source_candle | entry BRT | entry price | exit BRT | exit price | net | EMA context | MACD context | reason / exit type", output.getvalue())
         self.assertNotIn("WARM-UP / NON-COMPARABLE", output.getvalue())
 
-    def test_warmup_is_hidden_by_default_and_available_on_request(self) -> None:
+    def test_warmup_is_hidden_and_switch_removed(self) -> None:
         hidden = StringIO()
         with patch("sys.argv", ["forward_experiment_report.py"]), redirect_stdout(hidden):
             main()
         shown = StringIO()
-        with patch("sys.argv", ["forward_experiment_report.py", "--show-warmup"]), redirect_stdout(shown):
+        with patch("sys.argv", ["forward_experiment_report.py", "--show-warmup"]), redirect_stdout(shown), self.assertRaises(SystemExit):
             main()
         self.assertNotIn("WARM-UP / NON-COMPARABLE", hidden.getvalue())
-        self.assertIn("WARM-UP / NON-COMPARABLE", shown.getvalue())
+        self.assertNotIn("WARM-UP / NON-COMPARABLE", shown.getvalue())
 
     def test_resolved_comparable_outputs_include_net_pf_dd_and_time_filter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -274,8 +314,8 @@ class ForwardExperimentReportTests(unittest.TestCase):
                 with redirect_stdout(ema_output):
                     report.print_ema_macd(ema, floor, False)
 
-            expected_header = "arm | closed | open | net $/trade | PF | DD $ | HS | PL | TRAIL | median age | max simultaneous"
-            expected_control = "BE_OFF_CB_SHADOW | 2 | 0 | $+0.2500 | 2.000 | $0.5000 | 1 | 1 | 0 | 12.5m | 2"
+            expected_header = "arm | closed | open | net | net $/trade | PF | DD $ | HS | PL | TRAIL | median age | max simultaneous"
+            expected_control = "BE_OFF_CB_SHADOW | 2 | 0 | $+0.5000 | $+0.2500 | 2.000 | $0.5000 | 1 | 1 | 0 | 12.5m | 2"
             for text in (macd_output.getvalue(), ema_output.getvalue()):
                 self.assertIn(expected_header, text)
                 self.assertIn(expected_control, text)

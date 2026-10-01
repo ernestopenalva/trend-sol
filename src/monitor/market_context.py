@@ -125,6 +125,10 @@ class MarketContextEngine:
             for fast, slow in zip(ema12, ema26)
         ]
         macd_line, macd_previous = _last(macd), _lookback(macd, 1)
+        valid_macd = [value for value in macd if value is not None]
+        signal_values = [None] * (len(macd) - len(valid_macd)) + ema(valid_macd, 9)
+        histogram = [line - signal if line is not None and signal is not None else None
+                     for line, signal in zip(macd, signal_values)]
         ema_context = classify_ema_context(
             ema_values["ema50"], ema_values["ema100"], ema_values["ema200"],
             ema_values["ema50_direction"], ema_values["ema100_direction"], ema_values["ema200_direction"],
@@ -139,11 +143,17 @@ class MarketContextEngine:
         return {
             "latest_open_at_ms": closed[-1].open_time if closed else None,
             "latest_closed_at_ms": closed[-1].close_time if closed else None,
+            "previous_open_at_ms": closed[-2].open_time if len(closed) > 1 else None,
+            "previous_closed_at_ms": closed[-2].close_time if len(closed) > 1 else None,
             "close": closes[-1] if closes else None,
             **ema_values,
             "ema_context": ema_context,
             "macd_line": macd_line,
             "macd_line_previous": macd_previous,
+            "macd_signal": _last(signal_values),
+            "macd_signal_previous": _lookback(signal_values, 1),
+            "macd_histogram": _last(histogram),
+            "macd_histogram_previous": _lookback(histogram, 1),
             "macd_direction": _direction(macd_line, macd_previous),
             "macd_position": "ABOVE_ZERO" if macd_line is not None and macd_line > 0 else (
                 "BELOW_ZERO" if macd_line is not None and macd_line < 0 else "ZERO" if macd_line == 0 else "UNAVAILABLE"

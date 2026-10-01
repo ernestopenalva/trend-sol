@@ -193,8 +193,9 @@ class CircuitBreakerShadow(RealAContextShadow):
         self, signal: EntrySignal, market_context: Dict[str, Any] | None
     ) -> bool:
         """Receive the shared gate-approved opportunity BEFORE REAL_A admission."""
-        self.latest_market_context = deepcopy(market_context) if market_context else self.latest_market_context
-        return self.on_signal(signal)
+        context = market_context if market_context else self.latest_market_context
+        return self._run_input({'kind': 'signal', 'signal': asdict(signal),
+                                'context': deepcopy(context)})
 
     def record_real_admission(self, signal: EntrySignal, outcome: str) -> None:
         """Observational only. Never changes the CB's admission or detector."""
@@ -254,6 +255,21 @@ class CircuitBreakerShadow(RealAContextShadow):
             if not recovering:
                 _atomic_json(self.pending_input_path, json.dumps(item, ensure_ascii=False))
             self._in_transaction = True
+            rejection = self._temporal_rejection(item)
+            if rejection is not None:
+                # Validate BEFORE touching prices, positions, context or the clock.
+                # Consume the journal sequence as an audited rejection, not a tick.
+                self._event_at(datetime.now(timezone.utc), 'CB_INPUT_REJECTED_LATE',
+                               input=deepcopy(item), reason=rejection,
+                               watermark_ms=self.clock.last_boundary,
+                               last_input_ms=self.last_input_ms,
+                               recovered_pending=recovering,
+                               financial_effect='NONE',
+                               forward_gap_requires_review=recovering)
+                self.sequence = sequence
+                self._in_transaction = False
+                self._save_state()
+                return False
             if item['kind'] == 'tick':
                 result = self._process_tick(item['price'], item['observed_at'])
             elif item['kind'] == 'signal':
@@ -263,6 +279,8 @@ class CircuitBreakerShadow(RealAContextShadow):
                 self._event_at(_parse_ts(item['ts']), 'REAL_A_ADMISSION_OBSERVED',
                                source_candle_open_time=item['source'], outcome=item['outcome'])
                 result = None
+            elif item['kind'] == 'reference_1m':
+                result = self._process_reference_1m(item)
             else:
                 raise ValueError('Unknown CB pending input kind')
             self.sequence = sequence
@@ -276,6 +294,25 @@ class CircuitBreakerShadow(RealAContextShadow):
         finally:
             self._in_transaction = False
 
+    def _temporal_rejection(self, item: dict) -> str | None:
+        if item['kind'] == 'tick':
+            moment = _parse_ts(item.get('observed_at'))
+            if moment is None:
+                raise ValueError('CB tick timestamp is required')
+        elif item['kind'] == 'signal':
+            moment = _parse_ts(item['signal'].get('ts'))
+            if moment is None:
+                raise ValueError('CB signal timestamp is required')
+        else:
+            return None
+        stamp = int(moment.timestamp()*1000)
+        boundary = stamp - stamp % 60_000
+        if self.clock.last_boundary is not None and boundary < self.clock.last_boundary:
+            return 'BEFORE_CONSOLIDATED_MINUTE'
+        if item['kind'] == 'tick' and self.last_input_ms is not None and stamp < self.last_input_ms:
+            return 'OUT_OF_ORDER_TICK'
+        return None
+
     def _recover_pending_input(self):
         if not self.pending_input_path.exists():
             return
@@ -287,11 +324,11 @@ class CircuitBreakerShadow(RealAContextShadow):
         stamp = int(moment.timestamp()*1000)
         if not from_signal and self.last_input_ms is not None and stamp < self.last_input_ms:
             raise ValueError('CB input is out of order; cohort requires reconciliation')
-        if not from_signal:
-            self.last_input_ms = stamp
         boundary = stamp - stamp % 60_000
         if self.clock.last_boundary is not None and boundary < self.clock.last_boundary:
             raise ValueError('Late CB input crosses an already evaluated minute; reconciliation required')
+        if not from_signal:
+            self.last_input_ms = stamp
         if self.clock.last_boundary is None:
             self.clock.last_boundary = boundary - 60_000
         changed = False
@@ -423,12 +460,16 @@ class CircuitBreakerShadow(RealAContextShadow):
         for name in ("blocked_context", "blocked_context_unavailable", "blocked_capacity", "blocked_same_5m", "blocked_spacing", "max_simultaneous_positions"):
             payload[name] = getattr(self, name)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        payload.update(self._extra_state())
         try:
             _atomic_json(self.state_path, json.dumps(payload, ensure_ascii=False))
             self._project_committed()
         except Exception:
             self.enabled = False
             raise
+
+    def _extra_state(self) -> dict:
+        return {}
 
     def _project_committed(self):
         """Ledger/events are idempotent projections of the committed snapshot.

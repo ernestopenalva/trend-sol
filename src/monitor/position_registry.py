@@ -149,14 +149,14 @@ class PositionRegistry:
                         },
                     )
                 self.logger.trade(
-                    position._trade_event(
+                    {**position._trade_event(
                         "OPEN",
                         entry_price,
                         0.0,
                         None,
                         order,
                         price_source="market_fill",
-                    )
+                    ), "signal_price": float(signal.price)}
                 )
 
             opened.append(position)

@@ -261,6 +261,7 @@ def _shadow(
     config["trend"].update(config["profiles"]["intraday"]["trend"])
     config["entry"].update(config["profiles"]["intraday"]["entry"])
     config["instrumentation"]["multi_market_shadow"]["state_file"] = "state.json"
+    config["instrumentation"]["multi_market_shadow"]["enabled"] = True
     config["instrumentation"]["multi_market_shadow"]["ledger_file"] = "ledger.jsonl"
     config["instrumentation"]["multi_market_shadow"]["accept_new_entries"] = True
     config["instrumentation"]["multi_market_shadow"]["selection_enabled"] = True

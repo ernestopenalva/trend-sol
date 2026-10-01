@@ -149,6 +149,14 @@ class BotExitOnlyTests(unittest.TestCase):
             self.assertEqual(client.buys, ["ts-" + registry.positions[0].pair_id + "-B-buy"])
             self.assertEqual(client.trailing_orders, [])
             self.assertEqual([position.label for position in registry.positions], ["B"])
+            position = registry.positions[0]
+            self.assertEqual(position.signal_price, 100.)
+            self.assertEqual(position.to_state()['signal_price'], 100.)
+            events = [json.loads(line) for line in logger.trade_log.read_text().splitlines()]
+            self.assertEqual([event for event in events if event.get('event') == 'OPEN'][-1]['signal_price'], 100.)
+            restored = BotFullExitPosition.from_state(position.to_state(), position.config, client, logger)
+            self.assertEqual(restored.signal_price, 100.)
+            self.assertEqual(TradeLedger(root)._record(restored, config, 'BOT_EXIT')['signal_price'], 100.)
 
     def test_multi_trade_uses_fixed_configured_size_and_sequential_position_ids(self) -> None:
         with TemporaryDirectory() as tmp:

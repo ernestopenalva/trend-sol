@@ -22,7 +22,7 @@ COHORT_STARTED_TEXT = "27/09/2026 20:07:29"
 COMPARABILITY_FLOOR_TEXT = "28/09/2026 01:47:00"
 # Kept as a compatibility alias for imports made by earlier versions/tests.
 DEFAULT_SINCE_TEXT = COHORT_STARTED_TEXT
-SUMMARY_HEADER = "arm | closed | open | net $/trade | PF | DD $ | HS | PL | TRAIL | median age | max simultaneous"
+SUMMARY_HEADER = "arm | closed | open | net | net $/trade | PF | DD $ | HS | PL | TRAIL | median age | max simultaneous"
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,12 @@ class ComparableWindow:
 
 CONTROL = Arm("BE_OFF_CB_SHADOW", "data/trades/trades_be_off_cb_shadow.jsonl",
               "data/state/be_off_cb_shadow.json", "data/telemetry/be_off_cb_shadow_events.jsonl")
+REAL_A = Arm('REAL_A', 'data/trades/trades_B.jsonl', 'data/state/open_positions.json', '')
 EXPERIMENTS = {
+    'ema_macd_hist_1m': Arm('EMA_MACD_HIST_1M_SHADOW', 'data/trades/trades_ema_macd_hist_1m_shadow.jsonl',
+                           'data/state/ema_macd_hist_1m_shadow.json', 'data/telemetry/ema_macd_hist_1m_shadow_events.jsonl'),
+    'fast_drop': Arm('BE_OFF_CB_FAST_DROP_EMA_SHADOW', 'data/trades/trades_be_off_cb_fast_drop_ema_shadow.jsonl',
+                     'data/state/be_off_cb_fast_drop_ema_shadow.json', 'data/telemetry/be_off_cb_fast_drop_ema_shadow_events.jsonl'),
     "hs_bull": Arm("HS_BULL_ELASTIC_SHADOW", "data/trades/trades_hs_bull_elastic_shadow.jsonl",
                    "data/state/hs_bull_elastic_shadow.json", "data/telemetry/hs_bull_elastic_shadow_events.jsonl"),
     "hs_bear": Arm("HS_BEAR_CLUSTER_EXIT_SHADOW", "data/trades/trades_hs_bear_cluster_exit_shadow.jsonl",
@@ -62,8 +67,6 @@ def main() -> None:
     parser.add_argument("--experiment", choices=tuple(EXPERIMENTS))
     parser.add_argument("--list-accepted", action="store_true",
                         help="List accepted trades for ema_macd or macd_bu_minus")
-    parser.add_argument("--show-warmup", action="store_true",
-                        help="Show non-comparable warm-up counts and operational events")
     args = parser.parse_args()
     cohort_started = parse_time(COHORT_STARTED_TEXT)
     floor = parse_time(COMPARABILITY_FLOOR_TEXT)
@@ -73,15 +76,11 @@ def main() -> None:
     if args.list_accepted and args.experiment not in {"ema_macd", "macd_bu_minus"}:
         raise SystemExit("--list-accepted is only valid with --experiment ema_macd or macd_bu_minus")
     _print_window(window)
-    if args.show_warmup:
-        _print_warmup(window)
-        if args.experiment is not None:
-            _print_operational_warmup(args.experiment, EXPERIMENTS[args.experiment], window)
     if window.comparable_since is None:
         print("\nCOMPARABLE WINDOW | PENDING")
         print(f"reason | {window.pending_reason}")
         print("comparative metrics | N/A (warm-up is excluded)")
-        if args.list_accepted:
+        if args.experiment:
             _print_accepted(EXPERIMENTS[args.experiment], window.cohort_started, window.observed_at)
         return
     since = window.comparable_since
@@ -90,6 +89,8 @@ def main() -> None:
         return
     arm = EXPERIMENTS[args.experiment]
     _validate_experiment_cohort(arm, since)
+    if args.experiment not in ('macd_bu_minus', 'ema_macd'):
+        _comparison(CONTROL, arm, since)
     if args.experiment == "macd_bu_minus":
         print_macd_bu_minus(arm, since)
     elif args.experiment == "ema_macd":
@@ -98,10 +99,17 @@ def main() -> None:
         print_hs_bull(arm, since)
     elif args.experiment == "hs_bear":
         print_forced_exit_detail(arm, since, "HS_BEAR_CLUSTER_TRIGGERED", "HS_BEAR_CLUSTER_EXIT")
-    else:
+    elif args.experiment == 'cb_exit':
         print_forced_exit_detail(arm, since, "CB_EXIT_ALL_TRIGGERED", "CIRCUIT_BREAKER_EXIT_ALL")
-    if args.list_accepted:
-        _print_accepted(arm, since, window.observed_at)
+    elif args.experiment == 'ema_macd_hist_1m':
+        events = [row for row in _events(arm, since) if row.get('event') == 'ADMISSION_FILTERS']
+        print('\nopportunities')
+        print(f'total oportunidades | {len(events)}')
+        print(f"bloqueadas por EMA_MACD | {sum(not row['ema_macd_pass'] for row in events)}")
+        print(f"bloqueadas adicionalmente por histogram | {sum(row['ema_macd_pass'] and not row['histogram_pass'] for row in events)}")
+        print(f"bloqueadas adicionalmente por 1m | {sum(row['ema_macd_pass'] and row['histogram_pass'] and not row['confirmation_1m_pass'] for row in events)}")
+        print(f"admitidas finais | {sum(row['final_decision'] == 'admitted' for row in events)}")
+    _print_accepted(arm, since, window.observed_at)
 
 
 def determine_comparable_window(
@@ -341,14 +349,14 @@ def _print_ema_macd_warmup(events: list[dict[str, Any]]) -> None:
 
 def print_summary(since: datetime) -> None:
     print(f"\nCOMPARABLE SUMMARY | since {_fmt(since)}")
-    print(SUMMARY_HEADER)
-    for arm in (CONTROL, *EXPERIMENTS.values()):
-        if arm is not CONTROL:
+    print(SUMMARY_HEADER.replace(' | median age', ' | FAST | median age'))
+    for arm in (REAL_A, CONTROL, *EXPERIMENTS.values()):
+        if arm not in (CONTROL, REAL_A):
             _validate_experiment_cohort(arm, since)
-        print(summary_line(arm, since))
+        print(summary_line(arm, since, include_fast=True))
 
 
-def summary_line(arm: Arm, since: datetime) -> str:
+def summary_line(arm: Arm, since: datetime, include_fast: bool = False) -> str:
     rows, state = _records(arm, since), _state(arm)
     values = [_net_dollars(row) for row in rows]
     net = [value for value in values if value is not None]
@@ -366,7 +374,8 @@ def summary_line(arm: Arm, since: datetime) -> str:
     trail = sum(count for reason, count in reasons.items() if reason.startswith("TRAILING"))
     opened = len(_open_positions(state, since))
     maximum = max_simultaneous(arm, since)
-    return f"{arm.name} | {len(rows)} | {opened} | {net_trade} | {pf} | {dd} | {hs} | {pl} | {trail} | {med_age} | {maximum}"
+    fast = f" | {reasons['FAST_DROP']}" if include_fast else ''
+    return f"{arm.name} | {len(rows)} | {opened} | {_sum_net(rows)} | {net_trade} | {pf} | {dd} | {hs} | {pl} | {trail}{fast} | {med_age} | {maximum}"
 
 
 def print_macd_bu_minus(arm: Arm, since: datetime) -> None:
@@ -476,9 +485,10 @@ def print_forced_exit_detail(arm: Arm, since: datetime, trigger_name: str, exit_
 
 def _comparison(control: Arm, experiment: Arm, since: datetime) -> None:
     print(f"\nCOMPARABLE EXPERIMENT | since {_fmt(since)}")
-    print(SUMMARY_HEADER)
-    print(summary_line(control, since))
-    print(summary_line(experiment, since))
+    fast = experiment == EXPERIMENTS['fast_drop']
+    print(SUMMARY_HEADER.replace(' | median age', ' | FAST | median age') if fast else SUMMARY_HEADER)
+    print(summary_line(control, since, include_fast=fast))
+    print(summary_line(experiment, since, include_fast=fast))
 
 
 def _print_overlap(control: Arm, experiment: Arm, since: datetime) -> None:
@@ -495,15 +505,23 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime) -> None:
               if (stamp := parse_time(row.get("opened_at") or row.get("open_ts"))) is not None and stamp < until]
     opened = [row for row in _open_positions(_state(arm), since)
               if (stamp := parse_time(row.get("open_ts") or row.get("opened_at"))) is not None and stamp < until]
+    sources = {_source(event) for event in accepted}
+    for row in [*closed, *opened]:
+        if _source(row) not in sources:
+            context = (row.get('market_context_entry') or {}).get('tf_5m') or {}
+            accepted.append({**context, 'event': 'OPEN', 'source_candle_open_time': _source(row),
+                             'ts': row.get('opened_at') or row.get('open_ts')})
     rows = accepted_trade_rows(accepted, closed, opened)
     print("\nACCEPTED TRADES")
-    print("opened_at BRT | closed_at BRT | source_candle | EMA | MACD | entry | exit | exit_reason | net | status")
+    print("source_candle | entry BRT | entry price | exit BRT | exit price | net | EMA context | MACD context | reason / exit type")
     for item in rows:
-        print(f"{_fmt(item['opened_at'])} | {_fmt(item['closed_at'])} | {_fmt_ms(item['source'])} | {item['ema']} | {item['macd']} | "
-              f"{_fmt_price(item['entry'])} | {_fmt_price(item['exit'])} | {item['exit_reason']} | "
-              f"{_fmt_net(item['net'])} | {item['status']}")
+        is_open = item['status'] == 'OPEN'
+        print(f"{_fmt_ms(item['source'])} | {_fmt(item['opened_at'])} | {_fmt_price(item['entry'])} | "
+              f"{'OPEN' if is_open else _fmt(item['closed_at'])} | {'OPEN' if is_open else _fmt_price(item['exit'])} | "
+              f"{'OPEN' if is_open else _fmt_net(item['net'])} | {item['ema']} | {item['macd']} | "
+              f"{'OPEN' if is_open else item['exit_reason']}")
     if not rows:
-        print("N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A")
+        print("N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A")
 
 
 def accepted_trade_rows(
@@ -614,7 +632,8 @@ def _elastic_seconds(row: dict[str, Any]) -> float | None:
 
 
 def _records(arm: Arm, since: datetime) -> list[dict[str, Any]]:
-    return [row for row in _jsonl(ROOT / arm.ledger) if (stamp := parse_time(row.get("opened_at"))) is not None and stamp >= since]
+    return [row for row in _jsonl(ROOT / arm.ledger) if (stamp := parse_time(row.get("opened_at"))) is not None and stamp >= since
+            and (arm != REAL_A or (row.get('position_type') == 'BOT_EXIT' and not row.get('phantom') and not row.get('shadow_kind')))]
 
 
 def _records_between(arm: Arm, start: datetime, end: datetime) -> list[dict[str, Any]]:
@@ -635,6 +654,8 @@ def _events_between(arm: Arm, start: datetime, end: datetime) -> list[dict[str, 
 def _state(arm: Arm) -> dict[str, Any]:
     try:
         value = json.loads((ROOT / arm.state).read_text(encoding="utf-8"))
+        if arm == REAL_A and isinstance(value, list):
+            return {'positions': [p for p in value if p.get('label') == 'B' and not p.get('phantom') and not p.get('shadow_kind')]}
         return value if isinstance(value, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}

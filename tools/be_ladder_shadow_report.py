@@ -17,7 +17,6 @@ from src.trade_ledger import TradeLedger
 
 ARMS = (
     ("REAL_A", "data/trades/trades_B.jsonl", "data/state/open_positions.json"),
-    ("BE030_SHADOW", "data/trades/trades_be030_shadow.jsonl", "data/state/be030_shadow.json"),
     ("BE_OFF_SHADOW", "data/trades/trades_be_off_shadow.jsonl", "data/state/be_off_shadow.json"),
     ("BE_OFF_CB_SHADOW", "data/trades/trades_be_off_cb_shadow.jsonl", "data/state/be_off_cb_shadow.json"),
 )
@@ -40,7 +39,6 @@ def main() -> None:
     print("arm | closed | open | gross $/trade | net $/trade | realized max DD $ | PF | HS | BE | PL | TRAIL | avg/median age min | capacity | spacing | same-5m | avg/max simultaneous")
     for name, _ledger, state_file in ARMS:
         _line(name, rows[name], _state(ROOT / state_file), a.capital, real=name == "REAL_A")
-    _transitions(rows["REAL_A"], rows["BE030_SHADOW"], "REAL_A -> BE030")
     _transitions(rows["REAL_A"], rows["BE_OFF_SHADOW"], "REAL_A -> BE_OFF")
     if a.audit_opened:
         _audit_opened(rows, _time(a.audit_opened))
@@ -89,13 +87,13 @@ def _normalized(rows: dict[str, list[dict[str, Any]]], capital: float) -> None:
         totals[name] = net
         print(f"{name} | {len(events)} | ${net:+.4f} | ${net/len(events) if events else 0:+.4f} | ${dd:.4f} | {pf:.4f}")
     if "REAL_A" in totals:
-        for name in ("BE030_SHADOW", "BE_OFF_SHADOW", "BE_OFF_CB_SHADOW"):
+        for name in ("BE_OFF_SHADOW", "BE_OFF_CB_SHADOW"):
             if name in totals:
                 print(f"{name} - REAL_A | ${totals[name] - totals['REAL_A']:+.4f}")
     real_by_source={row.get("source_candle_open_time"):row for row in rows["REAL_A"] if row.get("source_candle_open_time") is not None}
     print("Pairwise normalized comparison (primary where both arms opened the same source candle)")
     print("pair | common closed | REAL_A net $ / max DD $ | shadow net $ / max DD $ | shadow - REAL_A $")
-    for name in ("BE030_SHADOW", "BE_OFF_SHADOW", "BE_OFF_CB_SHADOW"):
+    for name in ("BE_OFF_SHADOW", "BE_OFF_CB_SHADOW"):
         shadow_by_source={row.get("source_candle_open_time"):row for row in rows[name] if row.get("source_candle_open_time") is not None}
         common=sorted(set(real_by_source) & set(shadow_by_source))
         real_events=[event for source in common if (event:=_normalized_event(real_by_source[source], "REAL_A", by_source)) is not None]

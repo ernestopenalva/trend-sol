@@ -156,9 +156,13 @@ class ForwardEquivalenceTests(unittest.TestCase):
             at=datetime(2026,9,5,tzinfo=timezone.utc)
             cb.on_tick(100,at.isoformat())
             cb.on_tick(100,(at+timedelta(minutes=1)).isoformat())
-            with self.assertRaises(ValueError):
-                cb.on_tick(100,(at+timedelta(seconds=59)).isoformat())
-            self.assertFalse(cb.enabled)
+            clock = cb.clock.to_state()
+            cb.on_tick(100,(at+timedelta(seconds=59)).isoformat())
+            self.assertTrue(cb.enabled)
+            self.assertEqual(cb.clock.to_state(), clock)
+            self.assertEqual(cb.audit_events[-1]['event'], 'CB_INPUT_REJECTED_LATE')
+            cb.on_tick(100,(at+timedelta(minutes=2)).isoformat())
+            self.assertTrue(cb.enabled)
 
     def test_report_does_not_mistake_open_trade_for_exclusive_entry(self):
         from tools.circuit_breaker_shadow_report import _path_attribution

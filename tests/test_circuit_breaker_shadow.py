@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import json
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,6 +14,82 @@ from tools.circuit_breaker_shadow_report import _opened_after, _rows
 
 
 class CircuitBreakerShadowTests(unittest.TestCase):
+    def test_incident_late_tick_has_no_financial_effect_and_next_tick_runs(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); config = _config()
+            shadow = CircuitBreakerShadow(root, config, JsonlLogger(root, config), None)
+            shadow.on_signal(EntrySignal('SOLUSDT', 118.49, '2026-09-29T16:25:11+00:00',
+                                         1790698980000, .2, '1m', 14))
+            positions = [x.to_state() for x in shadow.positions]
+            clock, points = shadow.clock.to_state(), deepcopy(shadow.market_points)
+            last_input, sequence = shadow.last_input_ms, shadow.sequence
+            shadow.on_tick(100.0, '2026-09-29T16:24:00.451+00:00')
+            self.assertTrue(shadow.enabled)
+            self.assertEqual(shadow.sequence, sequence + 1)
+            self.assertEqual(positions, [x.to_state() for x in shadow.positions])
+            self.assertEqual(clock, shadow.clock.to_state())
+            self.assertEqual(points, shadow.market_points)
+            self.assertEqual(last_input, shadow.last_input_ms)
+            self.assertEqual(shadow.closed_records, [])
+            self.assertEqual(shadow.audit_events[-1]['event'], 'CB_INPUT_REJECTED_LATE')
+            self.assertEqual(shadow.audit_events[-1]['financial_effect'], 'NONE')
+            shadow.on_tick(118.50, '2026-09-29T16:26:00+00:00')
+            self.assertTrue(shadow.enabled)
+            self.assertEqual(shadow.last_input_ms, 1790699160000)
+
+    def test_existing_pending_late_tick_recovery_is_idempotent(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); config = _config(); logger = JsonlLogger(root, config)
+            shadow = CircuitBreakerShadow(root, config, logger, None)
+            shadow.on_signal(EntrySignal('SOLUSDT', 118.49, '2026-09-29T16:25:11+00:00',
+                                         1790698980000, .2, '1m', 14))
+            pending = {'kind': 'tick', 'price': 118.49,
+                       'observed_at': '2026-09-29T16:24:00.451+00:00',
+                       'sequence': shadow.sequence + 1}
+            shadow.pending_input_path.write_text(json.dumps(pending), encoding='utf8')
+            restored = CircuitBreakerShadow(root, config, logger, None)
+            self.assertTrue(restored.enabled)
+            self.assertEqual(restored.sequence, pending['sequence'])
+            self.assertEqual(restored.clock.to_state(), shadow.clock.to_state())
+            for field in ('pair_id', 'status', 'entry_price', 'reserved_qty', 'effective_stop',
+                          'highest_price', 'trough_price', 'exit_price', 'exit_reason'):
+                self.assertEqual(getattr(restored.positions[0], field), getattr(shadow.positions[0], field))
+            self.assertEqual(restored.closed_records, [])
+            self.assertTrue(restored.audit_events[-1]['recovered_pending'])
+            self.assertTrue(restored.audit_events[-1]['forward_gap_requires_review'])
+            self.assertEqual(json.loads(restored.pending_input_path.read_text()), pending)
+            again = CircuitBreakerShadow(root, config, logger, None)
+            self.assertEqual(len([x for x in again.audit_events if x['event'] == 'CB_INPUT_REJECTED_LATE']), 1)
+            self.assertTrue(again.enabled)
+            again.on_tick(118.50, '2026-09-29T16:26:00+00:00')
+            self.assertTrue(again.enabled)
+            self.assertEqual(again.last_input_ms, 1790699160000)
+
+    def test_same_minute_out_of_order_tick_and_late_signal_are_rejected(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); config = _config()
+            shadow = CircuitBreakerShadow(root, config, JsonlLogger(root, config), None)
+            shadow.on_tick(118.49, '2026-09-29T16:25:30+00:00')
+            shadow.on_tick(100., '2026-09-29T16:25:20+00:00')
+            self.assertEqual(shadow.audit_events[-1]['reason'], 'OUT_OF_ORDER_TICK')
+            before = shadow.clock.to_state()
+            context = deepcopy(shadow.latest_market_context)
+            shadow.on_approved_real_a_signal(
+                EntrySignal('SOLUSDT', 100., '2026-09-29T16:24:00+00:00',
+                            1790698980000, .2, '1m', 14), {'tf_5m': {'ema_context': 'SHO'}})
+            self.assertEqual(shadow.open_positions, [])
+            self.assertEqual(shadow.latest_market_context, context)
+            self.assertEqual(shadow.clock.to_state(), before)
+            self.assertTrue(shadow.enabled)
+
+    def test_unexpected_failure_still_disables_arm(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); config = _config()
+            shadow = CircuitBreakerShadow(root, config, JsonlLogger(root, config), None)
+            with self.assertRaises(ValueError):
+                shadow._run_input({'kind': 'unknown'})
+            self.assertFalse(shadow.enabled)
+
     def test_frozen_combo_requires_dd_rolling_loss_and_two_closes(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp); config = _config()

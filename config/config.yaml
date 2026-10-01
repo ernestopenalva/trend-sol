@@ -206,39 +206,39 @@ instrumentation:
   context_forward_cohort_id: "REAL_A_CONTEXT_PHASE_2026"
   queue_max_size: 10000
   gcr_shadow:
-    enabled: true
+    enabled: false
     accept_new_entries: false
     max_open_positions: 5
     state_file: "data/state/gcr_shadow.json"
     ledger_file: "data/trades/trades_gcr_shadow.jsonl"
   dmi15_shadow:
-    enabled: true
+    enabled: false
     accept_new_entries: false
     max_open_positions: 5
     state_file: "data/state/dmi15_shadow.json"
     ledger_file: "data/trades/trades_dmi15_shadow.jsonl"
   dmi15_spread_shadow:
-    enabled: true
+    enabled: false
     accept_new_entries: false
     max_open_positions: 5
     min_di_spread: 6
     state_file: "data/state/dmi15_spread_shadow.json"
     ledger_file: "data/trades/trades_dmi15_spread_shadow.jsonl"
   dmi15_trajectory_shadow:
-    enabled: true
+    enabled: false
     accept_new_entries: false
     max_open_positions: 5
     state_file: "data/state/dmi15_trajectory_shadow.json"
     ledger_file: "data/trades/trades_dmi15_trajectory_shadow.jsonl"
   dmi15_rsi70_shadow:
-    enabled: true
+    enabled: false
     accept_new_entries: false
     max_open_positions: 5
     max_rsi_ma: 70
     state_file: "data/state/dmi15_rsi70_shadow.json"
     ledger_file: "data/trades/trades_dmi15_rsi70_shadow.jsonl"
   dmi15_combined_shadow:
-    enabled: true
+    enabled: false
     accept_new_entries: false
     max_open_positions: 5
     min_di_spread: 6
@@ -267,7 +267,7 @@ instrumentation:
     state_file: "data/state/dmi15_trajectory_context_shadow.json"
     ledger_file: "data/trades/trades_dmi15_trajectory_context_shadow.jsonl"
   slow_ge_context_shadow:
-    enabled: true
+    enabled: false
     accept_new_entries: true
     max_open_positions: 5
     state_file: "data/state/slow_ge_context_shadow.json"
@@ -291,7 +291,7 @@ instrumentation:
     ledger_file: "data/trades/trades_circuit_breaker_shadow.jsonl"
   be030_shadow:
     # Forward-only ladder control: only the BE economic margin is 0.10%.
-    enabled: true
+    enabled: false
     accept_new_entries: true
     max_open_positions: 5
     state_file: "data/state/be030_shadow.json"
@@ -352,6 +352,22 @@ instrumentation:
     state_file: "data/state/be_off_cb_ema_macd_shadow.json"
     ledger_file: "data/trades/trades_be_off_cb_ema_macd_shadow.jsonl"
     events_file: "data/telemetry/be_off_cb_ema_macd_shadow_events.jsonl"
+  be_off_cb_fast_drop_ema_shadow:
+    enabled: true
+    accept_new_entries: true
+    initial_capital_usdt: 100
+    max_open_positions: 5
+    state_file: "data/state/be_off_cb_fast_drop_ema_shadow.json"
+    ledger_file: "data/trades/trades_be_off_cb_fast_drop_ema_shadow.jsonl"
+    events_file: "data/telemetry/be_off_cb_fast_drop_ema_shadow_events.jsonl"
+  ema_macd_hist_1m_shadow:
+    enabled: true
+    accept_new_entries: true
+    initial_capital_usdt: 100
+    max_open_positions: 5
+    state_file: "data/state/ema_macd_hist_1m_shadow.json"
+    ledger_file: "data/trades/trades_ema_macd_hist_1m_shadow.jsonl"
+    events_file: "data/telemetry/ema_macd_hist_1m_shadow_events.jsonl"
   cohort_guard_study:
     episode_gap_hours: 6
     rules:
@@ -518,7 +534,7 @@ instrumentation:
       - 5
       - 15
   multi_market_shadow:
-    enabled: true
+    enabled: false
     accept_new_entries: false
     selection_enabled: false
     top_count: 3
@@ -533,7 +549,7 @@ instrumentation:
     state_file: "data/state/multi_market_shadow.json"
     ledger_file: "data/trades/trades_shadow_top3.jsonl"
     ge30_variant:
-      enabled: true
+      enabled: false
       state_file: "data/state/multi_market_shadow_ge30.json"
       ledger_file: "data/trades/trades_shadow_top3_ge30.jsonl"
     excluded_base_assets:
