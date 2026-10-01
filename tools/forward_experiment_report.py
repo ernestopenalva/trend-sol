@@ -129,6 +129,9 @@ def _run_report(args, cutoff):
         print_forced_exit_detail(arm, since, "HS_BEAR_CLUSTER_TRIGGERED", "HS_BEAR_CLUSTER_EXIT")
     elif args.experiment == 'cb_exit':
         print_forced_exit_detail(arm, since, "CB_EXIT_ALL_TRIGGERED", "CIRCUIT_BREAKER_EXIT_ALL")
+    elif args.experiment == 'fast_drop':
+        print('\nFAST_DROP hypothesis')
+        print(f"FAST_DROP exits | {sum(row.get('exit_reason') == 'FAST_DROP' for row in _records(arm, since))}")
     elif args.experiment == 'ema_macd_hist_1m':
         events = [row for row in _events(arm, since) if row.get('event') == 'ADMISSION_FILTERS']
         print('\nopportunities')
@@ -377,14 +380,14 @@ def _print_ema_macd_warmup(events: list[dict[str, Any]]) -> None:
 
 def print_summary(since: datetime) -> None:
     print(f"\nCOMPARABLE SUMMARY | since {_fmt(since)}")
-    print(SUMMARY_HEADER.replace(' | median age', ' | FAST | median age'))
+    print(SUMMARY_HEADER)
     for arm in (REAL_A, CONTROL, *EXPERIMENTS.values(), DMI15_CONTEXT):
         if arm not in (CONTROL, REAL_A):
             _validate_experiment_cohort(arm, since)
-        print(summary_line(arm, since, include_fast=True))
+        print(summary_line(arm, since))
 
 
-def summary_line(arm: Arm, since: datetime, include_fast: bool = False) -> str:
+def summary_line(arm: Arm, since: datetime) -> str:
     rows, state = _records(arm, since), _state(arm)
     values = [_net_dollars(row) for row in rows]
     net = [value for value in values if value is not None]
@@ -402,8 +405,7 @@ def summary_line(arm: Arm, since: datetime, include_fast: bool = False) -> str:
     trail = sum(count for reason, count in reasons.items() if reason.startswith("TRAILING"))
     opened = len(_open_positions(state, since))
     maximum = max_simultaneous(arm, since)
-    fast = f" | {reasons['FAST_DROP']}" if include_fast else ''
-    return f"{arm.name} | {len(rows)} | {opened} | {_sum_net(rows)} | {net_trade} | {pf} | {dd} | {hs} | {pl} | {trail}{fast} | {med_age} | {maximum}"
+    return f"{arm.name} | {len(rows)} | {opened} | {_sum_net(rows)} | {net_trade} | {pf} | {dd} | {hs} | {pl} | {trail} | {med_age} | {maximum}"
 
 
 def print_macd_bu_minus(arm: Arm, since: datetime) -> None:
@@ -513,10 +515,9 @@ def print_forced_exit_detail(arm: Arm, since: datetime, trigger_name: str, exit_
 
 def _comparison(control: Arm, experiment: Arm, since: datetime) -> None:
     print(f"\nCOMPARABLE EXPERIMENT | since {_fmt(since)}")
-    fast = experiment == EXPERIMENTS['fast_drop']
-    print(SUMMARY_HEADER.replace(' | median age', ' | FAST | median age') if fast else SUMMARY_HEADER)
-    print(summary_line(control, since, include_fast=fast))
-    print(summary_line(experiment, since, include_fast=fast))
+    print(SUMMARY_HEADER)
+    print(summary_line(control, since))
+    print(summary_line(experiment, since))
 
 
 def _print_overlap(control: Arm, experiment: Arm, since: datetime) -> None:
@@ -541,15 +542,17 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime) -> None:
                              'ts': row.get('opened_at') or row.get('open_ts')})
     rows = accepted_trade_rows(accepted, closed, opened)
     print("\nACCEPTED TRADES")
-    print("source_candle | entry BRT | entry price | exit BRT | exit price | net | EMA context | MACD context | reason / exit type")
+    print("source_candle | entry BRT | entry price | exit BRT | exit price | HS % | net | EMA context | MACD context | reason / exit type")
     for item in rows:
         is_open = item['status'] == 'OPEN'
+        hs_pct = 'OPEN' if is_open else (f"{item['hs_pct']:+.2f}%" if item['hs_pct'] is not None else 'N/A')
         print(f"{_fmt_ms(item['source'])} | {_fmt(item['opened_at'])} | {_fmt_price(item['entry'])} | "
               f"{'OPEN' if is_open else _fmt(item['closed_at'])} | {'OPEN' if is_open else _fmt_price(item['exit'])} | "
+              f"{hs_pct} | "
               f"{'OPEN' if is_open else _fmt_net(item['net'])} | {item['ema']} | {item['macd']} | "
               f"{'OPEN' if is_open else item['exit_reason']}")
     if not rows:
-        print("N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A")
+        print("N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A")
 
 
 def accepted_trade_rows(
@@ -569,6 +572,8 @@ def accepted_trade_rows(
         seen.add(source)
         final = closed.get(source)
         row = final or opened.get(source) or {}
+        entry = _number(row.get('entry_price') if row.get('entry_price') is not None else event.get('price'))
+        exit_price = _number(final.get('exit_price')) if final else None
         output.append({
             "opened_at": parse_time(row.get("opened_at") or row.get("open_ts") or event.get("ts")),
             "closed_at": parse_time(final.get("closed_at") or final.get("close_ts")) if final else None,
@@ -577,6 +582,7 @@ def accepted_trade_rows(
             "macd": str(event.get("macd_context") or "N/A"),
             "entry": _number(row.get("entry_price") if row.get("entry_price") is not None else event.get("price")),
             "exit": _number(final.get("exit_price")) if final else None,
+            "hs_pct": (exit_price / entry - 1) * 100 if final and entry not in (None, 0) and exit_price is not None else None,
             "exit_reason": str(final.get("exit_reason") or "N/A") if final else "N/A",
             "net": _net_dollars(final) if final else None,
             "status": "CLOSED" if final else "OPEN",
