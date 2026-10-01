@@ -43,7 +43,8 @@ class ForwardExperimentReportTests(unittest.TestCase):
         with patch.object(report,'_events_between',return_value=events), patch.object(report,'_records',return_value=closed), patch.object(report,'_state',return_value={'positions':opened}), redirect_stdout(output):
             report._print_accepted(arm, COHORT, parse_time('29/09/2026 00:00'))
         lines = [line.split(' | ') for line in output.getvalue().splitlines() if ' | ' in line]
-        self.assertEqual(lines[0][5], 'HS %')
+        self.assertEqual(lines[0][5], 'PnL %')
+        self.assertEqual(lines[0][9], 'exit reason')
         self.assertEqual(lines[1][5], '-0.80%')
         self.assertEqual(lines[2][5], 'OPEN')
         self.assertTrue(all(len(line)==10 for line in lines))
@@ -128,7 +129,7 @@ class ForwardExperimentReportTests(unittest.TestCase):
                 self.assertNotIn('REAL_A |', value)
                 self.assertNotIn('DMI15_TRAJECTORY_CONTEXT_SHADOW |', value)
                 self.assertNotIn('WARM-UP / NON-COMPARABLE', value)
-                self.assertIn('source_candle | entry BRT | entry price | exit BRT | exit price | HS % | net | EMA context | MACD context | reason / exit type', value)
+                self.assertIn('source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | EMA context | MACD context | exit reason', value)
                 self.assertNotIn(' | FAST |', value)
                 if name == 'fast_drop':
                     self.assertIn('FAST_DROP exits | 0', value)
@@ -302,7 +303,7 @@ class ForwardExperimentReportTests(unittest.TestCase):
                                 "--list-accepted"]), redirect_stdout(output):
             main()
         self.assertIn("ACCEPTED TRADES", output.getvalue())
-        self.assertIn("source_candle | entry BRT | entry price | exit BRT | exit price | HS % | net | EMA context | MACD context | reason / exit type", output.getvalue())
+        self.assertIn("source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | EMA context | MACD context | exit reason", output.getvalue())
         self.assertNotIn("WARM-UP / NON-COMPARABLE", output.getvalue())
 
     def test_warmup_is_hidden_and_switch_removed(self) -> None:

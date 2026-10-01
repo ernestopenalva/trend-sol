@@ -542,7 +542,7 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime) -> None:
                              'ts': row.get('opened_at') or row.get('open_ts')})
     rows = accepted_trade_rows(accepted, closed, opened)
     print("\nACCEPTED TRADES")
-    print("source_candle | entry BRT | entry price | exit BRT | exit price | HS % | net | EMA context | MACD context | reason / exit type")
+    print("source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | EMA context | MACD context | exit reason")
     for item in rows:
         is_open = item['status'] == 'OPEN'
         hs_pct = 'OPEN' if is_open else (f"{item['hs_pct']:+.2f}%" if item['hs_pct'] is not None else 'N/A')
