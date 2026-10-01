@@ -132,6 +132,7 @@ def _run_report(args, cutoff):
     elif args.experiment == 'fast_drop':
         print('\nFAST_DROP hypothesis')
         print(f"FAST_DROP exits | {sum(row.get('exit_reason') == 'FAST_DROP' for row in _records(arm, since))}")
+        print_fast_drop_outcomes(arm, since)
     elif args.experiment == 'ema_macd_hist_1m':
         events = [row for row in _events(arm, since) if row.get('event') == 'ADMISSION_FILTERS']
         print('\nopportunities')
@@ -141,6 +142,33 @@ def _run_report(args, cutoff):
         print(f"bloqueadas adicionalmente por 1m | {sum(row['ema_macd_pass'] and row['histogram_pass'] and not row['confirmation_1m_pass'] for row in events)}")
         print(f"admitidas finais | {sum(row['final_decision'] == 'admitted' for row in events)}")
     _print_accepted(arm, since, window.observed_at)
+
+
+def print_fast_drop_outcomes(arm: Arm, since: datetime) -> None:
+    fast_rows = [row for row in _records(arm, since) if row.get('exit_reason') == 'FAST_DROP']
+    control_closed = _records_by_source(CONTROL, since)
+    control_open = {_source(row) for row in _open_positions(_state(CONTROL), since)
+                    if _source(row) is not None}
+    print('\nFAST_DROP OUTCOMES VS CONTROL')
+    print('source_candle | FAST PnL % | FAST net | control exit reason | control PnL % | control net | delta')
+    for row in fast_rows:
+        source = _source(row)
+        fast_net = _net_dollars(row)
+        prefix = f'{_fmt_ms(source)} | {_exit_pnl_percent(row)} | {_fmt_net(fast_net)}'
+        control = control_closed.get(source) if source is not None else None
+        if control is not None:
+            control_net = _net_dollars(control)
+            delta = fast_net-control_net if fast_net is not None and control_net is not None else None
+            print(f"{prefix} | {control.get('exit_reason') or 'N/A'} | {_exit_pnl_percent(control)} | {_fmt_net(control_net)} | {_fmt_net(delta)}")
+        elif source is not None and source in control_open:
+            print(f'{prefix} | OPEN | OPEN | OPEN | PENDING')
+        else:
+            print(f'{prefix} | NO MATCH | NO MATCH | NO MATCH | NO MATCH')
+
+
+def _exit_pnl_percent(row: dict[str, Any]) -> str:
+    entry, exit_price = _number(row.get('entry_price')), _number(row.get('exit_price'))
+    return f'{(exit_price/entry-1)*100:+.2f}%' if entry not in (None, 0) and exit_price is not None else 'N/A'
 
 
 def determine_comparable_window(

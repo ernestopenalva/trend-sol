@@ -30,6 +30,34 @@ COHORT = datetime(2026, 9, 27, 23, 7, 29, tzinfo=timezone.utc)
 
 
 class ForwardExperimentReportTests(unittest.TestCase):
+    def test_fast_drop_outcomes_exact_source_closed_open_and_missing(self):
+        arm = report.EXPERIMENTS['fast_drop']
+        fast = [{'source_candle_open_time':source, 'entry_price':100., 'exit_price':99.2,
+                 'exit_reason':'FAST_DROP', 'net_pnl_pct':-.9, 'position_notional_usdt':100.}
+                for source in (1000,2000,3000,4000,5000)]
+        # Non-FAST exits must not appear in this specific block.
+        fast.append(dict(fast[0], source_candle_open_time=6000, exit_reason='HARD_STOP'))
+        control = {
+            1000:{'entry_price':100.,'exit_price':98.5,'exit_reason':'HARD_STOP',
+                  'net_pnl_pct':-1.6,'position_notional_usdt':100.},
+            2000:{'entry_price':100.,'exit_price':100.5,'exit_reason':'PROFIT_LOCK',
+                  'net_pnl_pct':.4,'position_notional_usdt':100.},
+            3000:{'entry_price':100.,'exit_price':101.,'exit_reason':'TRAILING',
+                  'net_pnl_pct':.9,'position_notional_usdt':100.}}
+        opened = [{'source_candle_open_time':4000,'status':'OPEN','open_ts':'2026-09-28T05:00:00Z'},
+                  {'source_candle_open_time':5001,'status':'OPEN','open_ts':'2026-09-28T05:00:00Z'}]
+        output=StringIO()
+        with patch.object(report,'_records',return_value=fast), patch.object(report,'_records_by_source',return_value=control), patch.object(report,'_state',return_value={'positions':opened}), redirect_stdout(output):
+            report.print_fast_drop_outcomes(arm, COHORT)
+        lines=[line.split(' | ') for line in output.getvalue().splitlines() if ' | ' in line]
+        self.assertEqual(len(lines), 6)
+        self.assertEqual(lines[0], ['source_candle','FAST PnL %','FAST net','control exit reason','control PnL %','control net','delta'])
+        self.assertEqual(lines[1][1:], ['-0.80%','$-0.9000','HARD_STOP','-1.50%','$-1.6000','$+0.7000'])
+        self.assertEqual(lines[2][3:], ['PROFIT_LOCK','+0.50%','$+0.4000','$-1.3000'])
+        self.assertEqual(lines[3][3:], ['TRAILING','+1.00%','$+0.9000','$-1.8000'])
+        self.assertEqual(lines[4][3:], ['OPEN','OPEN','OPEN','PENDING'])
+        self.assertEqual(lines[5][3:], ['NO MATCH']*4)
+
     def test_ema_chain_order_in_general_and_both_experiment_summaries(self):
         with tempfile.TemporaryDirectory() as tmp:
             for experiment in (None, 'ema_macd', 'ema_macd_hist_1m'):
