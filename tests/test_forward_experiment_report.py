@@ -30,6 +30,57 @@ COHORT = datetime(2026, 9, 27, 23, 7, 29, tzinfo=timezone.utc)
 
 
 class ForwardExperimentReportTests(unittest.TestCase):
+    def test_since_recalculates_admitted_trade_window_in_all_modes(self):
+        cutoff = '30/09/2026 22:03:09'
+        since = parse_time(cutoff)
+        rows = [
+            {'pair_id':'old', 'source_candle_open_time':1, 'opened_at':'2026-10-01T01:03:08Z',
+             'closed_at':'2026-10-01T03:00:00Z', 'net_pnl_pct':-50, 'position_notional_usdt':100,
+             'age_seconds':6000, 'exit_reason':'TRAILING'},
+            {'pair_id':'win', 'source_candle_open_time':2, 'opened_at':'2026-10-01T01:03:09Z',
+             'closed_at':'2026-10-01T01:13:09Z', 'net_pnl_pct':2, 'position_notional_usdt':100,
+             'age_seconds':600, 'exit_reason':'PROFIT_LOCK'},
+            {'pair_id':'loss', 'source_candle_open_time':3, 'opened_at':'2026-10-01T01:05:09Z',
+             'closed_at':'2026-10-01T01:25:09Z', 'net_pnl_pct':-1, 'position_notional_usdt':100,
+             'age_seconds':1200, 'exit_reason':'HARD_STOP'}]
+        opened = [
+            {'pair_id':'old_open', 'source_candle_open_time':4,'open_ts':'2026-10-01T01:02:00Z','status':'OPEN'},
+            {'pair_id':'new_open', 'source_candle_open_time':5,'open_ts':'2026-10-01T01:06:00Z','status':'OPEN'}]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for arm in (report.CONTROL, *report.EXPERIMENTS.values()):
+                for name, value in ((arm.ledger, rows), (arm.events, [
+                    {'ts':'2026-10-01T02:00:00Z','event':'HS_ELASTIC_STARTED','pair_id':'old'},
+                    {'ts':'2026-10-01T02:00:00Z','event':'HS_ELASTIC_STARTED','pair_id':'win'}])):
+                    path = root/name; path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(''.join(json.dumps(row)+'\n' for row in value), encoding='utf8')
+                (root/arm.state).parent.mkdir(parents=True, exist_ok=True)
+                (root/arm.state).write_text(json.dumps({'positions':opened}), encoding='utf8')
+            for experiment in (None, *report.EXPERIMENTS):
+                argv = ['report','--since',cutoff] + (['--experiment',experiment] if experiment else [])
+                output=StringIO()
+                with self.subTest(experiment=experiment), patch.object(report,'ROOT',root), patch.object(report,'determine_comparable_window') as automatic, patch('sys.argv',argv), redirect_stdout(output):
+                    main()
+                    automatic.assert_not_called()
+                    value=output.getvalue()
+                    self.assertIn('since 30/09/2026 22:03:09 BRT',value)
+                    self.assertIn('BE_OFF_CB_SHADOW | 2 | 1 | $+1.0000 | $+0.5000 | 2.000 | $1.0000 | 1 | 1 | 0',value)
+                    self.assertIn(' | 15.0m | 3',value)
+                    self.assertNotIn('$-50.0000',value)
+                    if experiment:
+                        self.assertNotIn('30/09/2026 22:03:08 BRT',value)
+                    if experiment=='hs_bull':
+                        self.assertIn('HS reached -1.5% in LON | 1',value)
+            self.assertIsNone(report.ADMISSION_CUTOFF.get())
+
+    def test_since_accepts_minutes_and_rejects_invalid_format(self):
+        output=StringIO()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(report,'ROOT',Path(tmp)), patch('sys.argv',['report','--since','30/09/2026 22:03']), redirect_stdout(output):
+            main()
+        self.assertIn('since 30/09/2026 22:03:00 BRT',output.getvalue())
+        with patch('sys.argv',['report','--since','2026-09-30T22:03:09']), self.assertRaises(SystemExit):
+            main()
+
     def test_histogram_mode_reports_sequential_block_counts(self):
         arm = report.EXPERIMENTS['ema_macd_hist_1m']
         events = [{'event':'ADMISSION_FILTERS', 'ema_macd_pass':base,

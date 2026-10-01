@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 from collections import Counter
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ COMPARABILITY_FLOOR_TEXT = "28/09/2026 01:47:00"
 # Kept as a compatibility alias for imports made by earlier versions/tests.
 DEFAULT_SINCE_TEXT = COHORT_STARTED_TEXT
 SUMMARY_HEADER = "arm | closed | open | net | net $/trade | PF | DD $ | HS | PL | TRAIL | median age | max simultaneous"
+ADMISSION_CUTOFF = ContextVar('admission_cutoff', default=None)
 
 
 @dataclass(frozen=True)
@@ -65,17 +67,40 @@ EXPERIMENTS = {
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--experiment", choices=tuple(EXPERIMENTS))
+    parser.add_argument('--since', help='Admission cutoff in BRT: DD/MM/YYYY HH:MM[:SS]')
     parser.add_argument("--list-accepted", action="store_true",
                         help="List accepted trades for ema_macd or macd_bu_minus")
     args = parser.parse_args()
+    cutoff = None
+    if args.since is not None:
+        for fmt in ('%d/%m/%Y %H:%M', '%d/%m/%Y %H:%M:%S'):
+            try:
+                cutoff = datetime.strptime(args.since, fmt).replace(tzinfo=BRASILIA_TZ).astimezone(timezone.utc)
+                break
+            except ValueError:
+                pass
+        if cutoff is None:
+            parser.error('--since must use DD/MM/YYYY HH:MM or DD/MM/YYYY HH:MM:SS (BRT)')
+    token = ADMISSION_CUTOFF.set(cutoff)
+    try:
+        _run_report(args, cutoff)
+    finally:
+        ADMISSION_CUTOFF.reset(token)
+
+
+def _run_report(args, cutoff):
     cohort_started = parse_time(COHORT_STARTED_TEXT)
     floor = parse_time(COMPARABILITY_FLOOR_TEXT)
     if cohort_started is None or floor is None:  # pragma: no cover - constants are tested
         raise SystemExit("invalid report window constants")
-    window = determine_comparable_window(cohort_started, floor)
+    window = (ComparableWindow(cohort_started, cutoff, datetime.now(timezone.utc)) if cutoff is not None
+              else determine_comparable_window(cohort_started, floor))
     if args.list_accepted and args.experiment not in {"ema_macd", "macd_bu_minus"}:
         raise SystemExit("--list-accepted is only valid with --experiment ema_macd or macd_bu_minus")
-    _print_window(window)
+    if cutoff is None:
+        _print_window(window)
+    else:
+        print(f'FORWARD EXPERIMENT REPORT | since {_fmt(cutoff)}')
     if window.comparable_since is None:
         print("\nCOMPARABLE WINDOW | PENDING")
         print(f"reason | {window.pending_reason}")
@@ -643,12 +668,35 @@ def _records_between(arm: Arm, start: datetime, end: datetime) -> list[dict[str,
 
 
 def _events(arm: Arm, since: datetime) -> list[dict[str, Any]]:
-    return [row for row in _jsonl(ROOT / arm.events) if (stamp := parse_time(row.get("ts"))) is not None and stamp >= since]
+    return _admission_events(arm, [row for row in _jsonl(ROOT / arm.events)
+                             if (stamp := parse_time(row.get("ts"))) is not None and stamp >= since])
 
 
 def _events_between(arm: Arm, start: datetime, end: datetime) -> list[dict[str, Any]]:
-    return [row for row in _jsonl(ROOT / arm.events)
-            if (stamp := parse_time(row.get("ts"))) is not None and start <= stamp < end]
+    return _admission_events(arm, [row for row in _jsonl(ROOT / arm.events)
+            if (stamp := parse_time(row.get("ts"))) is not None and start <= stamp < end])
+
+
+def _admission_events(arm: Arm, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cutoff = ADMISSION_CUTOFF.get()
+    if cutoff is None:
+        return rows
+    positions = [*_jsonl(ROOT / arm.ledger), *_state(arm).get('positions', [])]
+    excluded = {str(row['pair_id']) for row in positions if row.get('pair_id')
+                and (opened := parse_time(row.get('opened_at') or row.get('open_ts'))) is not None
+                and opened < cutoff}
+    output = []
+    for row in rows:
+        if str(row.get('pair_id')) in excluded:
+            continue
+        item = dict(row)
+        for key in ('trigger_pair_ids', 'victim_pair_ids'):
+            if key in item:
+                item[key] = [pair for pair in item[key] if str(pair) not in excluded]
+        if row.get('trigger_pair_ids') and not item['trigger_pair_ids']:
+            continue
+        output.append(item)
+    return output
 
 
 def _state(arm: Arm) -> dict[str, Any]:
