@@ -108,6 +108,7 @@ class ForwardExperimentReportTests(unittest.TestCase):
                 self.assertIn(report.CONTROL.name + ' |', value)
                 self.assertIn(report.EXPERIMENTS[name].name + ' |', value)
                 self.assertNotIn('REAL_A |', value)
+                self.assertNotIn('DMI15_TRAJECTORY_CONTEXT_SHADOW |', value)
                 self.assertNotIn('WARM-UP / NON-COMPARABLE', value)
                 self.assertIn('source_candle | entry BRT | entry price | exit BRT | exit price | net | EMA context | MACD context | reason / exit type', value)
 
@@ -117,6 +118,7 @@ class ForwardExperimentReportTests(unittest.TestCase):
             with patch.object(report, 'ROOT', Path(tmp)), redirect_stdout(output):
                 report.print_summary(COHORT)
             self.assertIn('REAL_A |', output.getvalue())
+            self.assertIn('DMI15_TRAJECTORY_CONTEXT_SHADOW |', output.getvalue())
             self.assertIn('BE_OFF_CB_FAST_DROP_EMA_SHADOW |', output.getvalue())
             self.assertIn(' | net | net $/trade |', output.getvalue())
             self.assertIn(' | FAST |', output.getvalue())

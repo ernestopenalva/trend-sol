@@ -46,6 +46,9 @@ class ComparableWindow:
 CONTROL = Arm("BE_OFF_CB_SHADOW", "data/trades/trades_be_off_cb_shadow.jsonl",
               "data/state/be_off_cb_shadow.json", "data/telemetry/be_off_cb_shadow_events.jsonl")
 REAL_A = Arm('REAL_A', 'data/trades/trades_B.jsonl', 'data/state/open_positions.json', '')
+DMI15_CONTEXT = Arm('DMI15_TRAJECTORY_CONTEXT_SHADOW',
+                    'data/trades/trades_dmi15_trajectory_context_shadow.jsonl',
+                    'data/state/dmi15_trajectory_context_shadow.json', '')
 EXPERIMENTS = {
     'ema_macd_hist_1m': Arm('EMA_MACD_HIST_1M_SHADOW', 'data/trades/trades_ema_macd_hist_1m_shadow.jsonl',
                            'data/state/ema_macd_hist_1m_shadow.json', 'data/telemetry/ema_macd_hist_1m_shadow_events.jsonl'),
@@ -375,7 +378,7 @@ def _print_ema_macd_warmup(events: list[dict[str, Any]]) -> None:
 def print_summary(since: datetime) -> None:
     print(f"\nCOMPARABLE SUMMARY | since {_fmt(since)}")
     print(SUMMARY_HEADER.replace(' | median age', ' | FAST | median age'))
-    for arm in (REAL_A, CONTROL, *EXPERIMENTS.values()):
+    for arm in (REAL_A, CONTROL, *EXPERIMENTS.values(), DMI15_CONTEXT):
         if arm not in (CONTROL, REAL_A):
             _validate_experiment_cohort(arm, since)
         print(summary_line(arm, since, include_fast=True))
