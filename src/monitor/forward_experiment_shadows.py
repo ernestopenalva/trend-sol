@@ -9,6 +9,10 @@ from typing import Any, Dict
 
 from src.logging_utils import JsonlLogger
 from src.monitor.circuit_breaker_shadow import CircuitBreakerPosition, CircuitBreakerShadow, _bucket, _iso, _parse_ts
+from src.monitor.fast_drop_semantics import (
+    closed_before, fast_drop_allowed, fast_drop_boundary, fast_drop_values,
+    loss_reached, normal_stop_precedes_fast,
+)
 from src.position.phantom_execution import PhantomExecutionClient
 from src.telemetry_writer import TelemetryWriter
 
@@ -32,11 +36,13 @@ class FastDropEmaShadow(CircuitBreakerShadow):
     def __init__(self, project_root, config, logger, telemetry, *, cohort_started_at):
         key = 'be_off_cb_fast_drop_ema_shadow'
         self.minute_closes = {}
+        self.context_history = []
         path = project_root / config.get('instrumentation', {}).get(key, {}).get(
             'state_file', 'data/state/be_off_cb_fast_drop_ema_shadow.json')
         if path.exists():
             raw = json.loads(path.read_text(encoding='utf8'))
             self.minute_closes = {int(k): float(v) for k, v in raw.get('fast_drop_minute_closes', {}).items()}
+            self.context_history = raw.get('fast_drop_context_history', [])
         super().__init__(project_root, config, logger, telemetry, settings_key=key,
                          strategy='BE_OFF_CB_FAST_DROP_EMA_SHADOW',
                          shadow_kind='BE_OFF_CB_FAST_DROP_EMA_SHADOW', pair_prefix='fastdropema',
@@ -54,7 +60,25 @@ class FastDropEmaShadow(CircuitBreakerShadow):
                 position.fast_drop_evaluated = flags.get(position.pair_id, False)
 
     def _extra_state(self):
-        return {'fast_drop_minute_closes': self.minute_closes}
+        return {'fast_drop_minute_closes': self.minute_closes,
+                'fast_drop_context_history': self.context_history}
+
+    def on_closed_5m(self, snapshot):
+        if self.enabled and snapshot:
+            for value in (self.latest_market_context, snapshot):
+                if value and (value.get('tf_5m') or {}).get('latest_closed_at_ms') is not None:
+                    close = value['tf_5m']['latest_closed_at_ms']
+                    self.context_history = [item for item in self.context_history
+                        if item['tf_5m']['latest_closed_at_ms'] != close] + [deepcopy(value)]
+            self.context_history = sorted(self.context_history,
+                key=lambda item: item['tf_5m']['latest_closed_at_ms'])[-6:]
+        super().on_closed_5m(snapshot)
+
+    def _context_at(self, stamp):
+        candidates = [*self.context_history, self.latest_market_context]
+        eligible = [item for item in candidates if item and closed_before(
+            (item.get('tf_5m') or {}).get('latest_closed_at_ms'), stamp)]
+        return max(eligible, key=lambda item: item['tf_5m']['latest_closed_at_ms']) if eligible else None
 
     def on_closed_1m(self, payload):
         if payload.get('x'):
@@ -63,10 +87,11 @@ class FastDropEmaShadow(CircuitBreakerShadow):
 
     def _process_reference_1m(self, item):
         boundary = int(item['boundary'])
-        if self.minute_closes and boundary < max(self.minute_closes):
-            return False
+        if boundary in self.minute_closes and self.minute_closes[boundary] != float(item['close']):
+            raise ValueError('Conflicting FAST_DROP reference candle')
         self.minute_closes[boundary] = float(item['close'])
-        self.minute_closes = {k: v for k, v in self.minute_closes.items() if k >= boundary - 10 * 60_000}
+        latest = max(self.minute_closes)
+        self.minute_closes = {k: v for k, v in self.minute_closes.items() if k >= latest - 10 * 60_000}
         return True
 
     def _process_tick(self, price, observed_at):
@@ -74,23 +99,26 @@ class FastDropEmaShadow(CircuitBreakerShadow):
         self._event_moment = moment
         stamp = int(moment.timestamp() * 1000)
         # Match the study's minute-end label for the minute containing the tick.
-        boundary = stamp - stamp % 60_000 + 60_000
+        boundary = fast_drop_boundary(stamp)
         reference = self.minute_closes.get(boundary - 5 * 60_000)
-        context = self._context_fields().get('ema_context')
+        snapshot = self._context_at(stamp)
+        context = (snapshot or {}).get('tf_5m', {}).get('ema_context', 'UNAVAILABLE')
         for position in list(self.open_positions):
-            if position.fast_drop_evaluated or position.pnl_pct(price) > -0.50 + 1e-12:
+            if position.fast_drop_evaluated or not loss_reached(position.entry_price, price):
+                continue
+            if not reference:
+                # No decision was possible: retry on a later tick after receipt/restart.
                 continue
             # First loss-level crossing only, exactly as the fixed replay.
             position.fast_drop_evaluated = True
-            target = position.entry_price * .995
-            velocity = (target / reference - 1) * 100 / 5 if reference else None
+            target, velocity = fast_drop_values(position.entry_price, reference)
             # A previously armed higher PL/TRAIL stop precedes this loss level.
-            if position.effective_stop >= target:
+            if normal_stop_precedes_fast(position.effective_stop, target):
                 continue
-            if velocity is None or velocity > -.10 + 1e-12 or context not in ('SHO', 'BEA'):
+            if not fast_drop_allowed(velocity, context):
                 continue
             position._update_trough(price, observed_at)
-            position.market_context_exit = deepcopy(self.latest_market_context)
+            position.market_context_exit = deepcopy(snapshot)
             position.client.set_price(price)
             position._cb_market_ts = observed_at
             event = position._close_at_market(price, 'FAST_DROP', observed_at, target)
@@ -99,6 +127,9 @@ class FastDropEmaShadow(CircuitBreakerShadow):
                 details = {'loss_at_trigger_pct': position.pnl_pct(price),
                            'velocity_5m_pct_per_min': velocity, 'ema_context': context,
                            'trigger_at': observed_at, 'exit_price': position.exit_price}
+                details.update({'reference_boundary_ms': boundary-5*60_000,
+                                'reference_price': reference, 'velocity_target_price': target,
+                                'ema_latest_closed_at_ms': snapshot['tf_5m']['latest_closed_at_ms']})
                 record.update(details)
                 self.closed_records.append(record)
                 net = float(record['net_pnl_pct']) * float(position.position_notional_usdt) / 100

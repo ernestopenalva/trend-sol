@@ -30,6 +30,50 @@ COHORT = datetime(2026, 9, 27, 23, 7, 29, tzinfo=timezone.utc)
 
 
 class ForwardExperimentReportTests(unittest.TestCase):
+    def test_entry_and_exit_contexts_are_separate_and_closed_at_exit(self):
+        events = [{'event':'OPEN','source_candle_open_time':1,'ema_context':'BUL','macd_context':'BU+',
+                   'ts':'2026-10-01T00:05:00Z'}]
+        final = {'source_candle_open_time':1,'opened_at':'2026-10-01T00:05:00Z',
+                 'closed_at':'2026-10-01T00:10:30Z','entry_price':100.,'exit_price':98.5,
+                 'market_context_exit':{'tf_5m':{'ema_context':'SHO','macd_context':'BE-',
+                    'latest_closed_at_ms':1790813399999}}}
+        row = accepted_trade_rows(events,[final],[])[0]
+        self.assertEqual((row['ema'],row['macd']),('BUL','BU+'))
+        self.assertEqual((row['exit_ema'],row['exit_macd']),('SHO','BE-'))
+        final['market_context_exit']['tf_5m']['latest_closed_at_ms'] = 1790813699999
+        row = accepted_trade_rows(events,[final],[])[0]
+        self.assertEqual((row['exit_ema'],row['exit_macd']),('N/A','N/A'))
+        final['market_context_exit'] = None
+        row = accepted_trade_rows(events,[final],[])[0]
+        self.assertEqual((row['exit_ema'],row['exit_macd']),('N/A','N/A'))
+
+    def test_actual_shadow_persists_exit_snapshot_for_report(self):
+        from src.logging_utils import JsonlLogger
+        from src.monitor.entry_engine import EntrySignal
+        from src.monitor.forward_experiment_shadows import PolicyShadow
+        from tests.test_circuit_breaker_shadow import _config
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); config=_config()
+            config['instrumentation']['report_context_test'] = {
+                'enabled':True,'accept_new_entries':True,'state_file':'state.json',
+                'ledger_file':'ledger.jsonl','events_file':'events.jsonl'}
+            shadow=PolicyShadow(root,config,JsonlLogger(root,config),None,
+                settings_key='report_context_test',strategy='BE_OFF_CB_EMA_MACD_SHADOW',
+                pair_prefix='report',policy='EMA_MACD',cohort_started_at='2026-10-01T00:00:00Z')
+            entry={'tf_5m':{'ema_context':'LON','macd_context':'BU+','latest_closed_at_ms':1790813099999}}
+            exit_context={'tf_5m':{'ema_context':'BEA','macd_context':'BE-','latest_closed_at_ms':1790813399999}}
+            signal=EntrySignal('SOLUSDT',100.,'2026-10-01T00:05:00+00:00',1790813040000,.2,'1m',14)
+            self.assertTrue(shadow.on_approved_real_a_signal(signal,entry))
+            shadow.on_closed_5m(exit_context)
+            shadow.on_tick(98.,'2026-10-01T00:10:30+00:00')
+            record=json.loads(shadow.ledger.path.read_text().splitlines()[0])
+            self.assertEqual(record['market_context_entry'],entry)
+            self.assertEqual(record['market_context_exit'],exit_context)
+            event=next(e for e in shadow.audit_events if e['event']=='OPEN')
+            row=accepted_trade_rows([event],[record],[])[0]
+            self.assertEqual((row['ema'],row['macd'],row['exit_ema'],row['exit_macd']),
+                             ('LON','BU+','BEA','BE-'))
+
     def test_fast_drop_outcomes_exact_source_closed_open_and_missing(self):
         arm = report.EXPERIMENTS['fast_drop']
         fast = [{'source_candle_open_time':source, 'entry_price':100., 'exit_price':99.2,
@@ -90,10 +134,11 @@ class ForwardExperimentReportTests(unittest.TestCase):
             report._print_accepted(arm, COHORT, parse_time('29/09/2026 00:00'))
         lines = [line.split(' | ') for line in output.getvalue().splitlines() if ' | ' in line]
         self.assertEqual(lines[0][5], 'PnL %')
-        self.assertEqual(lines[0][9], 'exit reason')
+        self.assertEqual(lines[0][9:12], ['exit EMA', 'exit MACD', 'exit reason'])
         self.assertEqual(lines[1][5], '-0.80%')
         self.assertEqual(lines[2][5], 'OPEN')
-        self.assertTrue(all(len(line)==10 for line in lines))
+        self.assertEqual(lines[2][9:12], ['OPEN', 'OPEN', 'OPEN'])
+        self.assertTrue(all(len(line)==12 for line in lines))
 
     def test_since_recalculates_admitted_trade_window_in_all_modes(self):
         cutoff = '30/09/2026 22:03:09'
@@ -175,7 +220,7 @@ class ForwardExperimentReportTests(unittest.TestCase):
                 self.assertNotIn('REAL_A |', value)
                 self.assertNotIn('DMI15_TRAJECTORY_CONTEXT_SHADOW |', value)
                 self.assertNotIn('WARM-UP / NON-COMPARABLE', value)
-                self.assertIn('source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | EMA context | MACD context | exit reason', value)
+                self.assertIn('source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason', value)
                 self.assertNotIn(' | FAST |', value)
                 if name == 'fast_drop':
                     self.assertIn('FAST_DROP exits | 0', value)
@@ -349,7 +394,7 @@ class ForwardExperimentReportTests(unittest.TestCase):
                                 "--list-accepted"]), redirect_stdout(output):
             main()
         self.assertIn("ACCEPTED TRADES", output.getvalue())
-        self.assertIn("source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | EMA context | MACD context | exit reason", output.getvalue())
+        self.assertIn("source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason", output.getvalue())
         self.assertNotIn("WARM-UP / NON-COMPARABLE", output.getvalue())
 
     def test_warmup_is_hidden_and_switch_removed(self) -> None:

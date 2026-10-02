@@ -19,6 +19,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.config_profiles import effective_config
 from src.console_utils import BRASILIA_TZ
 from src.position.bot_full_engine import BotFullExitPosition
+from src.monitor.fast_drop_semantics import (
+    FAST_LOSS_PCT, FAST_VELOCITY_5M, FAST_EMA, closed_before,
+    fast_drop_allowed, fast_drop_values, loss_reached, normal_stop_precedes_fast,
+)
 from tools.be_off_cb_deterioration_study import build_context_index, context_before
 from tools.be_off_cb_fast_drop_audit import TrackingCircuitGuard, month_of
 from tools.cohort_study import _load_config
@@ -33,9 +37,6 @@ from tools.market_bot_replay import (
 from tools.market_selection_study import BinancePublicClient, MarketCandle
 
 MONTHS = ("2026-06", "2026-07", "2026-08")
-FAST_LOSS_PCT = 0.50
-FAST_VELOCITY_5M = -0.10
-FAST_EMA = frozenset({"SHO", "BEA"})
 
 
 @dataclass
@@ -56,15 +57,19 @@ def _fast_decision(
     previous: float | None,
     minute_index: dict[int, MarketCandle],
     contexts: Sequence[tuple[int, str, str]],
+    evaluated_at_ms: int | None = None,
 ) -> tuple[bool, float, str, float | None]:
-    target = position.entry_price * (1 - FAST_LOSS_PCT / 100)
-    crossed = point <= target and (previous is None or previous > target)
-    if not crossed:
+    target, _ = fast_drop_values(position.entry_price, None)
+    if not loss_reached(position.entry_price, point):
         return False, target, "UNAVAILABLE", None
+    # OHLC has no intraminute tick timestamps. Freeze context at the minute's
+    # opening instant for all modeled points: no candle closing during it is visible.
+    evaluated_at_ms = boundary_ms-MINUTE_MS if evaluated_at_ms is None else evaluated_at_ms
     reference = minute_index.get(boundary_ms - 5 * MINUTE_MS)
-    velocity = ((target / reference.close - 1) * 100 / 5) if reference and reference.close else None
-    ema_context, _ = context_before(contexts, boundary_ms)
-    eligible = velocity is not None and velocity <= FAST_VELOCITY_5M + 1e-12 and ema_context in FAST_EMA
+    initial = reference.close if reference and closed_before(reference.close_time_ms, evaluated_at_ms) else None
+    target, velocity = fast_drop_values(position.entry_price, initial)
+    ema_context, _ = context_before(contexts, evaluated_at_ms)
+    eligible = fast_drop_allowed(velocity, ema_context)
     return eligible, target, ema_context, velocity
 
 
@@ -92,11 +97,12 @@ def process_candle_systemic(
             fast = False
             target = position.entry_price * (1 - FAST_LOSS_PCT / 100)
             if fast_enabled and position.pair_id not in fast_evaluated:
-                fast, target, _, _ = _fast_decision(position, candle.boundary_ms, point, previous, minute_index, contexts)
-                if point <= target and (previous is None or previous > target):
+                fast, target, _, velocity = _fast_decision(position, candle.boundary_ms, point, previous, minute_index, contexts,
+                                                         evaluated_at_ms=candle.open_time_ms)
+                if loss_reached(position.entry_price, point) and velocity is not None:
                     fast_evaluated.add(position.pair_id)
             # On a descending segment, the higher crossed threshold happens first.
-            if fast and (not stop_crossed or target > normal_stop):
+            if fast and not normal_stop_precedes_fast(normal_stop, target):
                 replay_position.client.current_price = target
                 position.on_tick(target, _iso(candle.boundary_ms))
                 if position.status == "OPEN":

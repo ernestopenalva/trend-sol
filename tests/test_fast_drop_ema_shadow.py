@@ -9,6 +9,13 @@ from src.monitor.entry_engine import EntrySignal
 from tests.test_circuit_breaker_shadow import _config
 
 
+CONTEXT_CLOSE = 1790813099999  # 2026-10-01 00:04:59.999 UTC
+
+
+def _snapshot(context):
+    return {'tf_5m': {'ema_context': context, 'latest_closed_at_ms': CONTEXT_CLOSE}}
+
+
 class FastDropTests(unittest.TestCase):
     def make(self, root, capital=100):
         config = _config()
@@ -22,7 +29,7 @@ class FastDropTests(unittest.TestCase):
     def open(self, shadow):
         signal = EntrySignal('SOLUSDT', 100., '2026-10-01T00:05:00+00:00',
                              1790813040000, .2, '1m', 14)
-        self.assertTrue(shadow.on_approved_real_a_signal(signal, {'tf_5m': {'ema_context': 'LON'}}))
+        self.assertTrue(shadow.on_approved_real_a_signal(signal, _snapshot('LON')))
 
     def reference(self, shadow, price=100.):
         from datetime import datetime
@@ -36,7 +43,7 @@ class FastDropTests(unittest.TestCase):
             ('SHO', 99.6, 100., False), ('BEA', 99.5, 99.6, False)):
             with self.subTest(context=context, price=price, reference=reference), TemporaryDirectory() as tmp:
                 shadow, _ = self.make(Path(tmp)); self.open(shadow); self.reference(shadow, reference)
-                shadow.on_closed_5m({'tf_5m': {'ema_context': context}})
+                shadow.on_closed_5m(_snapshot(context))
                 shadow.on_tick(price, '2026-10-01T00:06:01+00:00')
                 self.assertEqual(len(shadow.closed_records), int(fires))
                 if fires:
@@ -52,7 +59,7 @@ class FastDropTests(unittest.TestCase):
             root = Path(tmp); shadow, config = self.make(root); self.open(shadow); self.reference(shadow)
             control = CircuitBreakerShadow(root, config, JsonlLogger(root, config), None, be_off=True)
             self.open(control)
-            shadow.on_closed_5m({'tf_5m': {'ema_context': 'SHO'}})
+            shadow.on_closed_5m(_snapshot('SHO'))
             shadow.on_tick(99.5, '2026-10-01T00:06:01+00:00')
             self.assertEqual(shadow.open_positions, [])
             control.on_tick(99.5, '2026-10-01T00:06:01+00:00')
@@ -73,7 +80,7 @@ class FastDropTests(unittest.TestCase):
             shadow.on_tick(99.5, '2026-10-01T00:06:01+00:00')  # LON at first crossing
             restored, _ = self.make(root)
             self.assertTrue(restored.open_positions[0].fast_drop_evaluated)
-            restored.on_closed_5m({'tf_5m': {'ema_context': 'SHO'}})
+            restored.on_closed_5m(_snapshot('SHO'))
             restored.on_tick(99.4, '2026-10-01T00:06:02+00:00')
             self.assertEqual(restored.closed_records, [])
 
@@ -82,7 +89,7 @@ class FastDropTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             shadow, _ = self.make(Path(tmp), capital=10)
             self.open(shadow); self.reference(shadow)
-            shadow.on_closed_5m({'tf_5m': {'ema_context': 'SHO'}})
+            shadow.on_closed_5m(_snapshot('SHO'))
             shadow.on_tick(99.5, '2026-10-01T00:06:01+00:00')
             shadow.on_tick(99.5, '2026-10-01T00:07:01+00:00')
             self.assertTrue(shadow.on_signal(EntrySignal('SOLUSDT', 100., '2026-10-01T00:10:00+00:00',

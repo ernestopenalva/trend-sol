@@ -579,7 +579,7 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime) -> None:
                              'ts': row.get('opened_at') or row.get('open_ts')})
     rows = accepted_trade_rows(accepted, closed, opened)
     print("\nACCEPTED TRADES")
-    print("source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | EMA context | MACD context | exit reason")
+    print("source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason")
     for item in rows:
         is_open = item['status'] == 'OPEN'
         hs_pct = 'OPEN' if is_open else (f"{item['hs_pct']:+.2f}%" if item['hs_pct'] is not None else 'N/A')
@@ -587,9 +587,10 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime) -> None:
               f"{'OPEN' if is_open else _fmt(item['closed_at'])} | {'OPEN' if is_open else _fmt_price(item['exit'])} | "
               f"{hs_pct} | "
               f"{'OPEN' if is_open else _fmt_net(item['net'])} | {item['ema']} | {item['macd']} | "
+              f"{'OPEN' if is_open else item['exit_ema']} | {'OPEN' if is_open else item['exit_macd']} | "
               f"{'OPEN' if is_open else item['exit_reason']}")
     if not rows:
-        print("N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A")
+        print("N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A")
 
 
 def accepted_trade_rows(
@@ -611,12 +612,15 @@ def accepted_trade_rows(
         row = final or opened.get(source) or {}
         entry = _number(row.get('entry_price') if row.get('entry_price') is not None else event.get('price'))
         exit_price = _number(final.get('exit_price')) if final else None
+        exit_context = _recorded_exit_context(final) if final else {}
         output.append({
             "opened_at": parse_time(row.get("opened_at") or row.get("open_ts") or event.get("ts")),
             "closed_at": parse_time(final.get("closed_at") or final.get("close_ts")) if final else None,
             "source": source,
             "ema": str(event.get("ema_context") or "N/A"),
             "macd": str(event.get("macd_context") or "N/A"),
+            "exit_ema": str(exit_context.get('ema_context') or 'N/A'),
+            "exit_macd": str(exit_context.get('macd_context') or 'N/A'),
             "entry": _number(row.get("entry_price") if row.get("entry_price") is not None else event.get("price")),
             "exit": _number(final.get("exit_price")) if final else None,
             "hs_pct": (exit_price / entry - 1) * 100 if final and entry not in (None, 0) and exit_price is not None else None,
@@ -625,6 +629,18 @@ def accepted_trade_rows(
             "status": "CLOSED" if final else "OPEN",
         })
     return sorted(output, key=lambda row: (row["opened_at"] or datetime.min.replace(tzinfo=timezone.utc), row["source"]))
+
+
+def _recorded_exit_context(row: dict[str, Any]) -> dict[str, Any]:
+    """Read the captured closed 5m snapshot; never reconstruct historical context."""
+    snapshot = row.get('market_context_exit') or {}
+    context = snapshot.get('tf_5m') or {}
+    closed_ms = _number(context.get('latest_closed_at_ms'))
+    exit_at = parse_time(row.get('closed_at') or row.get('close_ts'))
+    # Closed-candle callbacks can label the exit with the candle's own close time.
+    if exit_at is None or closed_ms is None or closed_ms > exit_at.timestamp()*1000:
+        return {}
+    return context
 
 
 def _control_result(rows: list[dict[str, Any]], expected: int) -> str:
