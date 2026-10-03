@@ -432,7 +432,11 @@ class Monitor:
                 snapshot = self._safe_refresh_market_context()
                 if timeframe == "5m":
                     self.registry.record_market_context(snapshot)
-                    for shadow in getattr(self, "forward_experiment_shadows", []):
+                    for shadow in (
+                        self.circuit_breaker_shadow, self.be_off_cb_shadow,
+                        self.be030_shadow, self.be_off_shadow,
+                        *getattr(self, "forward_experiment_shadows", []),
+                    ):
                         try:
                             shadow.on_closed_5m(snapshot)
                         except Exception as exc:

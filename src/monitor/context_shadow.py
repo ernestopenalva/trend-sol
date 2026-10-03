@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, Optional
 
 from src.logging_utils import JsonlLogger, now_iso
 from src.monitor.entry_engine import EntryEngine, EntrySignal
+from src.monitor.exit_context_telemetry import ExitContextTelemetry
 from src.position.bot_full_engine import BotFullExitPosition
 from src.position.phantom_execution import PhantomExecutionClient
 from src.telemetry_writer import TelemetryWriter
@@ -52,7 +53,7 @@ class ContextGateEntryEngine(EntryEngine):
         return super()._gate_trend()
 
 
-class RealAContextShadow:
+class RealAContextShadow(ExitContextTelemetry):
     """Order-free shadow whose only delta from REAL_A is a context predicate."""
 
     def __init__(
@@ -85,6 +86,7 @@ class RealAContextShadow:
         self.blocked_spacing = 0
         self.max_simultaneous_positions = 0
         self.latest_market_context: Optional[Dict[str, Any]] = None
+        self._exit_context_history: list[dict] = []
         self.engine = ContextGateEntryEngine(str(config["symbol"]), config, logger, predicate, self._record_context_block)
         if self.enabled:
             self._load_state()
@@ -201,6 +203,7 @@ class RealAContextShadow:
             return
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            self._exit_context_history = data.get('exit_context_history', [])
             self.entries_by_bucket = {int(key): int(value) for key, value in (data.get("entries_by_bucket") or {}).items()}
             for name in ("blocked_context", "blocked_context_unavailable", "blocked_capacity", "blocked_same_5m", "blocked_spacing", "max_simultaneous_positions"):
                 setattr(self, name, int(data.get(name, 0)))
@@ -220,6 +223,7 @@ class RealAContextShadow:
         latest = max(self.entries_by_bucket, default=0)
         payload = {"updated_at": now_iso(), "entries_by_bucket": {str(key): value for key, value in self.entries_by_bucket.items() if key >= latest - 86_400_000}, "positions": [item.to_state() for item in self.open_positions]}
         payload.update({name: getattr(self, name) for name in ("blocked_context", "blocked_context_unavailable", "blocked_capacity", "blocked_same_5m", "blocked_spacing", "max_simultaneous_positions")})
+        payload['exit_context_history'] = self._exit_context_history
         tmp = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.state_path)

@@ -30,6 +30,16 @@ COHORT = datetime(2026, 9, 27, 23, 7, 29, tzinfo=timezone.utc)
 
 
 class ForwardExperimentReportTests(unittest.TestCase):
+    def test_summary_exit_shares_use_all_closed_trades(self):
+        rows=[{'exit_reason': reason} for reason in
+              ('HARD_STOP','PROFIT_LOCK','TRAILING','FAST_DROP')]
+        with patch.object(report, '_records', return_value=rows), patch.object(report, '_state', return_value={}), patch.object(report, 'max_simultaneous', return_value=0):
+            cells=report.summary_line(report.CONTROL, COHORT).split(' | ')
+            self.assertEqual(cells[7:13], ['1','25.0%','1','25.0%','1','25.0%'])
+        with patch.object(report, '_records', return_value=[]), patch.object(report, '_state', return_value={}), patch.object(report, 'max_simultaneous', return_value=0):
+            cells=report.summary_line(report.CONTROL, COHORT).split(' | ')
+            self.assertEqual(cells[7:13], ['0','N/A','0','N/A','0','N/A'])
+
     def test_entry_and_exit_contexts_are_separate_and_closed_at_exit(self):
         events = [{'event':'OPEN','source_candle_open_time':1,'ema_context':'BUL','macd_context':'BU+',
                    'ts':'2026-10-01T00:05:00Z'}]
@@ -42,10 +52,10 @@ class ForwardExperimentReportTests(unittest.TestCase):
         self.assertEqual((row['exit_ema'],row['exit_macd']),('SHO','BE-'))
         final['market_context_exit']['tf_5m']['latest_closed_at_ms'] = 1790813699999
         row = accepted_trade_rows(events,[final],[])[0]
-        self.assertEqual((row['exit_ema'],row['exit_macd']),('N/A','N/A'))
+        self.assertEqual((row['exit_ema'],row['exit_macd']),('UNAVAILABLE','UNAVAILABLE'))
         final['market_context_exit'] = None
         row = accepted_trade_rows(events,[final],[])[0]
-        self.assertEqual((row['exit_ema'],row['exit_macd']),('N/A','N/A'))
+        self.assertEqual((row['exit_ema'],row['exit_macd']),('UNAVAILABLE','UNAVAILABLE'))
 
     def test_actual_shadow_persists_exit_snapshot_for_report(self):
         from src.logging_utils import JsonlLogger
@@ -174,7 +184,7 @@ class ForwardExperimentReportTests(unittest.TestCase):
                     automatic.assert_not_called()
                     value=output.getvalue()
                     self.assertIn('since 30/09/2026 22:03:09 BRT',value)
-                    self.assertIn('BE_OFF_CB_SHADOW | 2 | 1 | $+1.0000 | $+0.5000 | 2.000 | $1.0000 | 1 | 1 | 0',value)
+                    self.assertIn('BE_OFF_CB_SHADOW | 2 | 1 | $+1.0000 | $+0.5000 | 2.000 | $1.0000 | 1 | 50.0% | 1 | 50.0% | 0 | 0.0%',value)
                     self.assertIn(' | 15.0m | 3',value)
                     self.assertNotIn('$-50.0000',value)
                     if experiment:
@@ -482,8 +492,8 @@ class ForwardExperimentReportTests(unittest.TestCase):
                 with redirect_stdout(ema_output):
                     report.print_ema_macd(ema, floor, False)
 
-            expected_header = "arm | closed | open | net | net $/trade | PF | DD $ | HS | PL | TRAIL | median age | max simultaneous"
-            expected_control = "BE_OFF_CB_SHADOW | 2 | 0 | $+0.5000 | $+0.2500 | 2.000 | $0.5000 | 1 | 1 | 0 | 12.5m | 2"
+            expected_header = "arm | closed | open | net | net $/trade | PF | DD $ | HS | HS% | PL | PL% | TRAIL | TRAIL% | median age | max simultaneous"
+            expected_control = "BE_OFF_CB_SHADOW | 2 | 0 | $+0.5000 | $+0.2500 | 2.000 | $0.5000 | 1 | 50.0% | 1 | 50.0% | 0 | 0.0% | 12.5m | 2"
             for text in (macd_output.getvalue(), ema_output.getvalue()):
                 self.assertIn(expected_header, text)
                 self.assertIn(expected_control, text)

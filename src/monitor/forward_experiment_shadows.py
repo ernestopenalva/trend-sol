@@ -398,7 +398,7 @@ class ExperimentalRiskShadow(CircuitBreakerShadow):
     def _close_and_record(self, position, price: float, observed_at: str | None, reason: str, reference: float) -> None:
         if position.status != "OPEN":
             return
-        position.market_context_exit = deepcopy(self.latest_market_context)
+        position.market_context_exit = self._exit_context_at(observed_at or datetime.now(timezone.utc))
         position._cb_market_ts = observed_at
         event = position._close_at_market(price, reason, observed_at or _iso(datetime.now(timezone.utc)), reference)
         if not event or position.status != "CLOSED":

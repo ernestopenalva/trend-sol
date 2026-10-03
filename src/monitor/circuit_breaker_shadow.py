@@ -183,12 +183,6 @@ class CircuitBreakerShadow(RealAContextShadow):
         """Never evaluate a second entry engine; only the shared signal is used."""
         return None
 
-    def on_closed_5m(self, snapshot: Dict[str, Any] | None) -> None:
-        """Refresh shared closed-candle context without running another entry engine."""
-        if self.enabled and snapshot:
-            self.latest_market_context = deepcopy(snapshot)
-            self._save_state()
-
     def on_approved_real_a_signal(
         self, signal: EntrySignal, market_context: Dict[str, Any] | None
     ) -> bool:
@@ -222,7 +216,7 @@ class CircuitBreakerShadow(RealAContextShadow):
             event = position.on_tick(price, market_ts=observed_at)
             if not event or position.status != "CLOSED":
                 continue
-            position.market_context_exit = deepcopy(self.latest_market_context)
+            position.market_context_exit = self._exit_context_at(moment)
             record = self.ledger._record(position, self.config, 'CIRCUIT_BREAKER_SHADOW')
             self.closed_records.append(record)
             # All closes of [minute start, minute end) enter the next boundary,
@@ -273,6 +267,7 @@ class CircuitBreakerShadow(RealAContextShadow):
             if item['kind'] == 'tick':
                 result = self._process_tick(item['price'], item['observed_at'])
             elif item['kind'] == 'signal':
+                self._remember_exit_context(item.get('context'))
                 self.latest_market_context = item.get('context')
                 result = self._process_signal(EntrySignal(**item['signal']))
             elif item['kind'] == 'real_outcome':
@@ -419,6 +414,7 @@ class CircuitBreakerShadow(RealAContextShadow):
             setattr(self, name, data.get(name, getattr(self, name)))
         self.market_points = [(_parse_ts(item[0]), float(item[1])) for item in data.get("market_points", []) if _parse_ts(item[0])]
         self.latest_market_context = data.get('latest_market_context')
+        self._exit_context_history = data.get('exit_context_history', [])
         self._check_reconciliation()
         self._project_committed()
 
@@ -451,6 +447,7 @@ class CircuitBreakerShadow(RealAContextShadow):
         payload: Dict[str, Any] = {
             'cb_schema':2, 'sequence':self.sequence, 'clock':self.clock.to_state(), 'pending_closes':self.pending_closes,
             'latest_market_context':self.latest_market_context,
+            'exit_context_history':self._exit_context_history,
             'trigger_price':self.trigger_price,
             'closed_records':self.closed_records, 'audit_events':self.audit_events,
             'last_input_ms':self.last_input_ms, 'last_signal_source':self.last_signal_source,

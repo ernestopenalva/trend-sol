@@ -50,6 +50,7 @@ class RealALadderShadow(RealAContextShadow):
         self._save_state()
 
     def on_approved_real_a_signal(self, signal: EntrySignal, market_context: Dict[str, Any] | None) -> bool:
+        self._remember_exit_context(market_context)
         self.latest_market_context = deepcopy(market_context) if market_context else self.latest_market_context
         return self.on_signal(signal)
 
@@ -97,7 +98,7 @@ class RealALadderShadow(RealAContextShadow):
             if not isinstance(client, PhantomExecutionClient): continue
             client.set_price(price); event = position.on_tick(price, market_ts=observed_at)
             if not event or position.status != "CLOSED": continue
-            position.market_context_exit = deepcopy(self.latest_market_context)
+            position.market_context_exit = self._exit_context_at(observed_at)
             self.ledger.append_closed_ladder_shadow_trade(position, self.config)
             self._event("CLOSE", pair_id=position.pair_id, reason=position.exit_reason, variant=self.variant)
             changed = True

@@ -44,6 +44,29 @@ class SystemicRun:
     result: ReplayResult
     guard: TrackingCircuitGuard
     simultaneous_by_month: dict[str, int] = field(default_factory=dict)
+    admission_audit: list[dict[str, Any]] = field(default_factory=list)
+    hs_pause_boundaries: set[int] = field(default_factory=set)
+    hs_pause_intervals: list[tuple[int, int]] = field(default_factory=list)
+
+
+class PostHsPause:
+    """Replay-only, fixed one-hour admission pause; never closes a position."""
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        self.cursor = 0
+        self.until = -1
+        self.intervals: list[tuple[int, int]] = []
+
+    def update(self, trades: Sequence[ReplayTrade]) -> None:
+        for trade in trades[self.cursor:]:
+            if self.enabled and trade.exit_reason == 'HARD_STOP':
+                end = trade.closed_ms + 60 * MINUTE_MS
+                self.until = max(self.until, end)
+                self.intervals.append((trade.closed_ms, end))
+        self.cursor = len(trades)
+
+    def active(self, at: int) -> bool:
+        return self.enabled and at < self.until
 
 
 def _iso(value_ms: int) -> str:
@@ -123,7 +146,10 @@ def run_systemic(
     *, name: str, config: dict[str, Any], signals: Sequence[SignalEvent],
     candles: Sequence[MarketCandle], contexts: Sequence[tuple[int, str, str]],
     start_ms: int, end_ms: int, path: str, spread_bps: float, fast_enabled: bool,
+    hs_pause_minutes: int = 0,
 ) -> SystemicRun:
+    if hs_pause_minutes not in (0, 60):
+        raise ValueError('Only the prespecified 60-minute HS pause is supported')
     groups: dict[int, list[SignalEvent]] = {}
     for event in signals:
         groups.setdefault(event.boundary_ms, []).append(event)
@@ -141,6 +167,9 @@ def run_systemic(
     guard = TrackingCircuitGuard(capital, notional)
     fast_evaluated: set[str] = set()
     simultaneous: dict[str, int] = {}
+    pause = PostHsPause(hs_pause_minutes == 60)
+    paused_boundaries: set[int] = set()
+    audit: list[dict[str, Any]] = []
     sequence = 0
     boundary = ceil_ms(start_ms, MINUTE_MS)
     while boundary <= end_ms:
@@ -152,18 +181,34 @@ def run_systemic(
         if len(positions) >= max_positions:
             result.full_slot_minutes += 1
         admission_allowed = guard.allows(boundary, result)
+        pause.update(result.trades)
+        pause_active = pause.active(boundary)
+        if pause_active:
+            paused_boundaries.add(boundary)
         admitted = 0
         for event in groups.get(boundary, []):
+            decision = {'at_ms': boundary, 'source_candle': event.signal.source_candle_open_time,
+                        'cb_active': not admission_allowed, 'hs_pause_active': pause_active}
+            audit.append(decision)
             if not admission_allowed:
+                decision['decision'] = 'CB'
                 result.blocked_circuit += 1
                 continue
+            if pause_active:
+                decision['decision'] = 'HS_PAUSE'
+                decision['otherwise_admissible'] = (len(positions) < max_positions and
+                    admitted < max_per_candle and _passes_spacing(config, event.signal, positions))
+                continue
             if len(positions) >= max_positions:
+                decision['decision'] = 'CAPACITY'
                 result.blocked_slots += 1
                 continue
             if admitted >= max_per_candle:
+                decision['decision'] = 'CANDLE_LIMIT'
                 result.blocked_candle_limit += 1
                 continue
             if not _passes_spacing(config, event.signal, positions):
+                decision['decision'] = 'SPACING'
                 result.blocked_spacing += 1
                 continue
             sequence += 1
@@ -181,13 +226,14 @@ def run_systemic(
             )
             positions.append(OpenPosition(position, client, boundary, notional))
             result.entry_times.append((boundary, entry_price))
+            decision['decision'] = 'ADMITTED'
             admitted += 1
             result.max_simultaneous_positions = max(result.max_simultaneous_positions, len(positions))
         month = month_of(boundary)
         simultaneous[month] = max(simultaneous.get(month, 0), len(positions))
         boundary += MINUTE_MS
     result.open_positions = positions
-    return SystemicRun(result, guard, simultaneous)
+    return SystemicRun(result, guard, simultaneous, audit, paused_boundaries, pause.intervals)
 
 
 def _exit_bucket(reason: str) -> str:

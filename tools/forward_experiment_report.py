@@ -23,7 +23,7 @@ COHORT_STARTED_TEXT = "27/09/2026 20:07:29"
 COMPARABILITY_FLOOR_TEXT = "28/09/2026 01:47:00"
 # Kept as a compatibility alias for imports made by earlier versions/tests.
 DEFAULT_SINCE_TEXT = COHORT_STARTED_TEXT
-SUMMARY_HEADER = "arm | closed | open | net | net $/trade | PF | DD $ | HS | PL | TRAIL | median age | max simultaneous"
+SUMMARY_HEADER = "arm | closed | open | net | net $/trade | PF | DD $ | HS | HS% | PL | PL% | TRAIL | TRAIL% | median age | max simultaneous"
 ADMISSION_CUTOFF = ContextVar('admission_cutoff', default=None)
 
 
@@ -434,9 +434,12 @@ def summary_line(arm: Arm, since: datetime) -> str:
     hs = sum(count for reason, count in reasons.items() if reason.startswith("HARD_STOP"))
     pl = sum(count for reason, count in reasons.items() if reason.startswith("PROFIT_LOCK"))
     trail = sum(count for reason, count in reasons.items() if reason.startswith("TRAILING"))
+    # Exit shares use all closed trades, including experiment-specific exits.
+    def exit_share(count: int) -> str:
+        return f"{100 * count / len(rows):.1f}%" if rows else "N/A"
     opened = len(_open_positions(state, since))
     maximum = max_simultaneous(arm, since)
-    return f"{arm.name} | {len(rows)} | {opened} | {_sum_net(rows)} | {net_trade} | {pf} | {dd} | {hs} | {pl} | {trail} | {med_age} | {maximum}"
+    return f"{arm.name} | {len(rows)} | {opened} | {_sum_net(rows)} | {net_trade} | {pf} | {dd} | {hs} | {exit_share(hs)} | {pl} | {exit_share(pl)} | {trail} | {exit_share(trail)} | {med_age} | {maximum}"
 
 
 def print_macd_bu_minus(arm: Arm, since: datetime) -> None:
@@ -619,8 +622,8 @@ def accepted_trade_rows(
             "source": source,
             "ema": str(event.get("ema_context") or "N/A"),
             "macd": str(event.get("macd_context") or "N/A"),
-            "exit_ema": str(exit_context.get('ema_context') or 'N/A'),
-            "exit_macd": str(exit_context.get('macd_context') or 'N/A'),
+            "exit_ema": str(exit_context.get('ema_context') or 'UNAVAILABLE'),
+            "exit_macd": str(exit_context.get('macd_context') or 'UNAVAILABLE'),
             "entry": _number(row.get("entry_price") if row.get("entry_price") is not None else event.get("price")),
             "exit": _number(final.get("exit_price")) if final else None,
             "hs_pct": (exit_price / entry - 1) * 100 if final and entry not in (None, 0) and exit_price is not None else None,
@@ -638,8 +641,16 @@ def _recorded_exit_context(row: dict[str, Any]) -> dict[str, Any]:
     closed_ms = _number(context.get('latest_closed_at_ms'))
     exit_at = parse_time(row.get('closed_at') or row.get('close_ts'))
     # Closed-candle callbacks can label the exit with the candle's own close time.
-    if exit_at is None or closed_ms is None or closed_ms > exit_at.timestamp()*1000:
-        return {}
+    if exit_at is None or closed_ms is None or context.get('closed') is False or closed_ms > exit_at.timestamp()*1000:
+        return {'ema_context':'UNAVAILABLE', 'macd_context':'UNAVAILABLE'}
+    exit_ms = int(exit_at.timestamp()*1000)
+    # Binance close time is boundary minus 1ms. At a candle-close callback
+    # timestamp itself, that candle is already eligible (inclusive convention).
+    expected_close = ((exit_ms + 1)//300_000)*300_000 - 1
+    if closed_ms < expected_close:
+        return {'ema_context':'STALE', 'macd_context':'STALE'}
+    if closed_ms != expected_close:
+        return {'ema_context':'UNAVAILABLE', 'macd_context':'UNAVAILABLE'}
     return context
 
 
