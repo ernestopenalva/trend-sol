@@ -131,7 +131,7 @@ class FastDropEmaShadow(CircuitBreakerShadow):
                                 'reference_price': reference, 'velocity_target_price': target,
                                 'ema_latest_closed_at_ms': snapshot['tf_5m']['latest_closed_at_ms']})
                 record.update(details)
-                self.closed_records.append(record)
+                self._append_closed_record(record)
                 net = float(record['net_pnl_pct']) * float(position.position_notional_usdt) / 100
                 self.pending_closes.append({'boundary': boundary, 'net': net, 'pair_id': position.pair_id})
                 self._event('FAST_DROP', pair_id=position.pair_id,
@@ -351,7 +351,7 @@ class ExperimentalRiskShadow(CircuitBreakerShadow):
                 self._finish_elastic_clock(position, position.close_ts or observed_at)
                 for record in self.closed_records:
                     if record.get("pair_id") == position.pair_id:
-                        record.update({
+                        self._update_closed_record(record, {
                             "hs_elastic": True,
                             "hs_original_at": position.hs_original_at,
                             "hs_original_pnl_pct": position.hs_original_pnl_pct,
@@ -408,7 +408,7 @@ class ExperimentalRiskShadow(CircuitBreakerShadow):
         record = self.ledger._record(position, self.config, "CIRCUIT_BREAKER_SHADOW")
         record["control_pair_id"] = f"beoffcb-{position.source_candle_open_time}"
         record["control_exit_pending"] = True
-        self.closed_records.append(record)
+        self._append_closed_record(record)
         moment = _parse_ts(position.close_ts) or datetime.now(timezone.utc)
         stamp = int(moment.timestamp() * 1000)
         boundary = stamp - stamp % 60_000 + 60_000

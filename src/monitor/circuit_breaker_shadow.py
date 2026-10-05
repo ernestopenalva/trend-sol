@@ -70,6 +70,9 @@ class CircuitBreakerShadow(RealAContextShadow):
         self.pending_closes: list[dict] = []
         self.closed_records: list[dict] = []
         self.audit_events: list[dict] = []
+        # Volatile only: restore must verify/repair both committed projections.
+        # Never reset at transaction start: a failed projection remains dirty.
+        self._projection_dirty = {'ledger': True, 'events': True}
         self.last_input_ms: int | None = None
         self.last_signal_source: int | None = None
         self._event_moment: datetime | None = None
@@ -218,7 +221,7 @@ class CircuitBreakerShadow(RealAContextShadow):
                 continue
             position.market_context_exit = self._exit_context_at(moment)
             record = self.ledger._record(position, self.config, 'CIRCUIT_BREAKER_SHADOW')
-            self.closed_records.append(record)
+            self._append_closed_record(record)
             # All closes of [minute start, minute end) enter the next boundary,
             # before that boundary's shared signal, exactly once and in input order.
             stamp = int(moment.timestamp()*1000)
@@ -385,7 +388,7 @@ class CircuitBreakerShadow(RealAContextShadow):
     def _event_at(self, moment: datetime, event: str, **fields: Any) -> None:
         payload = {"ts": _iso(moment), "strategy": self.strategy, "shadow_kind": self.shadow_kind, "event": event, **fields}
         payload['event_id'] = f'cb-event-{len(self.audit_events)+1}'
-        self.audit_events.append(payload)
+        self._append_audit_event(payload)
 
     def _event(self, event: str, **fields: Any) -> None:
         """Route inherited admission events to the CB audit stream, not context telemetry."""
@@ -405,6 +408,7 @@ class CircuitBreakerShadow(RealAContextShadow):
         self.pending_closes = data['pending_closes']
         self.closed_records = data['closed_records']
         self.audit_events = data['audit_events']
+        self._projection_dirty.update(ledger=True, events=True)
         self.last_input_ms = data.get('last_input_ms')
         self.last_signal_source = data.get('last_signal_source')
         self.trigger_price = data.get('trigger_price')
@@ -468,28 +472,50 @@ class CircuitBreakerShadow(RealAContextShadow):
     def _extra_state(self) -> dict:
         return {}
 
+    def _append_closed_record(self, record: dict) -> None:
+        self._projection_dirty['ledger'] = True
+        self.closed_records.append(record)
+
+    def _update_closed_record(self, record: dict, fields: dict) -> None:
+        """In-place updates count even when record/list sizes do not change."""
+        self._projection_dirty['ledger'] = True
+        record.update(fields)
+
+    def _append_audit_event(self, event: dict) -> None:
+        self._projection_dirty['events'] = True
+        self.audit_events.append(event)
+
+    def _update_audit_event(self, event: dict, fields: dict) -> None:
+        self._projection_dirty['events'] = True
+        event.update(fields)
+
     def _project_committed(self):
         """Ledger/events are idempotent projections of the committed snapshot.
 
         Crash after state commit and before projection is repaired at restore.
         No engine state is reconstructed from the possibly lagging projection.
         """
-        for path, records in (
-            (self.ledger.path, self.closed_records),
-            (self.audit_path, self.audit_events),
+        for name, path, records in (
+            ('ledger', self.ledger.path, self.closed_records),
+            ('events', self.audit_path, self.audit_events),
         ):
+            if not self._projection_dirty[name]:
+                continue
             content = ''.join(json.dumps(x, ensure_ascii=False)+'\n' for x in records)
             if getattr(self, '_projected_'+str(path), None) == content:
+                self._projection_dirty[name] = False
                 continue
             if path.exists():
                 existing = path.read_text(encoding='utf-8')
                 if existing == content:
                     setattr(self, '_projected_'+str(path), content)
+                    self._projection_dirty[name] = False
                     continue
                 if existing and not content.startswith(existing):
                     raise ValueError(f'CB projection diverges from committed state: {path}')
             _atomic_json(path, content)
             setattr(self, '_projected_'+str(path), content)
+            self._projection_dirty[name] = False
 
 
 def _parse_ts(value: Any) -> datetime | None:
