@@ -312,6 +312,23 @@ instrumentation:
     state_file: "data/state/be_off_cb_shadow.json"
     ledger_file: "data/trades/trades_be_off_cb_shadow.jsonl"
     events_file: "data/telemetry/be_off_cb_shadow_events.jsonl"
+  be_off_cb_act20_gap5_shadow:
+    # Historical selection 2026-06-01 to 2026-10-02 22:28 BRT; forward is first OOS.
+    enabled: true
+    accept_new_entries: true
+    trail_activation_atr: 20
+    trail_gap_atr: 5
+    state_file: "data/state/be_off_cb_act20_gap5_shadow.json"
+    ledger_file: "data/trades/trades_be_off_cb_act20_gap5_shadow.jsonl"
+    events_file: "data/telemetry/be_off_cb_act20_gap5_shadow_events.jsonl"
+  be_off_cb_act10_gap13_shadow:
+    enabled: true
+    accept_new_entries: true
+    trail_activation_atr: 10
+    trail_gap_atr: 13
+    state_file: "data/state/be_off_cb_act10_gap13_shadow.json"
+    ledger_file: "data/trades/trades_be_off_cb_act10_gap13_shadow.jsonl"
+    events_file: "data/telemetry/be_off_cb_act10_gap13_shadow_events.jsonl"
   hs_bull_elastic_shadow:
     enabled: true
     accept_new_entries: true

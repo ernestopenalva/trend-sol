@@ -30,6 +30,7 @@ from src.monitor.context_predicates import passes_dmi15_trajectory, passes_slow_
 from src.monitor.context_shadow import RealAContextShadow
 from src.monitor.h2_exposure_shadow import H2ExposureShadow
 from src.monitor.circuit_breaker_shadow import CircuitBreakerShadow
+from src.monitor.trail_activation_gap_shadow import TrailActivationGapShadow
 from src.monitor.ladder_shadow import RealALadderShadow
 from src.monitor.forward_experiment_shadows import ExperimentalRiskShadow, PolicyShadow, FastDropEmaShadow, EmaMacdHist1mShadow
 from src.monitor.gcr_shadow import GcrShadowRegistry
@@ -124,6 +125,12 @@ class Monitor:
             pair_prefix="beoffcb", be_off=True, cohort_started_at=self.ladder_shadow_cohort_started_at,
         )
         self.forward_experiment_shadows = [
+            TrailActivationGapShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
+                settings_key="be_off_cb_act20_gap5_shadow", strategy="BE_OFF_CB_ACT20_GAP5_SHADOW",
+                pair_prefix="act20gap5", cohort_started_at=self.ladder_shadow_cohort_started_at),
+            TrailActivationGapShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
+                settings_key="be_off_cb_act10_gap13_shadow", strategy="BE_OFF_CB_ACT10_GAP13_SHADOW",
+                pair_prefix="act10gap13", cohort_started_at=self.ladder_shadow_cohort_started_at),
             EmaMacdHist1mShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
                                cohort_started_at=self.ladder_shadow_cohort_started_at),
             FastDropEmaShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
@@ -280,6 +287,9 @@ class Monitor:
             self._validate_startup()
             self._load_historical_candles()
             initial_context = self._safe_refresh_market_context()
+            for shadow in self.forward_experiment_shadows:
+                if isinstance(shadow, TrailActivationGapShadow):
+                    shadow.on_closed_5m(initial_context)
             self.registry.record_market_context(initial_context)
             self.gcr_shadow.record_market_context(initial_context)
             self.dmi15_shadow.record_market_context(initial_context)

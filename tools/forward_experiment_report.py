@@ -49,7 +49,12 @@ REAL_A = Arm('REAL_A', 'data/trades/trades_B.jsonl', 'data/state/open_positions.
 DMI15_CONTEXT = Arm('DMI15_TRAJECTORY_CONTEXT_SHADOW',
                     'data/trades/trades_dmi15_trajectory_context_shadow.jsonl',
                     'data/state/dmi15_trajectory_context_shadow.json', '')
+ACT20_GAP5 = Arm('BE_OFF_CB_ACT20_GAP5_SHADOW', 'data/trades/trades_be_off_cb_act20_gap5_shadow.jsonl',
+                'data/state/be_off_cb_act20_gap5_shadow.json', 'data/telemetry/be_off_cb_act20_gap5_shadow_events.jsonl')
+ACT10_GAP13 = Arm('BE_OFF_CB_ACT10_GAP13_SHADOW', 'data/trades/trades_be_off_cb_act10_gap13_shadow.jsonl',
+                 'data/state/be_off_cb_act10_gap13_shadow.json', 'data/telemetry/be_off_cb_act10_gap13_shadow_events.jsonl')
 EXPERIMENTS = {
+    'trail_activation_gap': ACT20_GAP5,
     'ema_macd_hist_1m': Arm('EMA_MACD_HIST_1M_SHADOW', 'data/trades/trades_ema_macd_hist_1m_shadow.jsonl',
                            'data/state/ema_macd_hist_1m_shadow.json', 'data/telemetry/ema_macd_hist_1m_shadow_events.jsonl'),
     'fast_drop': Arm('BE_OFF_CB_FAST_DROP_EMA_SHADOW', 'data/trades/trades_be_off_cb_fast_drop_ema_shadow.jsonl',
@@ -114,6 +119,9 @@ def _run_report(args, cutoff):
     since = window.comparable_since
     if args.experiment is None:
         print_summary(since)
+        return
+    if args.experiment == 'trail_activation_gap':
+        print_trail_activation_gap(since, window.observed_at)
         return
     arm = EXPERIMENTS[args.experiment]
     _validate_experiment_cohort(arm, since)
@@ -186,7 +194,7 @@ def determine_comparable_window(
     keeps the comparable window pending.
     """
     observed_at = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    selected = tuple(arms or (CONTROL, *EXPERIMENTS.values()))
+    selected = tuple(arms or (CONTROL, *EXPERIMENTS.values(), ACT10_GAP13))
     if observed_at < floor:
         carryovers = _unresolved_before(selected, floor)
         suffix = f"; {carryovers} pre-floor position(s) still open" if carryovers else ""
@@ -290,7 +298,7 @@ def _print_warmup(window: ComparableWindow) -> None:
     end = window.comparable_since or window.observed_at
     print(f"\nWARM-UP / NON-COMPARABLE | {_fmt(window.cohort_started)} to {_fmt(end)}")
     print("arm | opportunities | opens | blocks | closed | currently open")
-    for arm in (CONTROL, *EXPERIMENTS.values()):
+    for arm in (CONTROL, *EXPERIMENTS.values(), ACT10_GAP13):
         events = _events_between(arm, window.cohort_started, end)
         opportunities = sum(row.get("event") == "SIGNAL_OPPORTUNITY" for row in events)
         opens = sum(row.get("event") == "OPEN" for row in events)
@@ -409,10 +417,10 @@ def _print_ema_macd_warmup(events: list[dict[str, Any]]) -> None:
 def print_summary(since: datetime) -> None:
     print(f"\nCOMPARABLE SUMMARY | since {_fmt(since)}")
     print(SUMMARY_HEADER)
-    ordered_experiments = [arm for key, arm in EXPERIMENTS.items() if key != 'ema_macd_hist_1m']
+    ordered_experiments = [arm for key, arm in EXPERIMENTS.items() if key not in ('ema_macd_hist_1m','trail_activation_gap')]
     ordered_experiments.insert(ordered_experiments.index(EXPERIMENTS['ema_macd']) + 1,
                                EXPERIMENTS['ema_macd_hist_1m'])
-    for arm in (REAL_A, CONTROL, *ordered_experiments, DMI15_CONTEXT):
+    for arm in (REAL_A, CONTROL, ACT20_GAP5, ACT10_GAP13, *ordered_experiments, DMI15_CONTEXT):
         if arm not in (CONTROL, REAL_A):
             _validate_experiment_cohort(arm, since)
         print(summary_line(arm, since))
@@ -568,7 +576,7 @@ def _print_overlap(control: Arm, experiment: Arm, since: datetime) -> None:
     print(f"experiment-only | {len(experiment_sources-common)}")
 
 
-def _print_accepted(arm: Arm, since: datetime, until: datetime) -> None:
+def _print_accepted(arm: Arm, since: datetime, until: datetime, *, trail_details=False) -> None:
     accepted = [event for event in _events_between(arm, since, until) if event.get("event") == "OPEN"]
     closed = [row for row in _records(arm, since)
               if (stamp := parse_time(row.get("opened_at") or row.get("open_ts"))) is not None and stamp < until]
@@ -582,7 +590,9 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime) -> None:
                              'ts': row.get('opened_at') or row.get('open_ts')})
     rows = accepted_trade_rows(accepted, closed, opened)
     print("\nACCEPTED TRADES")
-    print("source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason")
+    header = "source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason"
+    print(header + (' | trail activated | activation BRT | first trail dominance BRT | effective_stop_owner at exit' if trail_details else ''))
+    trail_records = {_source(row): row for row in [*opened, *closed]}
     for item in rows:
         is_open = item['status'] == 'OPEN'
         hs_pct = 'OPEN' if is_open else (f"{item['hs_pct']:+.2f}%" if item['hs_pct'] is not None else 'N/A')
@@ -591,9 +601,10 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime) -> None:
               f"{hs_pct} | "
               f"{'OPEN' if is_open else _fmt_net(item['net'])} | {item['ema']} | {item['macd']} | "
               f"{'OPEN' if is_open else item['exit_ema']} | {'OPEN' if is_open else item['exit_macd']} | "
-              f"{'OPEN' if is_open else item['exit_reason']}")
+              f"{'OPEN' if is_open else item['exit_reason']}" +
+              (_trail_trade_suffix(trail_records.get(item['source'], {}), is_open) if trail_details else ''))
     if not rows:
-        print("N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A")
+        print(' | '.join(['N/A']*(16 if trail_details else 12)))
 
 
 def accepted_trade_rows(
@@ -632,6 +643,77 @@ def accepted_trade_rows(
             "status": "CLOSED" if final else "OPEN",
         })
     return sorted(output, key=lambda row: (row["opened_at"] or datetime.min.replace(tzinfo=timezone.utc), row["source"]))
+
+
+def _trail_values(row):
+    audit = row.get('trail_audit') or {}
+    return {'active': row.get('trail_activated', row.get('trailing_active', False)),
+            'activation': row.get('trail_activation_time') or audit.get('activation_time'),
+            'dominance': row.get('first_trail_dominance_time') or audit.get('first_dominance_time'),
+            'peak': row.get('peak_at_first_trail_dominance_atr', audit.get('peak_at_first_dominance_atr')),
+            'owner': row.get('effective_stop_owner'),
+            'peak_atr': row.get('peak_atr') if row.get('peak_atr') is not None else (
+                (float(row['highest_price'])-float(row['entry_price']))/float(row['entry_atr'])
+                if row.get('entry_atr') and row.get('highest_price') is not None else None)}
+
+
+def _trail_trade_suffix(row, is_open):
+    v = _trail_values(row)
+    return f" | {'YES' if v['active'] else 'NO'} | {_fmt(parse_time(v['activation']))} | {_fmt(parse_time(v['dominance']))} | {'OPEN' if is_open else v['owner'] or 'UNAVAILABLE'}"
+
+
+def trail_mechanism_metrics(rows, activation):
+    rows = list(rows);values = [(r, _trail_values(r)) for r in rows]
+    resolved = [(r,v) for r,v in values if parse_time(r.get('closed_at') or r.get('close_ts')) is not None]
+    def elapsed(begin, end):
+        return (parse_time(end)-parse_time(begin)).total_seconds()/60 if parse_time(begin) and parse_time(end) else None
+    def med(xs):
+        valid = [x for x in xs if x is not None]
+        return median(valid) if valid else None
+    return {'total trades':len(rows), f'reached +{activation} ATR':sum(v['peak_atr'] is not None and v['peak_atr']>=activation for _,v in values),
+        'activated %':100*sum(bool(v['active']) for _,v in values)/len(rows) if rows else None,
+        'PL before activation':sum(not v['active'] and r.get('exit_reason')=='PROFIT_LOCK' for r,v in resolved),
+        'HS before activation':sum(not v['active'] and r.get('exit_reason')=='HARD_STOP' for r,v in resolved),
+        'PL remained dominant (activated, so far)':sum(v['active'] and not v['dominance'] for _,v in values),
+        'TRAIL never dominated (resolved, activated)':sum(v['active'] and not v['dominance'] for _,v in resolved),
+        'TRAIL dominated':sum(bool(v['dominance']) for _,v in values),
+        'TRAIL exits after activation':sum(v['active'] and r.get('exit_reason')=='TRAILING' for r,v in resolved),
+        'activation -> exit median min':med(elapsed(v['activation'],r.get('closed_at') or r.get('close_ts')) for r,v in resolved),
+        'peak first dominance median ATR':med(v['peak'] for _,v in values if v['dominance']),
+        'activation -> first dominance median min':med(elapsed(v['activation'],v['dominance']) for _,v in values),
+        'first dominance -> exit median min':med(elapsed(v['dominance'],r.get('closed_at') or r.get('close_ts')) for r,v in resolved)}
+
+
+def print_trail_activation_gap(since, until):
+    markers = [parse_time(_state(arm).get('cohort_started_at')) for arm in (ACT20_GAP5, ACT10_GAP13)]
+    if any(marker is not None and since < marker for marker in markers):
+        raise SystemExit('trail_activation_gap: --since must be at or after both new shadows started; do not mix earlier control data')
+    print(f"\nCOMPARABLE EXPERIMENT | since {_fmt(since)}")
+    print(SUMMARY_HEADER)
+    for arm in (CONTROL, ACT20_GAP5, ACT10_GAP13):
+        if arm != CONTROL:
+            _validate_experiment_cohort(arm, since)
+        print(summary_line(arm, since))
+    print('\nTRAIL_ACTIVATION_GAP | historical selection; this forward cohort is first OOS validation')
+    for arm, activation in ((ACT20_GAP5,20),(ACT10_GAP13,10)):
+        print('\n'+arm.name)
+        by_source = {_source(r):r for r in _open_positions(_state(arm), since)}
+        by_source.update({_source(r):r for r in _records(arm, since)})
+        rows = list(by_source.values())
+        metrics = trail_mechanism_metrics(rows, activation)
+        keys = ('total trades', f'reached +{activation} ATR', 'activated %', 'PL before activation', 'HS before activation',
+                'TRAIL dominated', 'TRAIL exits after activation', 'activation -> exit median min') if activation==20 else (
+                'total trades', 'reached +10 ATR', 'activated %', 'PL remained dominant (activated, so far)',
+                'TRAIL never dominated (resolved, activated)', 'TRAIL dominated', 'peak first dominance median ATR',
+                'activation -> first dominance median min', 'first dominance -> exit median min')
+        for key in keys:
+            print(f"{key} | {metrics[key] if metrics[key] is not None else 'N/A'}")
+        print('OPEN observations are censored; elapsed medians use resolved milestones only.')
+        _print_overlap(CONTROL, arm, since)
+        print(arm.name)
+        _print_accepted(arm, since, until, trail_details=True)
+    print('\n'+CONTROL.name+' | recorded control contexts/exit; no fabricated historical TRAIL telemetry')
+    _print_accepted(CONTROL, since, until)
 
 
 def _recorded_exit_context(row: dict[str, Any]) -> dict[str, Any]:

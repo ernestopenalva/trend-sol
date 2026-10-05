@@ -287,6 +287,8 @@ class ExperimentalRiskShadow(CircuitBreakerShadow):
     def on_closed_5m(self, snapshot: Dict[str, Any] | None) -> None:
         if not self.enabled or not snapshot:
             return
+        self._remember_exit_context(self.latest_market_context)
+        self._remember_exit_context(snapshot)
         self.latest_market_context = deepcopy(snapshot)
         if self.experiment != "HS_BULL_ELASTIC":
             self._save_state()

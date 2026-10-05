@@ -149,7 +149,7 @@ class TradeLedger:
         estimated_fees_pct = _estimated_fees_pct(config)
         net_pct = realized_pct - estimated_fees_pct if realized_pct is not None else None
         phantom = position_type == "PHANTOM" or bool(getattr(position, "phantom", False))
-        return {
+        record = {
             "run_id": config.get("run_id"),
             "strategy_version": config.get("strategy_version"),
             "profile": config.get("active_profile"),
@@ -282,6 +282,14 @@ class TradeLedger:
             "net_pnl_pct": net_pct,
             "realized_pnl_abs": ((exit_price - entry_price) * qty) if None not in (entry_price, exit_price, qty) else None,
         }
+        telemetry = getattr(position, 'trail_telemetry', None)
+        if callable(telemetry):
+            record.update(telemetry())
+            notional = float(position.position_notional_usdt)
+            record.update(gross_pnl=record['realized_pnl_abs'],
+                          fees=estimated_fees_pct*notional/100,
+                          net_pnl=net_pct*notional/100 if net_pct is not None else None)
+        return record
 
 
 def latest_trade(

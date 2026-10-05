@@ -46,7 +46,29 @@ def effective_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
     _validate_multi_market_shadow(config)
     _validate_no_progress(config)
     _validate_market_context(config)
+    _validate_trail_activation_gap_shadows(config)
     return config
+
+
+def _validate_trail_activation_gap_shadows(config: Dict[str, Any]) -> None:
+    instrumentation = config.get('instrumentation', {})
+    new_keys = {'be_off_cb_act20_gap5_shadow', 'be_off_cb_act10_gap13_shadow'}
+    used = {str(v[k]) for name, v in instrumentation.items() if isinstance(v, dict)
+            for k in ('state_file', 'ledger_file', 'events_file') if v.get(k)
+            and name not in new_keys}
+    for key, activation, gap in (('be_off_cb_act20_gap5_shadow', 20, 5), ('be_off_cb_act10_gap13_shadow', 10, 13)):
+        settings = instrumentation.get(key, {})
+        if not settings.get('enabled'):
+            continue
+        if config.get('risk', {}).get('trailing', {}).get('mode') != 'atr':
+            raise ValueError(f'{key}: the control must use frozen entry ATR trailing')
+        if (settings.get('trail_activation_atr'), settings.get('trail_gap_atr')) != (activation, gap):
+            raise ValueError(f'{key}: only the approved activation/gap pair is allowed')
+        for field in ('state_file', 'ledger_file', 'events_file'):
+            path = settings.get(field)
+            if not path or str(path) in used:
+                raise ValueError(f'{key}.{field}: independent path required')
+            used.add(str(path))
 
 
 def _validate_no_progress(config: Dict[str, Any]) -> None:
