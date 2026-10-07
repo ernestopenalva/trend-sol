@@ -78,7 +78,21 @@ def main() -> None:
     parser.add_argument('--since', help='Admission cutoff in BRT: DD/MM/YYYY HH:MM[:SS]')
     parser.add_argument("--list-accepted", action="store_true",
                         help="List accepted trades for ema_macd or macd_bu_minus")
+    parser.add_argument('--matrix-audit', action='store_true', help='Diagnostic EMA_MACD matrix audit; never changes policy')
+    parser.add_argument('--pair', help='Matrix audit only: e.g. SHO+BE+ or BUL+BU+')
+    parser.add_argument('--top-n', type=int, default=None, help='Matrix audit only: number of positive winners (default 10)')
     args = parser.parse_args()
+    if args.matrix_audit and args.experiment != 'ema_macd':
+        parser.error('--matrix-audit requires --experiment ema_macd')
+    if (args.pair is not None or args.top_n is not None) and not args.matrix_audit:
+        parser.error('--pair/--top-n require --matrix-audit')
+    if args.top_n is not None and args.top_n < 1:
+        parser.error('--top-n must be positive')
+    if args.matrix_audit:
+        from tools.forward_matrix_audit import parse_pair
+        if args.pair is not None:
+            try: parse_pair(args.pair)
+            except ValueError as error: parser.error(str(error))
     cutoff = None
     if args.since is not None:
         for fmt in ('%d/%m/%Y %H:%M', '%d/%m/%Y %H:%M:%S'):
@@ -101,6 +115,11 @@ def _run_report(args, cutoff):
     floor = parse_time(COMPARABILITY_FLOOR_TEXT)
     if cohort_started is None or floor is None:  # pragma: no cover - constants are tested
         raise SystemExit("invalid report window constants")
+    if getattr(args, 'matrix_audit', False):
+        from tools.forward_matrix_audit import print_matrix_audit
+        print_matrix_audit(sys.modules[__name__], cutoff or cohort_started,
+                           pair_filter=args.pair, top_n=args.top_n or 10)
+        return
     window = (ComparableWindow(cohort_started, cutoff, datetime.now(timezone.utc)) if cutoff is not None
               else determine_comparable_window(cohort_started, floor))
     if args.list_accepted and args.experiment not in {"ema_macd", "macd_bu_minus"}:
