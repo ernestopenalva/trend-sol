@@ -334,7 +334,16 @@ class CircuitBreakerShadow(RealAContextShadow):
             current = self.clock.last_boundary + 60_000
             due = [x for x in self.pending_closes if x['boundary'] == current]
             self.pending_closes = [x for x in self.pending_closes if x['boundary'] != current]
-            for event in self.clock.minute(current, [(current,x['net']) for x in due]):
+            events = self.clock.minute(current, [(current,x['net']) for x in due])
+            # Sparse diagnostics must not participate in the financial transaction.
+            observer = getattr(self, '_observe_cb_minute', None)
+            if observer is not None:
+                try:
+                    self._cb_observed_at = _iso(moment)
+                    observer(current, due, events)
+                except Exception:
+                    pass
+            for event in events:
                 at = datetime.fromtimestamp(current/1000, timezone.utc)
                 if event['event'] == 'CIRCUIT_BREAKER_TRIGGERED':
                     self.circuit_breaker_started_at = _iso(at)

@@ -11,6 +11,7 @@ from src.logging_utils import JsonlLogger
 
 class TelemetryWriter:
     STREAM_PATH_KEYS = {
+        "hs_intelligence": "hs_intelligence_events_file",
         "trough_event": "trough_events_file",
         "position_snapshot": "position_snapshots_file",
         "rejected_signal": "rejected_signals_file",
@@ -37,6 +38,8 @@ class TelemetryWriter:
             stream: project_root / str(cfg.get(key, f"data/telemetry/{stream}s.jsonl"))
             for stream, key in self.STREAM_PATH_KEYS.items()
         }
+        self.paths['hs_intelligence'] = project_root / str(cfg.get(
+            'hs_intelligence_events_file', 'data/telemetry/hs_intelligence_events.jsonl'))
         self._queue: queue.Queue[Optional[tuple[str, Dict[str, Any]]]] = queue.Queue(
             maxsize=max(1, int(cfg.get("queue_max_size", 10000)))
         )

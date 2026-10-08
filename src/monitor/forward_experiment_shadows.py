@@ -15,6 +15,8 @@ from src.monitor.fast_drop_semantics import (
 )
 from src.position.phantom_execution import PhantomExecutionClient
 from src.telemetry_writer import TelemetryWriter
+from src.monitor.hs_observability import observe
+from src.monitor.fast_drop_semantics import FAST_EMA, FAST_VELOCITY_5M
 
 
 class FastDropPosition(CircuitBreakerPosition):
@@ -104,14 +106,42 @@ class FastDropEmaShadow(CircuitBreakerShadow):
         snapshot = self._context_at(stamp)
         context = (snapshot or {}).get('tf_5m', {}).get('ema_context', 'UNAVAILABLE')
         for position in list(self.open_positions):
+            if position.fast_drop_evaluated and position.effective_stop is not None and price <= position.effective_stop:
+                observe(self, 'FAST_DROP_FINAL_STOP', position, observed_at, 'NOT_REEVALUATED',
+                    conditions={'already_evaluated': True, 'normal_stop_reached': True},
+                    values={'price': price, 'effective_stop': position.effective_stop,
+                            'one_shot_consumed': True, 'retry_allowed': False},
+                    reasons=('ONE_SHOT_ALREADY_CONSUMED',))
             if position.fast_drop_evaluated or not loss_reached(position.entry_price, price):
                 continue
             if not reference:
                 # No decision was possible: retry on a later tick after receipt/restart.
+                observe(self, 'FAST_DROP', position, observed_at, 'NOT_EVALUABLE',
+                    conditions={'loss_reached': True, 'reference_available': False},
+                    values={'price': price, 'pnl_pct': position.pnl_pct(price),
+                            'reference_boundary_ms': boundary-5*60_000,
+                            'one_shot_consumed': False, 'retry_allowed': True},
+                    reasons=('REFERENCE_MISSING',), context=(snapshot or {}).get('tf_5m'),
+                    dedup_key=boundary-5*60_000)
                 continue
             # First loss-level crossing only, exactly as the fixed replay.
             position.fast_drop_evaluated = True
             target, velocity = fast_drop_values(position.entry_price, reference)
+            normal_precedes = normal_stop_precedes_fast(position.effective_stop, target)
+            speed_pass = velocity is not None and velocity <= FAST_VELOCITY_5M+1e-12
+            ema_pass = context in FAST_EMA
+            reasons = (('NORMAL_STOP_PRECEDES',) if normal_precedes else
+                       tuple(name for name, passed in (('SPEED_BLOCKED', speed_pass), ('EMA_BLOCKED', ema_pass)) if not passed))
+            observe(self, 'FAST_DROP', position, observed_at, 'NO_TRIGGER' if reasons else 'TRIGGER',
+                conditions={'loss_reached': True, 'reference_available': True,
+                            'normal_stop_precedes': normal_precedes,
+                            'speed_pass': speed_pass, 'ema_pass': ema_pass},
+                values={'price': price, 'pnl_pct': position.pnl_pct(price),
+                        'reference_boundary_ms': boundary-5*60_000, 'reference_price': reference,
+                        'velocity_target_price': target, 'velocity_5m_pct_per_min': velocity,
+                        'effective_stop': position.effective_stop, 'one_shot_consumed': True,
+                        'retry_allowed': False, 'ema_context_used': context},
+                reasons=reasons, context=(snapshot or {}).get('tf_5m'))
             # A previously armed higher PL/TRAIL stop precedes this loss level.
             if normal_stop_precedes_fast(position.effective_stop, target):
                 continue
@@ -286,6 +316,11 @@ class ExperimentalRiskShadow(CircuitBreakerShadow):
 
     def on_closed_5m(self, snapshot: Dict[str, Any] | None) -> None:
         if not self.enabled or not snapshot:
+            if self.enabled and self.experiment == 'HS_BULL_ELASTIC' and not snapshot:
+                for position in self.open_positions:
+                    if isinstance(position, ElasticPosition) and position.hs_elastic:
+                        observe(self, 'HS_BULL_ELASTIC', position, None, 'NOT_EVALUABLE',
+                                reasons=('SNAPSHOT_5M_MISSING',))
             return
         self._remember_exit_context(self.latest_market_context)
         self._remember_exit_context(snapshot)
@@ -297,9 +332,24 @@ class ExperimentalRiskShadow(CircuitBreakerShadow):
         close_price = (snapshot.get("tf_5m") or {}).get("close")
         observed_at = (snapshot.get("tf_5m") or {}).get("latest_closed_at_ms")
         if close_price is None:
+            for position in self.open_positions:
+                if isinstance(position, ElasticPosition) and position.hs_elastic:
+                    observe(self, 'HS_BULL_ELASTIC', position, None, 'NOT_EVALUABLE',
+                            reasons=('CLOSE_5M_MISSING',), context=context)
             return
         stamp = datetime.fromtimestamp(float(observed_at) / 1000, timezone.utc).isoformat() if observed_at else None
         for position in list(self.open_positions):
+            if isinstance(position, ElasticPosition) and position.hs_elastic:
+                original_stop = float(position._elastic_hard_stop_price)
+                still_lon = context.get('ema_context') == 'LON'
+                observe(self, 'HS_BULL_ELASTIC', position, stamp, 'HOLD' if still_lon else
+                        'TRIGGER' if float(close_price) <= original_stop else 'REARM_NORMAL_HS',
+                        conditions={'elastic_active': True, 'ema_lon': still_lon,
+                                    'price_at_or_below_hs': float(close_price) <= original_stop},
+                        values={'price': close_price, 'original_hs': original_stop},
+                        reasons=('STILL_LON',) if still_lon else ('CONTEXT_LOST',),
+                        context=context, dedup_key=observed_at,
+                        asof_ms=int(observed_at)+1 if observed_at is not None else None)
             if not isinstance(position, ElasticPosition) or not position.hs_elastic or context.get("ema_context") == "LON":
                 continue
             original = float(position._elastic_hard_stop_price)
@@ -326,6 +376,13 @@ class ExperimentalRiskShadow(CircuitBreakerShadow):
                     continue
                 original = float(position._elastic_hard_stop_price)
                 pnl = position.pnl_pct(price)
+                if not position.hs_elastic and price <= original:
+                    lon_pass = context.get('ema_context') == 'LON'
+                    observe(self, 'HS_BULL_ELASTIC', position, observed_at,
+                            'TRIGGER' if lon_pass else 'NO_TRIGGER',
+                            conditions={'price_at_or_below_hs': True, 'ema_lon': lon_pass},
+                            values={'price': price, 'pnl_pct': pnl, 'original_hs': original},
+                            reasons=() if lon_pass else ('EMA_NOT_LON',), context=context)
                 if not position.hs_elastic and price <= original and context.get("ema_context") == "LON":
                     position.hs_elastic = True
                     position.hs_original_at = observed_at
@@ -342,9 +399,13 @@ class ExperimentalRiskShadow(CircuitBreakerShadow):
                     position.hs_elastic_worst_pnl_pct = min(float(position.hs_elastic_worst_pnl_pct or pnl), pnl)
                     if price >= position.entry_price and not position.hs_elastic_returned_entry_at:
                         position.hs_elastic_returned_entry_at = observed_at
+                        observe(self, 'HS_BULL_ELASTIC_RECOVERY', position, observed_at, 'RECOVERED_ENTRY',
+                                values={'price': price, 'pnl_pct': pnl}, context=context)
                     economic_be = position.entry_price * (1 + self._fee_pct() / 100)
                     if price >= economic_be and not position.hs_elastic_returned_economic_be_at:
                         position.hs_elastic_returned_economic_be_at = observed_at
+                        observe(self, 'HS_BULL_ELASTIC_RECOVERY', position, observed_at, 'RECOVERED_ECONOMIC_BE',
+                                values={'price': price, 'pnl_pct': pnl, 'economic_be': economic_be}, context=context)
         super()._process_tick(price, observed_at)
         for position in prior:
             if isinstance(position, ElasticPosition) and position.status == "CLOSED" and position.hs_elastic_started_at:
@@ -365,6 +426,17 @@ class ExperimentalRiskShadow(CircuitBreakerShadow):
                             "control_exit_pending": True,
                         })
         hard_stops = [item for item in prior if item.status == "CLOSED" and item.exit_reason == "HARD_STOP"]
+        if self.experiment == 'HS_BEAR_CLUSTER_EXIT' and hard_stops:
+            sho = context.get('ema_context') == 'SHO'
+            negatives = [p for p in self.open_positions if p.pnl_pct(price) < 0]
+            for trigger in hard_stops:
+                observe(self, 'HS_BEAR_CLUSTER', trigger, observed_at, 'TRIGGER' if sho else 'NO_TRIGGER',
+                    conditions={'own_real_hard_stop': True, 'ema_sho': sho},
+                    values={'price': price, 'negative_positions': [
+                        {'pair_id': p.pair_id, 'pnl_pct': p.pnl_pct(price)} for p in negatives],
+                        'remaining_positions': len(self.open_positions)},
+                    reasons=(('NO_NEGATIVE_NEIGHBORS',) if not negatives else ()) if sho else ('EMA_NOT_SHO',),
+                    context=context)
         if self.experiment == "HS_BEAR_CLUSTER_EXIT" and hard_stops and context.get("ema_context") == "SHO":
             victims = [item for item in self.open_positions if item.pnl_pct(price) < 0]
             self._event("HS_BEAR_CLUSTER_TRIGGERED", trigger_pair_ids=[item.pair_id for item in hard_stops],
@@ -374,6 +446,7 @@ class ExperimentalRiskShadow(CircuitBreakerShadow):
             self.positions = [item for item in self.positions if item.status == "OPEN"]
         if self.experiment == "CB_EXIT_ALL" and not prior_breaker and self.circuit_breaker_active:
             victims = list(self.open_positions)
+            self._observe_cb_liquidation(price, observed_at, victims, 'tick')
             self._event("CB_EXIT_ALL_TRIGGERED", victim_pair_ids=[item.pair_id for item in victims], price=price, **context)
             for position in victims:
                 self._close_and_record(position, price, observed_at, "CIRCUIT_BREAKER_EXIT_ALL", price)
@@ -391,11 +464,47 @@ class ExperimentalRiskShadow(CircuitBreakerShadow):
         prior = self.circuit_breaker_active
         result = super()._process_signal(signal)
         if self.experiment == "CB_EXIT_ALL" and not prior and self.circuit_breaker_active:
+            self._observe_cb_liquidation(signal.price, signal.ts, list(self.open_positions), 'signal')
             for position in list(self.open_positions):
                 self._close_and_record(position, signal.price, signal.ts, "CIRCUIT_BREAKER_EXIT_ALL", signal.price)
             self.positions = [item for item in self.positions if item.status == "OPEN"]
             self._save_state()
         return result
+
+    def _observe_cb_liquidation(self, price, observed_at, victims, input_kind):
+        for position in victims or [None]:
+            observe(self, 'CB_EXIT_ALL', position, observed_at, 'TRIGGER',
+                conditions={'cb_became_active': True, 'position_available': position is not None},
+                values={'price': price, 'pnl_pct': position.pnl_pct(price) if position else None,
+                        'victim_pair_ids': [p.pair_id for p in victims], 'input_kind': input_kind,
+                        'cooldown_until': self.circuit_breaker_until},
+                reasons=() if victims else ('NO_OPEN_POSITIONS',), context=self._context_fields())
+
+    def _observe_cb_minute(self, boundary, due, events):
+        if self.experiment != 'CB_EXIT_ALL':
+            return
+        # Observe the actual post-minute detector; no predicate feeds back into CB.
+        clock = self.clock
+        dd = (clock.peak-clock.equity)/clock.capital*100
+        pnl = sum(x[1] for x in clock.history)/clock.capital*100
+        predicates = {'dd_pass': dd >= 1.5, 'pnl_4h_pass': pnl <= -.5,
+                      'closes_4h_pass': len(clock.history) >= 2,
+                      'condition': clock.was_true, 'cooldown_active': clock.paused}
+        state = tuple(predicates.values())
+        previous = getattr(self, '_cb_observed_predicates', None)
+        self._cb_observed_predicates = state
+        if not due and not events and (previous is None or state == previous):
+            return
+        observe(self, 'CB_EXIT_ALL_DETECTOR', None,
+            datetime.fromtimestamp(boundary/1000, timezone.utc),
+            'CRISIS_TRANSITION' if any(e['event']=='CIRCUIT_BREAKER_TRIGGERED' for e in events) else 'NO_TRIGGER',
+            conditions=predicates,
+            values={'realized_dd_pct': dd, 'closed_pnl_4h_pct': pnl,
+                    'closes_4h': len(clock.history), 'new_close_pair_ids': [x['pair_id'] for x in due],
+                    'cooldown_until_ms': clock.pause_until, 'market_observed_at': getattr(self, '_cb_observed_at', None)},
+            reasons=() if any(e['event']=='CIRCUIT_BREAKER_TRIGGERED' for e in events) else
+                tuple(k.upper() for k in ('dd_pass','pnl_4h_pass','closes_4h_pass') if not predicates[k])
+                    or ('NO_NEW_CRISIS_EDGE',), dedup_key=boundary)
 
     def _close_and_record(self, position, price: float, observed_at: str | None, reason: str, reference: float) -> None:
         if position.status != "OPEN":
