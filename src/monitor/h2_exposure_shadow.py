@@ -260,7 +260,7 @@ class H2ExposureShadow:
         }
         payload.update({name: getattr(self, name) for name in ("blocked_capacity", "blocked_same_5m", "blocked_spacing", "blocked_min_notional_h2", "blocked_symbol_filters_unavailable", "max_simultaneous_positions")})
         tmp = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(',', ':')), encoding="utf-8")
         os.replace(tmp, self.state_path)
 
 

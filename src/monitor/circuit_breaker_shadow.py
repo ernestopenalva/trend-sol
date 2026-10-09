@@ -17,6 +17,7 @@ from src.position.phantom_execution import PhantomExecutionClient
 from src.telemetry_writer import TelemetryWriter
 from src.trade_ledger import TradeLedger
 from src.monitor.cb_replay_clock import CBReplayClock
+from src.monitor.cb_persistence import CBHistoryStore, preserve_files, append_projection
 
 
 class CircuitBreakerPosition(BotFullExitPosition):
@@ -70,6 +71,10 @@ class CircuitBreakerShadow(RealAContextShadow):
         self.pending_closes: list[dict] = []
         self.closed_records: list[dict] = []
         self.audit_events: list[dict] = []
+        self._history_changes = {'ledger': {}, 'events': {}}
+        self._history_revision = 0
+        self._history_store = None
+        self._projection_counts = {'ledger': 0, 'events': 0}
         # Volatile only: restore must verify/repair both committed projections.
         # Never reset at transaction start: a failed projection remains dirty.
         self._projection_dirty = {'ledger': True, 'events': True}
@@ -89,6 +94,11 @@ class CircuitBreakerShadow(RealAContextShadow):
             self._event_at(_parse_ts(self.cohort_started_at) or datetime.now(timezone.utc), "COHORT_STARTED",
                            cohort_started_at=self.cohort_started_at, variant="BE_OFF_CB")
             self._save_state()
+
+    def close(self) -> None:
+        """Release journal resources after the input loop has stopped; no state save."""
+        if self._history_store is not None:
+            self._history_store.close()
 
     def _exit_config(self) -> Dict[str, Any]:
         value = deepcopy(super()._exit_config())
@@ -235,7 +245,7 @@ class CircuitBreakerShadow(RealAContextShadow):
             self._save_state()
 
     def _run_input(self, item: dict, *, recovering: bool = False):
-        """Single-writer transaction: durable input -> checkpoint -> projections.
+        """Durable input -> durable incremental history -> checkpoint -> projections.
 
         A crash before checkpoint replays the pending input; a crash after it
         only repairs projections. Neither path repeats a financial close.
@@ -250,7 +260,7 @@ class CircuitBreakerShadow(RealAContextShadow):
         item = {**item, 'sequence':sequence}
         try:
             if not recovering:
-                _atomic_json(self.pending_input_path, json.dumps(item, ensure_ascii=False))
+                self._history_store.record_input(item)
             self._in_transaction = True
             rejection = self._temporal_rejection(item)
             if rejection is not None:
@@ -312,9 +322,15 @@ class CircuitBreakerShadow(RealAContextShadow):
         return None
 
     def _recover_pending_input(self):
-        if not self.pending_input_path.exists():
+        item = self._history_store.pending()
+        if self.pending_input_path.exists():
+            legacy = json.loads(self.pending_input_path.read_text(encoding='utf-8'))
+            if item is None or int(legacy['sequence']) > int(item['sequence']):
+                item = legacy
+            elif int(legacy['sequence']) == int(item['sequence']) and legacy != item:
+                raise ValueError('Conflicting CB pending inputs; reconciliation required')
+        if item is None:
             return
-        item = json.loads(self.pending_input_path.read_text(encoding='utf-8'))
         if int(item['sequence']) > self.sequence:
             self._run_input(item, recovering=True)
 
@@ -409,9 +425,21 @@ class CircuitBreakerShadow(RealAContextShadow):
         except FileNotFoundError:
             if self.ledger.path.exists() and self.ledger.path.stat().st_size:
                 raise ValueError('CB ledger exists without its checkpoint; reconciliation required')
+            self._history_store = CBHistoryStore(self.state_path.with_suffix('.history.sqlite'))
+            self._history_store.restore(0, {'ledger': 0, 'events': 0})
             return
-        if data.get('cb_schema') != 2:
+        if data.get('cb_schema') not in (2, 3):
             raise ValueError('Legacy CB state: archive the old cohort before starting this version')
+        history_path = self.state_path.with_suffix('.history.sqlite')
+        if data['cb_schema'] == 2:
+            preserve_files((self.state_path, self.pending_input_path, self.ledger.path, self.audit_path))
+            self._history_store = CBHistoryStore(history_path)
+            self._history_store.bootstrap(data['closed_records'], data['audit_events'])
+        else:
+            self._history_store = CBHistoryStore(history_path, must_exist=True)
+            self._history_revision = int(data['history_revision'])
+            history = self._history_store.restore(self._history_revision, data['history_counts'])
+            data['closed_records'], data['audit_events'] = history['ledger'], history['events']
         self.clock = CBReplayClock.from_state(data['clock'])
         self.sequence = int(data['sequence'])
         self.pending_closes = data['pending_closes']
@@ -458,11 +486,11 @@ class CircuitBreakerShadow(RealAContextShadow):
             return
         latest = max(self.entries_by_bucket, default=0)
         payload: Dict[str, Any] = {
-            'cb_schema':2, 'sequence':self.sequence, 'clock':self.clock.to_state(), 'pending_closes':self.pending_closes,
+            'cb_schema':3, 'sequence':self.sequence, 'clock':self.clock.to_state(), 'pending_closes':self.pending_closes,
             'latest_market_context':self.latest_market_context,
             'exit_context_history':self._exit_context_history,
             'trigger_price':self.trigger_price,
-            'closed_records':self.closed_records, 'audit_events':self.audit_events,
+            'history_counts': {'ledger': len(self.closed_records), 'events': len(self.audit_events)},
             'last_input_ms':self.last_input_ms, 'last_signal_source':self.last_signal_source,
             "updated_at": now_iso(), "entries_by_bucket": {str(k): v for k, v in self.entries_by_bucket.items() if k >= latest - 86_400_000}, "positions": [item.to_state() for item in self.open_positions],
             "realized_equity": self.equity, "realized_peak_equity": self.peak_equity, "rolling_closed_history": [[_iso(ts), pnl] for ts, pnl in self.closed_history], "circuit_breaker_active": self.circuit_breaker_active, "circuit_breaker_started_at": self.circuit_breaker_started_at, "circuit_breaker_until": self.circuit_breaker_until, "crises_triggered": self.crises_triggered, "blocked_circuit_breaker": self.blocked_circuit_breaker, "cohort_started_at": self.cohort_started_at, "cohort_start_price": self.cohort_start_price, "market_points": [[_iso(ts), price] for ts, price in self.market_points],
@@ -472,7 +500,11 @@ class CircuitBreakerShadow(RealAContextShadow):
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         payload.update(self._extra_state())
         try:
+            revision = self._history_store.stage(self._history_revision, self._history_changes)
+            payload['history_revision'] = revision
             _atomic_json(self.state_path, json.dumps(payload, ensure_ascii=False))
+            self._history_revision = revision
+            self._history_changes = {'ledger': {}, 'events': {}}
             self._project_committed()
         except Exception:
             self.enabled = False
@@ -484,22 +516,43 @@ class CircuitBreakerShadow(RealAContextShadow):
     def _append_closed_record(self, record: dict) -> None:
         self._projection_dirty['ledger'] = True
         self.closed_records.append(record)
+        self._history_changes['ledger'][len(self.closed_records)-1] = record
 
     def _update_closed_record(self, record: dict, fields: dict) -> None:
         """In-place updates count even when record/list sizes do not change."""
         self._projection_dirty['ledger'] = True
+        self._validate_unprojected_update('ledger', self.closed_records, record, fields)
         record.update(fields)
+        for i, row in enumerate(self.closed_records):
+            if row is record:
+                self._history_changes['ledger'][i] = record
+                break
 
     def _append_audit_event(self, event: dict) -> None:
         self._projection_dirty['events'] = True
         self.audit_events.append(event)
+        self._history_changes['events'][len(self.audit_events)-1] = event
 
     def _update_audit_event(self, event: dict, fields: dict) -> None:
         self._projection_dirty['events'] = True
+        self._validate_unprojected_update('events', self.audit_events, event, fields)
         event.update(fields)
+        for i, row in enumerate(self.audit_events):
+            if row is event:
+                self._history_changes['events'][i] = event
+                break
+
+    def _validate_unprojected_update(self, name, records, record, fields):
+        # Existing implementation rejected rewrites of an already projected prefix.
+        # Keep that protection; admission/exit annotations mutate only new rows.
+        for index, row in enumerate(records):
+            if row is record and index < self._projection_counts[name]:
+                if any(row.get(key) != value for key, value in fields.items()):
+                    raise ValueError('CB projection diverges from committed state: immutable history update')
+                break
 
     def _project_committed(self):
-        """Ledger/events are idempotent projections of the committed snapshot.
+        """Incremental JSONL projections of the committed durable history.
 
         Crash after state commit and before projection is repaired at restore.
         No engine state is reconstructed from the possibly lagging projection.
@@ -510,20 +563,25 @@ class CircuitBreakerShadow(RealAContextShadow):
         ):
             if not self._projection_dirty[name]:
                 continue
-            content = ''.join(json.dumps(x, ensure_ascii=False)+'\n' for x in records)
-            if getattr(self, '_projected_'+str(path), None) == content:
-                self._projection_dirty[name] = False
-                continue
-            if path.exists():
-                existing = path.read_text(encoding='utf-8')
-                if existing == content:
-                    setattr(self, '_projected_'+str(path), content)
-                    self._projection_dirty[name] = False
-                    continue
-                if existing and not content.startswith(existing):
+            count = self._projection_counts[name]
+            # Restore verifies the full prefix once, not on every market input.
+            if not hasattr(self, '_projection_verified_'+name):
+                expected = ''.join(json.dumps(x, ensure_ascii=False)+'\n' for x in records).encode('utf8')
+                existing = path.read_bytes() if path.exists() else b''
+                if existing and not expected.startswith(existing):
+                    # A killed append may leave a partial final line; repair only
+                    # an exact prefix of authoritative committed history.
                     raise ValueError(f'CB projection diverges from committed state: {path}')
-            _atomic_json(path, content)
-            setattr(self, '_projected_'+str(path), content)
+                complete = existing.rfind(b'\n') + 1
+                if complete != len(existing):
+                    with path.open('r+b') as stream:
+                        stream.truncate(complete); stream.flush(); os.fsync(stream.fileno())
+                count = existing[:complete].count(b'\n')
+                setattr(self, '_projection_verified_'+name, True)
+            suffix = ''.join(json.dumps(x, ensure_ascii=False)+'\n' for x in records[count:])
+            if suffix or not path.exists():
+                append_projection(path, suffix)
+            self._projection_counts[name] = len(records)
             self._projection_dirty[name] = False
 
 

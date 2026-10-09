@@ -14,6 +14,7 @@ from tools.winner_trajectory_study import OUT,INPUT,terminal,aggregate,dist,stag
 from tools.be_off_cb_exit_context_study import brt
 from tools import forward_experiment_report as report
 from tools.forward_matrix_audit import FREEZE_START,FREEZE_END
+from src.monitor.cb_persistence import read_cb_checkpoint
 
 
 def economics(rows,net_field='net',time_field='closed_ms'):
@@ -53,7 +54,7 @@ def intervention(rows,fees,spread,notional):
 
 
 def forward(path):
-    state=json.loads(path.read_text());rows=[];invalid=[];unavailable=[]
+    state=read_cb_checkpoint(path);rows=[];invalid=[];unavailable=[]
     for raw in state.get('closed_records',[])+state.get('positions',[]):
         opened=report.parse_time(raw.get('opened_at') or raw.get('open_ts'))
         closed=report.parse_time(raw.get('closed_at'))

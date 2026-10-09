@@ -34,7 +34,7 @@ class ProjectionDirtyTests(unittest.TestCase):
                  patch.object(module, '_atomic_json', wraps=module._atomic_json) as write:
                 s.on_tick(100., '2026-09-05T00:00:01+00:00')
             self.assertEqual([x.args[0] for x in write.call_args_list],
-                             [s.pending_input_path, s.state_path])
+                             [s.state_path])
             self.assertEqual(s.sequence, 2)
             self.assertEqual(s.last_input_ms, 1788566401000)
             self.assertEqual(s._projection_dirty, {'ledger': False, 'events': False})
@@ -47,7 +47,7 @@ class ProjectionDirtyTests(unittest.TestCase):
             self.assertEqual(s._projection_dirty, {'ledger': True, 'events': False})
             s._update_closed_record(record, {'status': 'after'})
             self.assertIs(s.closed_records[0], record)
-            with patch.object(module, '_atomic_json', wraps=module._atomic_json) as write:
+            with patch.object(module, 'append_projection', wraps=module.append_projection) as write:
                 s._project_committed()
             self.assertEqual([x.args[0] for x in write.call_args_list], [s.ledger.path])
             self.assertEqual(json.loads(s.ledger.path.read_text()), record)
@@ -60,7 +60,7 @@ class ProjectionDirtyTests(unittest.TestCase):
     def test_close_marks_ledger_and_events_once_per_commit(self):
         with TemporaryDirectory() as tmp:
             s = self.make(Path(tmp)); s.on_signal(self.signal())
-            with patch.object(module, '_atomic_json', wraps=module._atomic_json) as write:
+            with patch.object(module, 'append_projection', wraps=module.append_projection) as write:
                 s.on_tick(98., '2026-09-05T00:00:10+00:00')
             paths = [x.args[0] for x in write.call_args_list]
             self.assertEqual(paths.count(s.ledger.path), 1)
@@ -73,12 +73,12 @@ class ProjectionDirtyTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             s = self.make(Path(tmp)); s._project_committed()
             s._append_closed_record({'trade': 1}); s._append_audit_event({'event': 'CB'})
-            original = module._atomic_json
+            original = module.append_projection
             def fail(path, content):
                 if path == s.audit_path:
                     raise OSError('projection failure')
                 return original(path, content)
-            with patch.object(module, '_atomic_json', side_effect=fail):
+            with patch.object(module, 'append_projection', side_effect=fail):
                 with self.assertRaises(OSError): s._project_committed()
             self.assertEqual(s._projection_dirty, {'ledger': False, 'events': True})
             s._project_committed()
@@ -88,8 +88,8 @@ class ProjectionDirtyTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             s = self.make(Path(tmp)); s._append_audit_event({'event': 'before'})
             s._project_committed()
-            s._update_audit_event(s.audit_events[0], {'event': 'after'})
-            with self.assertRaisesRegex(ValueError, 'diverges'): s._project_committed()
+            with self.assertRaisesRegex(ValueError, 'diverges'):
+                s._update_audit_event(s.audit_events[0], {'event': 'after'})
             self.assertTrue(s._projection_dirty['events'])
 
     def test_partial_mutation_exception_does_not_leave_projection_clean(self):
@@ -150,7 +150,7 @@ class ProjectionDirtyTests(unittest.TestCase):
                  patch.object(module, '_atomic_json', wraps=module._atomic_json) as write:
                 s.on_tick(100., '2026-09-05T00:00:01+00:00')
             paths = [x.args[0] for x in write.call_args_list]
-            self.assertEqual(paths, [s.pending_input_path, s.state_path, s.audit_path])
+            self.assertEqual(paths, [s.state_path])
             self.assertEqual([json.loads(x)['event'] for x in s.audit_path.read_text().splitlines()][-2:],
                              ['TEST_A', 'TEST_B'])
 
@@ -199,6 +199,8 @@ class ProjectionDirtyTests(unittest.TestCase):
             def files(root):
                 result = {}
                 for path in root.rglob('*'):
+                    if '.sqlite' in path.name:
+                        continue
                     if path.is_file() and ('state' in path.parts or 'trades' in path.parts or path.name == 'circuit_breaker_shadow_events.jsonl'):
                         rows = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
                         for row in rows: row.pop('updated_at', None)

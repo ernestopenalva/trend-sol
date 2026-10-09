@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path: sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.console_utils import BRASILIA_TZ
 from src.trade_ledger import TradeLedger
+from src.monitor.cb_persistence import read_cb_checkpoint
 from tools.trades_report import _parse_since
 
 
@@ -27,6 +28,10 @@ def main() -> None:
     state = _state(PROJECT_ROOT / "data/state/circuit_breaker_shadow.json")
     events = _events(PROJECT_ROOT / "data/telemetry/circuit_breaker_shadow_events.jsonl", since)
     pending = _state(PROJECT_ROOT / "data/state/circuit_breaker_shadow.json.pending")
+    if state.get('cb_schema') == 3:
+        journal_pending = state.get('_journal_pending', {})
+        if int(journal_pending.get('sequence', 0)) > int(pending.get('sequence', 0)):
+            pending = journal_pending
     print("TREND-SOL | REAL_A vs REAL_A_CB_SHADOW | FORWARD ONLY")
     print(f"Cohort by opened_at: {_fmt(since)} -> now | initial capital each: ${args.capital:.2f}")
     print("Frozen rule: COMBO_DD1P5_PNL4H0P5_MIN2 + 6h; telemetry market context never participates in admission.")
@@ -112,7 +117,7 @@ def _reopen_diagnostics(triggers:list[dict[str,Any]], events:list[dict[str,Any]]
 
 
 def _integrity_issue(state, pending):
-    if state.get('cb_schema') != 2:
+    if state.get('cb_schema') not in (2, 3):
         return 'legacy/missing checkpoint; engineering equivalence not established'
     if int(pending.get('sequence',0)) > int(state.get('sequence',0)):
         return 'input being committed or interrupted; retry, investigate if persistent'
@@ -151,7 +156,7 @@ def _events(path:Path,since:datetime)->list[dict[str,Any]]:
         if _ts(row.get('ts')) and _ts(row.get('ts')) >= since: out.append(row)
     return out
 def _state(path:Path)->dict[str,Any]:
-    try: value=json.loads(path.read_text(encoding='utf-8')); return value if isinstance(value,dict) else {}
+    try: value=read_cb_checkpoint(path); return value if isinstance(value,dict) else {}
     except (OSError,json.JSONDecodeError): return {}
 def _real(x:dict[str,Any])->bool:return not x.get('phantom') and not x.get('shadow_kind') and x.get('position_type')=='BOT_EXIT'
 def _opened_after(x:dict[str,Any], since:datetime)->bool:

@@ -330,6 +330,13 @@ class Monitor:
             self.market_shadow.stop()
             self.market_shadow_ge30.stop()
             self.telemetry_writer.stop()
+            for shadow in (
+                getattr(self, 'circuit_breaker_shadow', None),
+                getattr(self, 'be_off_cb_shadow', None),
+                *getattr(self, 'forward_experiment_shadows', []),
+            ):
+                if isinstance(shadow, CircuitBreakerShadow):
+                    shadow.close()
 
     def _validate_startup(self) -> None:
         self.client.require_credentials()

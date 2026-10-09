@@ -49,5 +49,5 @@ class StateManager:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         with tmp.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
+            json.dump(data, handle, ensure_ascii=False, separators=(',', ':'))
         os.replace(tmp, path)
