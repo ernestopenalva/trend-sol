@@ -76,6 +76,8 @@ class ServerSimpleTrailPosition(PositionBase):
         position.exit_price = state.get("exit_price")
         position.exit_reason = state.get("exit_reason")
         position.close_ts = state.get("close_ts")
+        from src.monitor.price_structure import restore_fields
+        position.price_structure = restore_fields(state)
         position.exit_order = state.get("exit_order")
         position.highest_price = float(state.get("highest_price", position.entry_price))
         position.trailing_order = state.get("trailing_order")
@@ -148,6 +150,7 @@ class ServerSimpleTrailPosition(PositionBase):
     ) -> Dict[str, Any]:
         order = order or {}
         return {
+            **self.price_structure,
             "ts": now_iso(),
             "pair_id": self.pair_id,
             "position_id": self.position_id,

@@ -24,9 +24,12 @@ class PositionBase:
     close_ts: Optional[str] = None
     exit_order: Optional[Dict[str, Any]] = None
     highest_price: float = field(init=False)
+    price_structure: Dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.highest_price = self.entry_price
+        from src.monitor.price_structure import capture_live
+        self.price_structure = capture_live(self.symbol, self.open_ts, "open")
 
     def pnl_pct(self, price: float) -> float:
         return ((price / self.entry_price) - 1) * 100
@@ -47,9 +50,12 @@ class PositionBase:
         self.close_ts = ts
         self.exit_order = order
         self.reserved_qty = 0.0
+        from src.monitor.price_structure import capture_live
+        self.price_structure.update(capture_live(self.symbol, ts, "close"))
 
     def to_state(self) -> Dict[str, Any]:
         return {
+            **self.price_structure,
             "pair_id": self.pair_id,
             "label": self.label,
             "engine": self.engine,

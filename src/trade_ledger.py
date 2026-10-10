@@ -150,6 +150,7 @@ class TradeLedger:
         net_pct = realized_pct - estimated_fees_pct if realized_pct is not None else None
         phantom = position_type == "PHANTOM" or bool(getattr(position, "phantom", False))
         record = {
+            **position.price_structure,
             "run_id": config.get("run_id"),
             "strategy_version": config.get("strategy_version"),
             "profile": config.get("active_profile"),

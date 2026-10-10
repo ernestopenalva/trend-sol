@@ -229,7 +229,7 @@ def print_metrics(report, item):
 
 
 def print_trades(report, rows, *, exit_context=False):
-    print('source_candle | entry BRT | entry price | exit BRT | exit price | entry EMA | entry MACD | exit reason | net | age min'+(' | exit EMA | exit MACD | exit snapshot status' if exit_context else '')+' | forward validity')
+    print('source_candle | entry BRT | entry price | exit BRT | exit price | entry EMA | entry MACD | exit reason | net | age min'+(' | exit EMA | exit MACD | exit snapshot status' if exit_context else '')+' | forward validity | trend_open | trend_close')
     for r in rows:
         closed=r['_resolved']; ctx=report._recorded_exit_context(r) if closed else {}
         validity='INVALID_FREEZE' if r['_invalid'] else 'OBSERVED'
@@ -241,7 +241,7 @@ def print_trades(report, rows, *, exit_context=False):
         if exit_context:
             ema,macd=ctx.get('ema_context','UNAVAILABLE'),ctx.get('macd_context','UNAVAILABLE')
             cells += [ema,macd,'STALE' if 'STALE' in (ema,macd) else 'UNAVAILABLE' if 'UNAVAILABLE' in (ema,macd) else 'RECORDED_CAUSAL' if closed else r['_status']]
-        print(' | '.join(cells)+' | '+validity)
+        print(' | '.join(cells)+' | '+validity+' | '+r.get('trend_open','UNAVAILABLE')+' | '+(r.get('trend_close','UNAVAILABLE') if closed else r['_status']))
     if not rows: print('N/A')
 
 

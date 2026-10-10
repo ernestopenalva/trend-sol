@@ -609,7 +609,7 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime, *, trail_details
                              'ts': row.get('opened_at') or row.get('open_ts')})
     rows = accepted_trade_rows(accepted, closed, opened)
     print("\nACCEPTED TRADES")
-    header = "source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason"
+    header = "source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason | trend_open | trend_close"
     print(header + (' | trail activated | activation BRT | first trail dominance BRT | effective_stop_owner at exit' if trail_details else ''))
     trail_records = {_source(row): row for row in [*opened, *closed]}
     for item in rows:
@@ -620,10 +620,10 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime, *, trail_details
               f"{hs_pct} | "
               f"{'OPEN' if is_open else _fmt_net(item['net'])} | {item['ema']} | {item['macd']} | "
               f"{'OPEN' if is_open else item['exit_ema']} | {'OPEN' if is_open else item['exit_macd']} | "
-              f"{'OPEN' if is_open else item['exit_reason']}" +
+              f"{'OPEN' if is_open else item['exit_reason']} | {item['trend_open']} | {'OPEN' if is_open else item['trend_close']}" +
               (_trail_trade_suffix(trail_records.get(item['source'], {}), is_open) if trail_details else ''))
     if not rows:
-        print(' | '.join(['N/A']*(16 if trail_details else 12)))
+        print(' | '.join(['N/A']*(18 if trail_details else 14)))
 
 
 def accepted_trade_rows(
@@ -650,6 +650,8 @@ def accepted_trade_rows(
             "opened_at": parse_time(row.get("opened_at") or row.get("open_ts") or event.get("ts")),
             "closed_at": parse_time(final.get("closed_at") or final.get("close_ts")) if final else None,
             "source": source,
+            "trend_open": row.get('trend_open', 'UNAVAILABLE'),
+            "trend_close": row.get('trend_close', 'UNAVAILABLE'),
             "ema": str(event.get("ema_context") or "N/A"),
             "macd": str(event.get("macd_context") or "N/A"),
             "exit_ema": str(exit_context.get('ema_context') or 'UNAVAILABLE'),
@@ -876,15 +878,19 @@ def _admission_events(arm: Arm, rows: list[dict[str, Any]]) -> list[dict[str, An
 def _state(arm: Arm) -> dict[str, Any]:
     try:
         value = json.loads((ROOT / arm.state).read_text(encoding="utf-8"))
+        from tools.price_structure_report import overlay
         if arm == REAL_A and isinstance(value, list):
-            return {'positions': [p for p in value if p.get('label') == 'B' and not p.get('phantom') and not p.get('shadow_kind')]}
+            return {'positions': [overlay(p, ROOT) for p in value if p.get('label') == 'B' and not p.get('phantom') and not p.get('shadow_kind')]}
+        if isinstance(value, dict) and 'positions' in value:
+            value['positions'] = [overlay(p, ROOT) for p in value['positions']]
         return value if isinstance(value, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
 
 
 def _open_positions(state: dict[str, Any], since: datetime) -> list[dict[str, Any]]:
-    return [row for row in state.get("positions", []) if row.get("status") == "OPEN"
+    from tools.price_structure_report import overlay
+    return [overlay(row, ROOT) for row in state.get("positions", []) if row.get("status") == "OPEN"
             and (stamp := parse_time(row.get("open_ts") or row.get("opened_at"))) is not None and stamp >= since]
 
 
@@ -966,6 +972,8 @@ def _jsonl(path: Path) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict):
+            from tools.price_structure_report import overlay
+            value = overlay(value, ROOT)
             output.append(value)
     return output
 

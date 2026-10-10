@@ -35,6 +35,7 @@ from src.monitor.ladder_shadow import RealALadderShadow
 from src.monitor.forward_experiment_shadows import ExperimentalRiskShadow, PolicyShadow, FastDropEmaShadow, EmaMacdHist1mShadow
 from src.monitor.gcr_shadow import GcrShadowRegistry
 from src.monitor.market_context import MarketContextEngine
+from src.monitor.price_structure import LiveStructure, install_live
 from src.monitor.human_console_reporter import HumanConsoleReporter
 from src.monitor.multi_market_shadow import MultiMarketShadow
 from src.monitor.position_registry import PositionRegistry
@@ -176,6 +177,8 @@ class Monitor:
             self.project_root, self.config, self.logger, self.telemetry_writer
         )
         self.market_context = MarketContextEngine(self.entry_engine, self.config)
+        self.price_structure = LiveStructure(str(self.config['symbol']), self._server_now_ms())
+        install_live(self.price_structure)
         self.dmi15_trajectory_context_shadow = RealAContextShadow(
             self.project_root,
             self.config,
@@ -352,6 +355,14 @@ class Monitor:
         limits = market_cfg.get("historical_klines_limit", {})
         symbol = str(self.config["symbol"])
         self.logger.system("loading_historical_candles", symbol=symbol)
+        # Independent telemetry warm-up; no new timeframe in any entry engine.
+        try:
+            hours = self.market_data_client.klines(symbol=symbol, interval='1h', limit=168)
+            now = self._server_now_ms()
+            for candle in hours:
+                self.price_structure.buffer.add_kline(candle, now)
+        except Exception as exc:
+            self.logger.system('price_structure_warmup_failed', error=str(exc))
         for timeframe in self.entry_engine.required_timeframes():
             klines = self.market_data_client.klines(
                 symbol=symbol,
@@ -372,6 +383,17 @@ class Monitor:
         return int(time.time() * 1000)
 
     def _on_ws_event(self, stream: str, payload: Dict[str, Any]) -> None:
+        if stream == f"{str(self.config['symbol']).lower()}@kline_1h":
+            k = payload.get('k') or {}
+            if k.get('x'):
+                try:
+                    self.price_structure.buffer.add_kline(
+                        [k['t'], k['o'], k['h'], k['l'], k['c'], k['v'], k['T']],
+                        max(int(payload.get('E', 0)), int(k['T']) + 1))
+                except Exception as exc:
+                    self.logger.system('price_structure_candle_failed', error=str(exc))
+            if getattr(self, '_structure_only_stream', True):
+                return
         self.market_shadow.on_ws_event(stream, payload)
         market_shadow_ge30 = getattr(self, "market_shadow_ge30", None)
         if market_shadow_ge30:
@@ -565,7 +587,9 @@ class Monitor:
             *self.market_shadow.required_streams(),
             *(market_shadow_ge30.required_streams() if market_shadow_ge30 else []),
         ]
-        return list(dict.fromkeys(str(stream) for stream in streams))
+        structural_stream = f"{str(self.config['symbol']).lower()}@kline_1h"
+        self._structure_only_stream = structural_stream not in streams
+        return list(dict.fromkeys([*(str(stream) for stream in streams), structural_stream]))
 
     def _refresh_market_streams(self) -> None:
         if self.ws_manager:

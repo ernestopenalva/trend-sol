@@ -325,6 +325,8 @@ class BotFullExitPosition(PositionBase):
         position.time_to_be_seconds = _optional_float(state.get("time_to_be_seconds"))
         position.market_context_entry = state.get("market_context_entry")
         position.market_context_exit = state.get("market_context_exit")
+        from src.monitor.price_structure import restore_fields
+        position.price_structure = restore_fields(state)
         position.shadow_kind = state.get("shadow_kind")
         position.signal_price = _optional_float(state.get("signal_price"))
         position.exit_pending_client_order_id = state.get("exit_pending_client_order_id")
@@ -575,6 +577,7 @@ class BotFullExitPosition(PositionBase):
         )
         return {
             "ts": now_iso(),
+            **self.price_structure,
             "pair_id": self.pair_id,
             "position_id": self.position_id,
             "position": self.label,

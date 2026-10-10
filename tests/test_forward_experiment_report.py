@@ -136,9 +136,10 @@ class ForwardExperimentReportTests(unittest.TestCase):
                    'ts':'2026-09-28T05:00:00Z'} for source in (1,2)]
         closed = [{'source_candle_open_time':1, 'opened_at':'2026-09-28T05:00:00Z',
                    'closed_at':'2026-09-28T05:10:00Z', 'entry_price':100., 'exit_price':99.2,
-                   'exit_reason':'FAST_DROP', 'net_pnl_pct':-1., 'position_notional_usdt':20.}]
+                   'exit_reason':'FAST_DROP', 'net_pnl_pct':-1., 'position_notional_usdt':20.,
+                   'trend_open':'BULL', 'trend_close':'BEAR'}]
         opened = [{'source_candle_open_time':2, 'open_ts':'2026-09-28T05:00:00Z',
-                   'entry_price':100., 'status':'OPEN'}]
+                   'entry_price':100., 'status':'OPEN', 'trend_open':'MIXED'}]
         output = StringIO()
         with patch.object(report,'_events_between',return_value=events), patch.object(report,'_records',return_value=closed), patch.object(report,'_state',return_value={'positions':opened}), redirect_stdout(output):
             report._print_accepted(arm, COHORT, parse_time('29/09/2026 00:00'))
@@ -148,7 +149,10 @@ class ForwardExperimentReportTests(unittest.TestCase):
         self.assertEqual(lines[1][5], '-0.80%')
         self.assertEqual(lines[2][5], 'OPEN')
         self.assertEqual(lines[2][9:12], ['OPEN', 'OPEN', 'OPEN'])
-        self.assertTrue(all(len(line)==12 for line in lines))
+        self.assertEqual(lines[0][12:14], ['trend_open', 'trend_close'])
+        self.assertEqual(lines[1][12:14], ['BULL', 'BEAR'])
+        self.assertEqual(lines[2][12:14], ['MIXED', 'OPEN'])
+        self.assertTrue(all(len(line)==14 for line in lines))
 
     def test_since_recalculates_admitted_trade_window_in_all_modes(self):
         cutoff = '30/09/2026 22:03:09'
