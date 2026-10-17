@@ -3,7 +3,7 @@ import json
 from collections import Counter
 from pathlib import Path
 from functools import lru_cache
-from src.monitor.price_structure import restore_fields, timestamp_ms
+from src.monitor.price_structure import restore_fields, timestamp_ms, VERSION, STATES
 
 
 @lru_cache(maxsize=8)
@@ -14,7 +14,9 @@ def _sidecar(path, mtime):
 
 def overlay(row, root):
     path = Path(root)/'data/telemetry/price_structure_backfill.jsonl'
-    result = dict(row)
+    structural_keys={f'trend_{p}{s}' for p in ('open','close') for s in ('','_at','_details')}
+    result = {k:v for k,v in row.items() if k not in structural_keys}
+    result.update(restore_fields(row))
     opened = row.get('opened_at') or row.get('open_ts')
     if not path.exists() or not opened or not row.get('pair_id'):
         return result
@@ -33,6 +35,13 @@ def overlay(row, root):
 
 def aggregate(rows):
     rows = list(rows)
-    return {"trend_open": dict(Counter(r.get('trend_open', 'UNAVAILABLE') for r in rows)),
-            "trend_close": dict(Counter(r.get('trend_close', 'OPEN' if not (r.get('closed_at') or r.get('close_ts')) else 'UNAVAILABLE') for r in rows)),
-            "transitions": dict(Counter(f"{r.get('trend_open', 'UNAVAILABLE')} -> {r.get('trend_close', 'OPEN' if not (r.get('closed_at') or r.get('close_ts')) else 'UNAVAILABLE')}" for r in rows))}
+    def label(row,phase):
+        if phase=='close' and not (row.get('closed_at') or row.get('close_ts')) and row.get('status')!='CLOSED':return 'OPEN'
+        value=row.get('trend_'+phase)
+        return value if value in (*STATES,'UNDEFINED') else 'UNAVAILABLE'
+    result = {"trend_open": dict(Counter(label(r,'open') for r in rows)),
+              "trend_close": dict(Counter(label(r,'close') for r in rows)),
+              "transitions": dict(Counter(f"{label(r,'open')} -> {label(r,'close')}" for r in rows))}
+    for phase in ('trend_open','trend_close'):
+        result[phase]={name:result[phase].get(name,0) for name in (*STATES,'UNDEFINED','UNAVAILABLE','OPEN')}
+    return result

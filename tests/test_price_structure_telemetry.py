@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from src.monitor.price_structure import (
-    HOUR, Hour, StructureBuffer, LiveStructure, install_live, fields, timestamp_ms)
+    HOUR, Hour, StructureBuffer, LiveStructure, install_live, fields, timestamp_ms, VERSION, classify)
 from src.position.bot_full_engine import BotFullExitPosition
 from src.trade_ledger import TradeLedger
 from tools.price_structure_backfill import reconstruct, load_buffer, verify_parity
@@ -30,16 +30,14 @@ def position():
 class StructureTelemetryTests(unittest.TestCase):
     def tearDown(self): install_live(None)
 
-    def test_parity_with_original_function_for_every_synthetic_window(self):
-        from tools.price_structure_study import label
+    def test_core_parity_for_every_synthetic_window(self):
         cs = synthetic()
         for i in range(71, len(cs)):
             window = cs[i-71:i+1]
-            expected, hi, lo = label(window)
+            expected = classify(window,(i+1)*HOUR,'REPLAY')
             snap = StructureBuffer(cs).snapshot((i+1)*HOUR, 'BACKFILL')
-            self.assertEqual(snap['label'], expected)
-            self.assertEqual([p['open_ms'] for p in snap['highs']], [window[j].open_ms for j in hi])
-            self.assertEqual([p['open_ms'] for p in snap['lows']], [window[j].open_ms for j in lo])
+            self.assertEqual({k:v for k,v in snap.items() if k!='source'},
+                             {k:v for k,v in expected.items() if k!='source'})
 
     def test_open_hour_future_and_confirmation_excluded(self):
         cs = synthetic()
@@ -48,8 +46,8 @@ class StructureTelemetryTests(unittest.TestCase):
         snap = StructureBuffer(cs).snapshot(at, 'LIVE')
         self.assertEqual(snap, StructureBuffer(cs[:72]).snapshot(at, 'LIVE'))
         self.assertEqual(before['latest_closed_ms'], 71*HOUR-1)
-        self.assertTrue(all(p['confirmed_ms'] < at for p in snap['highs']+snap['lows']))
-        self.assertTrue(all(p['open_ms'] <= 68*HOUR for p in snap['highs']+snap['lows']))
+        self.assertTrue(all(p['closed_ms'] < at for p in snap['highs']+snap['lows']))
+        self.assertTrue(all(p['open_ms'] <= 71*HOUR for p in snap['highs']+snap['lows']))
 
     def test_gap_is_not_stale_substitute_and_recovers(self):
         cs = synthetic()[:72]
@@ -102,18 +100,19 @@ class StructureTelemetryTests(unittest.TestCase):
         self.assertEqual(len(rs),1)
         self.assertEqual(rs[0]['trend_open_details']['source'],'BACKFILL')
         self.assertEqual(rs[0]['trend_close_details']['latest_closed_ms'],82*HOUR-1)
-        self.assertEqual(reconstruct([('test.jsonl',{**row,'closed_at':None})],b,80*HOUR),[])
+        self.assertEqual(reconstruct([('test.jsonl',{**row,'closed_at':None})],b,80*HOUR)[0]['trend_close'],'OPEN')
 
     def test_overlay_identity_native_precedence_open_and_grouping(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);path=root/'data/telemetry/price_structure_backfill.jsonl'
             path.parent.mkdir(parents=True)
             record=dict(symbol='SOLUSDT',pair_id='test',opened_at='1970-01-04T00:30:00+00:00',closed_at='1970-01-04T10:00:00+00:00',trend_open='BULL',trend_close='BEAR')
+            record.update(trend_open_details={'version':VERSION},trend_close_details={'version':VERSION})
             path.write_text(json.dumps(record)+'\n')
             self.assertEqual(overlay(record,root)['trend_close'],'BEAR')
-            native={**record,'trend_open':'MIXED'}
-            self.assertEqual(overlay(native,root)['trend_open'],'MIXED')
-            opened={k:v for k,v in record.items() if k not in ['closed_at','trend_open','trend_close']}
+            native={**record,'trend_open':'COMP'}
+            self.assertEqual(overlay(native,root)['trend_open'],'COMP')
+            opened={k:v for k,v in record.items() if k not in ['closed_at','trend_open','trend_close','trend_open_details','trend_close_details']}
             augmented=overlay(opened,root)
             self.assertNotIn('trend_close',augmented)
             self.assertEqual(aggregate([augmented])['transitions'],{'BULL -> OPEN':1})
@@ -125,25 +124,26 @@ class StructureTelemetryTests(unittest.TestCase):
         r=report.accepted_trade_rows([event],[],[opened])[0]
         self.assertEqual((r['trend_open'],r['ema'],r['macd'],r['status']),('BEAR','BUL','BU+','OPEN'))
 
-    def test_three_previously_audited_instants(self):
+    def test_half_extrema_at_three_real_timestamps(self):
         path=Path('data/analysis/price_structure_72h_20261010/market/SOLUSDT_1h.jsonl')
         if not path.exists():
             self.skipTest('Audited local study artifact absent')
         b=load_buffer(path)
-        cases=[('2026-10-08T19:00:00-03:00','BEAR','LH','LL',[116.81,115.86],[114.22,105.71]),
-               ('2026-09-29T18:45:00-03:00','BULL','HH','HL',[120.73,121.69],[116.32,117.36]),
-               ('2026-09-24T08:30:00-03:00','MIXED','LH','HL',[119.77,116.13],[113.88,114.07])]
-        for at,label,hi,lo,tops,bottoms in cases:
+        for at in ['2026-10-08T19:00:00-03:00','2026-09-29T18:45:00-03:00','2026-09-24T08:30:00-03:00']:
             s=b.snapshot(at,'BACKFILL')
-            self.assertEqual((s['label'],s['highs_class'],s['lows_class']),(label,hi,lo))
-            self.assertEqual([p['price'] for p in s['highs']],tops)
-            self.assertEqual([p['price'] for p in s['lows']],bottoms)
+            end=timestamp_ms(at)//HOUR*HOUR
+            h1=[b.hours[t] for t in range(end-72*HOUR,end-36*HOUR,HOUR)]
+            h2=[b.hours[t] for t in range(end-36*HOUR,end,HOUR)]
+            self.assertEqual([p['price'] for p in s['highs']],[max(c.high for c in h1),max(c.high for c in h2)])
+            self.assertEqual([p['price'] for p in s['lows']],[min(c.low for c in h1),min(c.low for c in h2)])
 
     def test_live_telemetry_error_cannot_block_close(self):
         from unittest.mock import patch
         live=LiveStructure('SOLUSDT',0);install_live(live)
         p=position()
         with patch.object(live.buffer,'snapshot',side_effect=ValueError('bad telemetry')):
+            failed_open=position()
+            self.assertEqual(failed_open.price_structure['trend_close'],'OPEN')
             p.mark_closed(98.5,'HARD_STOP','1970-01-04T10:00:00+00:00',{})
         self.assertEqual((p.status,p.exit_price,p.reserved_qty),('CLOSED',98.5,0))
         self.assertEqual(p.price_structure['trend_close_details']['status'],'TELEMETRY_ERROR')

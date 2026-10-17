@@ -25,6 +25,7 @@ COMPARABILITY_FLOOR_TEXT = "28/09/2026 01:47:00"
 DEFAULT_SINCE_TEXT = COHORT_STARTED_TEXT
 SUMMARY_HEADER = "arm | closed | open | net | net $/trade | PF | DD $ | HS | HS% | PL | PL% | TRAIL | TRAIL% | median age | max simultaneous"
 ADMISSION_CUTOFF = ContextVar('admission_cutoff', default=None)
+TREND_AUDIT = ContextVar('trend_audit', default=False)
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ def main() -> None:
     parser.add_argument('--matrix-audit', action='store_true', help='Diagnostic EMA_MACD matrix audit; never changes policy')
     parser.add_argument('--pair', help='Matrix audit only: e.g. SHO+BE+ or BUL+BU+')
     parser.add_argument('--top-n', type=int, default=None, help='Matrix audit only: number of positive winners (default 10)')
+    parser.add_argument('--trend-audit', action='store_true', help='Print causal 2x36h extreme evidence for listed trades')
     args = parser.parse_args()
     if args.matrix_audit and args.experiment != 'ema_macd':
         parser.error('--matrix-audit requires --experiment ema_macd')
@@ -104,10 +106,12 @@ def main() -> None:
         if cutoff is None:
             parser.error('--since must use DD/MM/YYYY HH:MM or DD/MM/YYYY HH:MM:SS (BRT)')
     token = ADMISSION_CUTOFF.set(cutoff)
+    trend_token = TREND_AUDIT.set(args.trend_audit)
     try:
         _run_report(args, cutoff)
     finally:
         ADMISSION_CUTOFF.reset(token)
+        TREND_AUDIT.reset(trend_token)
 
 
 def _run_report(args, cutoff):
@@ -443,6 +447,20 @@ def print_summary(since: datetime) -> None:
         if arm not in (CONTROL, REAL_A):
             _validate_experiment_cohort(arm, since)
         print(summary_line(arm, since))
+    print_trend_coverage((REAL_A, CONTROL, ACT20_GAP5, ACT10_GAP13, *ordered_experiments, DMI15_CONTEXT),since)
+
+
+def print_trend_coverage(arms, since):
+    from src.monitor.price_structure import STATES, VERSION
+    from tools.price_structure_report import aggregate
+    print('\nTREND COVERAGE | '+VERSION+' | descriptive only')
+    names=(*STATES,'UNDEFINED','UNAVAILABLE','OPEN')
+    print('phase | arm | '+' | '.join(names))
+    for arm in arms:
+        rows=[*_records(arm,since),*_open_positions(_state(arm),since)]
+        coverage=aggregate(rows)
+        for phase in ('trend_open','trend_close'):
+            print(phase+' | '+arm.name+' | '+' | '.join(str(coverage[phase][k]) for k in names))
 
 
 def summary_line(arm: Arm, since: datetime) -> str:
@@ -585,6 +603,8 @@ def _comparison(control: Arm, experiment: Arm, since: datetime) -> None:
         print(summary_line(hist_arm, since))
     else:
         print(summary_line(experiment, since))
+    arms=(control,EXPERIMENTS['ema_macd'],EXPERIMENTS['ema_macd_hist_1m']) if experiment.name in (EXPERIMENTS['ema_macd'].name,EXPERIMENTS['ema_macd_hist_1m'].name) else (control,experiment)
+    print_trend_coverage(arms,since)
 
 
 def _print_overlap(control: Arm, experiment: Arm, since: datetime) -> None:
@@ -624,6 +644,12 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime, *, trail_details
               (_trail_trade_suffix(trail_records.get(item['source'], {}), is_open) if trail_details else ''))
     if not rows:
         print(' | '.join(['N/A']*(18 if trail_details else 14)))
+    if TREND_AUDIT.get():
+        print('\nTREND EVIDENCE | timestamps denote candle opens; descriptive, never admission inputs')
+        for record in [*opened,*closed]:
+            print(json.dumps({'pair_id':record.get('pair_id'),'source_candle':_source(record),
+                'open':record.get('trend_open_details',{'label':'UNAVAILABLE'}),
+                'close':record.get('trend_close_details',{'label':'OPEN' if not record.get('closed_at') else 'UNAVAILABLE'})},ensure_ascii=False))
 
 
 def accepted_trade_rows(
@@ -715,6 +741,7 @@ def print_trail_activation_gap(since, until):
         if arm != CONTROL:
             _validate_experiment_cohort(arm, since)
         print(summary_line(arm, since))
+    print_trend_coverage((CONTROL,ACT20_GAP5,ACT10_GAP13),since)
     print('\nTRAIL_ACTIVATION_GAP | historical selection; this forward cohort is first OOS validation')
     for arm, activation in ((ACT20_GAP5,20),(ACT10_GAP13,10)):
         print('\n'+arm.name)

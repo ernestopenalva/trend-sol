@@ -1,5 +1,9 @@
 # Contexto estrutural — telemetria, não estratégia
 
+> HISTÓRICO / DESCONTINUADO em17/10/2026: este documento descreve a versão k3.
+> NÃO usar sua regra nem seu procedimento para novas atualizações.
+> A especificação e migração vigentes estão em [trend_2x36h_v1.md](trend_2x36h_v1.md).
+
 ## Entrega local — 10/10/2026
 
 Paridade: 3.148 snapshots completos do estudo, sem divergências. Backfill:

@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from src.monitor.price_structure import Hour, StructureBuffer, fields, timestamp_ms
+from src.monitor.price_structure import Hour, StructureBuffer, fields, timestamp_ms, VERSION
 
 DEFAULT_SINCE = "2026-10-08T23:52:00-03:00"
 
@@ -30,32 +30,15 @@ def load_buffer(path):
     return StructureBuffer(hours)
 
 
-def verify_parity(buffer, study):
-    """All qualified study snapshots, not just a favourable sample."""
-    manifest = json.loads((study/'market_manifest.json').read_text(encoding='utf-8'))
-    if digest(study/'market/SOLUSDT_1h.jsonl') != manifest['1h']['sha256']:
-        raise ValueError('Study hourly hash mismatch')
-    prior = json.loads((study/'context_hourly.json').read_text(encoding='utf-8'))['3']
-    checked = 0
-    for old in prior:
-        if old['available_ms'] - old['window_start_ms'] != 72 * 3600000:
-            continue
-        new = buffer.snapshot(old['available_ms'], 'BACKFILL')
-        if new['label'] != old['label']:
-            raise ValueError(f"PARITY FAILED label at {old['available_ms']}")
-        for oldkey, newkey in [('tops', 'highs'), ('bottoms', 'lows')]:
-            expected = [(p['open_ms'], p['value'], p['confirmed_ms']) for p in old[oldkey]]
-            actual = [(p['open_ms'], p['price'], p['confirmed_ms']) for p in new[newkey]]
-            if actual != expected:
-                raise ValueError(f"PARITY FAILED pivots at {old['available_ms']}")
-            relation = 'UNDEFINED' if len(expected) < 2 else (
-                ('HH' if oldkey == 'tops' else 'HL') if expected[1][1] > expected[0][1] else
-                ('LH' if oldkey == 'tops' else 'LL') if expected[1][1] < expected[0][1] else 'EQUAL')
-            if new[f'{newkey}_class'] != relation:
-                raise ValueError('PARITY FAILED relation')
-        checked += 1
-    if not checked:
-        raise ValueError('No study snapshots verified')
+def verify_parity(buffer, study=None):
+    """New-rule source parity, never equality to the deprecated classifier."""
+    checked=0
+    for at in sorted(buffer.hours)[71:]:
+        snapshots=[buffer.snapshot(at+3600000,s) for s in ('LIVE','BACKFILL','REPLAY')]
+        stripped=[{k:v for k,v in s.items() if k!='source'} for s in snapshots]
+        if not stripped[0]==stripped[1]==stripped[2]:
+            raise ValueError('New rule source parity failed')
+        checked+=1
     return checked
 
 
@@ -67,7 +50,7 @@ def reconstruct(records, buffer, since):
         if not opened or not row.get('pair_id'):
             continue
         # Includes carry-over positions closed after the patch, preserving both causal timestamps.
-        if timestamp_ms(opened) < since and (not closed or timestamp_ms(closed) < since):
+        if timestamp_ms(opened) < since and closed and timestamp_ms(closed) < since:
             continue
         result = dict(ledger=ledger, pair_id=row['pair_id'], symbol=row.get('symbol'),
                       opened_at=opened, closed_at=closed)
@@ -118,7 +101,7 @@ def main():
     p.add_argument('--state-dir', type=Path, help='Optional copied JSON states; no DB access')
     p.add_argument('--candles', type=Path, required=True)
     p.add_argument('--extend-market', action='store_true', help='Append missing closed Binance 1h candles to a new local artifact')
-    p.add_argument('--study-dir', type=Path, default=ROOT/'data/analysis/price_structure_72h_20261010')
+    p.add_argument('--study-dir', type=Path, help='Deprecated compatibility argument; no old classifier is loaded')
     p.add_argument('--since', default=DEFAULT_SINCE, help='Timezone-aware ISO timestamp')
     p.add_argument('--output', type=Path, required=True)
     args = p.parse_args()
@@ -143,7 +126,7 @@ def main():
             positions = value if isinstance(value, list) else value.get('positions', [])
             records.extend((path.name, r) for r in positions if r.get('status') == 'OPEN')
     rows = reconstruct(records, buffer, timestamp_ms(args.since))
-    manifest = dict(since=args.since, parity_snapshots=checked, rows=len(rows),
+    manifest = dict(since=args.since, rule_version=VERSION, parity_snapshots=checked, rows=len(rows),
                     candles_path=str(candles), candles_sha256=digest(candles), input_sha256=hashes,
                     excluded_other_symbols=sum(r.get('symbol') not in (None,'SOLUSDT') for _,r in records),
                     sources=['BACKFILL'], format='audit sidecar; originals untouched')
