@@ -17,6 +17,22 @@ def candles(hi=120,lo=105,distance=8):
 
 
 class NewStructureTests(unittest.TestCase):
+    def test_streaming_hash_matches_original_and_index_is_compact(self):
+        from tools.trend_structure_migrate import rows_fingerprint,fingerprint,build_index
+        rows=[{'a':1,'trend_open':'OLD'}, {'a':[2,3],'b':None}]
+        self.assertEqual(rows_fingerprint(enumerate(rows)),fingerprint(rows))
+        row=dict(pair_id='x',symbol='SOLUSDT',opened_at='2026-10-09T00:00:00Z',audit_events=['large']*100)
+        self.assertNotIn('audit_events',build_index(iter([row]))['x'])
+
+    def test_jsonl_reader_is_incremental(self):
+        from tools.trend_structure_migrate import read_rows
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/'events.jsonl'
+            p.write_text('{"a":1}\n\ninvalid later row\n')
+            rows=read_rows(p)
+            self.assertEqual(next(rows),(0,{'a':1}))
+            with self.assertRaises(json.JSONDecodeError):next(rows)
+
     def test_four_states_and_equal(self):
         for hi,lo,name in [(120,105,'BULL'),(112,90,'BEAR'),(120,90,'EXPA'),(112,98,'COMP'),(115,98,'UNDEFINED'),(120,95,'UNDEFINED')]:
             s=classify(candles(hi,lo),72*HOUR,'REPLAY')

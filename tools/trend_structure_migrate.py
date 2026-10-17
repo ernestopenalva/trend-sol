@@ -11,21 +11,36 @@ from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from src.monitor.price_structure import VERSION, fields, timestamp_ms
+from src.monitor.price_structure import VERSION, fields, timestamp_ms, TIDE, WAVE
 from tools.price_structure_backfill import load_buffer, DEFAULT_SINCE
 from src.monitor.cb_persistence import sync_directory
 
 KEYS={f'trend_{p}{s}' for p in ('open','close') for s in ('','_at','_details')}
+WAVE_KEYS={f'wave_{p}{s}' for p in ('open','close') for s in ('','_at','_details')}|{'wave_rule_version'}
 
 
-def economic(value):
-    if isinstance(value,list):return [economic(x) for x in value]
-    if isinstance(value,dict):return {k:economic(v) for k,v in value.items() if k not in KEYS}
+def economic(value,excluded=KEYS):
+    if isinstance(value,list):return [economic(x,excluded) for x in value]
+    if isinstance(value,dict):return {k:economic(v,excluded) for k,v in value.items() if k not in excluded}
     return value
 
 
-def fingerprint(value):
-    return hashlib.sha256(json.dumps(economic(value),sort_keys=True,separators=(',',':')).encode()).hexdigest()
+def fingerprint(value,excluded=KEYS):
+    return hashlib.sha256(json.dumps(economic(value,excluded),sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def file_digest(path):
+    with path.open('rb') as f:
+        return hashlib.file_digest(f,'sha256').hexdigest()
+
+
+def rows_fingerprint(rows,excluded=KEYS):
+    # Same canonical list hash as before, without retaining history payloads.
+    h=hashlib.sha256();h.update(b'[')
+    for i,(_,row) in enumerate(rows):
+        if i:h.update(b',')
+        h.update(json.dumps(economic(row,excluded),sort_keys=True,separators=(',',':')).encode())
+    h.update(b']');return h.hexdigest()
 
 
 def sqlite_identity(path):
@@ -50,8 +65,9 @@ def read_rows(path):
                     yield (table,rid),json.loads(payload)
         db.close()
     elif path.suffix=='.jsonl':
-        for i,line in enumerate(path.read_text(encoding='utf-8').splitlines()):
-            if line.strip():yield i,json.loads(line)
+        with path.open(encoding='utf-8') as f:
+            for i,line in enumerate(f):
+                if line.strip():yield i,json.loads(line)
     else:
         yield 0,json.loads(path.read_text(encoding='utf-8'))
 
@@ -75,18 +91,20 @@ def build_index(documents):
             if prior and timestamp_ms(prior.get('opened_at') or prior.get('open_ts'))!=timestamp_ms(opened):
                 raise ValueError(f'Ambiguous pair timestamp: {key}')
             # Resolved authoritative record wins over a non-atomic OPEN snapshot.
-            if not prior or r.get('closed_at') or r.get('close_ts'):index[key]=r
+            if not prior or r.get('closed_at') or r.get('close_ts'):
+                index[key]={k:r[k] for k in ('pair_id','symbol','opened_at','open_ts','closed_at','close_ts') if k in r}
     return index
 
 
-def transform(value,buffer,since,index):
-    if isinstance(value,list):return [transform(r,buffer,since,index) for r in value]
+def transform(value,buffer,since,index,rule=TIDE):
+    keys=KEYS if rule==TIDE else WAVE_KEYS
+    if isinstance(value,list):return [transform(r,buffer,since,index,rule) for r in value]
     if not isinstance(value,dict):return value
-    result={k:transform(v,buffer,since,index) for k,v in value.items() if k not in KEYS}
+    result={k:transform(v,buffer,since,index,rule) for k,v in value.items() if k not in keys}
     direct=value.get('opened_at') or value.get('open_ts')
     prior=index.get(str(value.get('pair_id')), {})
     is_event=value.get('event') in ('OPEN','CLOSE','EXPERIMENTAL_CLOSE')
-    opened=direct or ((prior.get('opened_at') or prior.get('open_ts')) if is_event or KEYS.intersection(value) else None)
+    opened=direct or ((prior.get('opened_at') or prior.get('open_ts')) if is_event or keys.intersection(value) else None)
     closed=value.get('closed_at') or value.get('close_ts')
     if not closed and value.get('event') in ('CLOSE','EXPERIMENTAL_CLOSE'):
         closed=prior.get('closed_at') or prior.get('close_ts')
@@ -99,15 +117,15 @@ def transform(value,buffer,since,index):
     for phase,at in [('open',opened),('close',closed)]:
         if at:
             snap=buffer.snapshot(at,'BACKFILL')
-            if snap['missing_hours']:raise ValueError(f'Missing hourly data for {value.get("pair_id")}:{phase}')
-            result.update(fields(snap,phase))
+            if snap.get('missing_hours',snap.get('missing_candles')):raise ValueError(f'Missing market data for {value.get("pair_id")}:{phase}')
+            result.update(fields(snap,phase,rule))
     return result
 
 
 def files(root):
     found=[]
     for folder,patterns in [('data/trades',('*.jsonl',)),('data/state',('*.json','*.history.sqlite','*.pending')),
-                            ('data/telemetry',('*events.jsonl','price_structure_backfill.jsonl'))]:
+                            ('data/telemetry',('*events.jsonl','price_structure_backfill.jsonl','wave_structure_backfill.jsonl'))]:
         for pattern in patterns:found.extend((root/folder).glob(pattern))
     return sorted(set(p for p in found if p.is_file()))
 
@@ -128,17 +146,18 @@ def durable_copy(source,target):
 
 def rollback(root,backup):
     m=json.loads((backup/'manifest.json').read_text())
+    excluded=set(m.get('allowed_fields',KEYS))
     if str(root.resolve())!=m['root']:raise ValueError('Rollback root mismatch')
     for item in m['files']:
         target=root/item['path']
         source=backup/'original'/item['path']
         if not target.resolve().is_relative_to(root.resolve()) or not source.resolve().is_relative_to(backup.resolve()):
             raise ValueError('Invalid backup path')
-        if hashlib.sha256(source.read_bytes()).hexdigest()!=item['before']:
+        if file_digest(source)!=item['before']:
             raise ValueError('Backup checksum mismatch')
         if target.suffix=='.sqlite' and any(target.with_name(target.name+s).exists() for s in ('-wal','-shm')):
             raise ValueError('Rollback requires cleanly stopped SQLite')
-        if fingerprint([r for _,r in read_rows(target)])!=item['economic_sha256']:
+        if rows_fingerprint(read_rows(target),excluded)!=item['economic_sha256']:
             raise ValueError('Economic state advanced; refusing destructive historical rollback')
         if item.get('sqlite_identity_sha256') and fingerprint(sqlite_identity(target))!=item['sqlite_identity_sha256']:
             raise ValueError('SQLite identity advanced; refusing historical rollback')
@@ -151,40 +170,46 @@ def rollback(root,backup):
     m['status']='ROLLED_BACK';atomic_json(backup/'manifest.json',m)
 
 
-def migrate(root,candles,backup,*,since=DEFAULT_SINCE, fail_after=None):
+def migrate(root,candles,backup,*,since=DEFAULT_SINCE, fail_after=None,rule=TIDE):
     root=root.resolve();backup=backup.resolve()
+    excluded=KEYS if rule==TIDE else WAVE_KEYS
     if backup.is_relative_to(root/'data'):raise ValueError('Backup must be outside operational data/')
     if backup.exists():
         m=json.loads((backup/'manifest.json').read_text())
-        if m.get('root')!=str(root) or m.get('since')!=since or m.get('candles_sha256')!=hashlib.sha256(candles.read_bytes()).hexdigest():
+        if m.get('root')!=str(root) or m.get('since')!=since or m.get('candles_sha256')!=file_digest(candles):
             raise ValueError('Backup belongs to different migration inputs')
-        if m['status']=='APPLIED' and m['rule_version']==VERSION:
-            if all(hashlib.sha256((root/x['path']).read_bytes()).hexdigest()==x['after'] for x in m['files']):return m
+        if m['status']=='APPLIED' and m['rule_version']==rule.version:
+            if all(file_digest(root/x['path'])==x['after'] for x in m['files']):return m
         raise ValueError('Existing migration differs or incomplete; rollback before retry')
     targets=files(root)
     # A live WAL means a raw filesystem copy is unsafe. Never truncate/checkpoint it here.
     for p in targets:
         if p.suffix=='.sqlite' and (p.with_name(p.name+'-wal').exists() or p.with_name(p.name+'-shm').exists()):
             raise ValueError(f'SQLite WAL/SHM present; stop cleanly before offline migration: {p}')
-    documents={p:list(read_rows(p)) for p in targets}
-    index=build_index(doc for docs in documents.values() for _,doc in docs)
-    buffer=load_buffer(candles);cut=timestamp_ms(since)
+    index=build_index(doc for p in targets for _,doc in read_rows(p))
+    buffer=load_buffer(candles,rule);cut=timestamp_ms(since)
     changes={}
-    for p,docs in documents.items():
-        updated=[(key,transform(doc,buffer,cut,index)) for key,doc in docs]
-        if fingerprint([r for _,r in docs])!=fingerprint([r for _,r in updated]):raise ValueError('Economic invariance failed')
-        if docs!=updated:changes[p]=updated
+    # Validate every record before creating a backup or touching production.
+    for p in targets:
+        changed=False
+        for _,doc in read_rows(p):
+            updated=transform(doc,buffer,cut,index,rule)
+            if fingerprint(doc,excluded)!=fingerprint(updated,excluded):raise ValueError('Economic invariance failed')
+            changed=changed or doc!=updated
+        if changed:changes[p]=file_digest(p)
     backup.mkdir(parents=True)
-    m=dict(root=str(root),rule_version=VERSION,since=since,status='PREPARING',
-           candles_sha256=hashlib.sha256(candles.read_bytes()).hexdigest(),files=[])
-    for p,updated in changes.items():
+    m=dict(root=str(root),rule_version=rule.version,since=since,status='PREPARING',allowed_fields=sorted(excluded),
+           candles_sha256=file_digest(candles),files=[])
+    for p,before in changes.items():
+        if file_digest(p)!=before:raise ValueError('Input changed during preparation')
         rel=p.relative_to(root);original=backup/'original'/rel;stage=backup/'staged'/rel
         original.parent.mkdir(parents=True,exist_ok=True);stage.parent.mkdir(parents=True,exist_ok=True)
         durable_copy(p,original);durable_copy(p,stage)
         if p.suffix=='.sqlite':
             identity=sqlite_identity(p)
             with sqlite3.connect(stage) as db:
-                for (table,rid),doc in updated:
+                for (table,rid),original_doc in read_rows(p):
+                    doc=transform(original_doc,buffer,cut,index,rule)
                     db.execute(f'UPDATE {table} SET payload=? WHERE rowid=?',(json.dumps(doc,ensure_ascii=False),rid))
                 if db.execute('PRAGMA integrity_check').fetchone()[0]!='ok':raise ValueError('SQLite integrity failed')
             db.close()
@@ -193,12 +218,14 @@ def migrate(root,candles,backup,*,since=DEFAULT_SINCE, fail_after=None):
         else:
             with stage.open('w',encoding='utf-8') as f:
                 if p.suffix=='.jsonl':
-                    for _,doc in updated:f.write(json.dumps(doc,ensure_ascii=False)+'\n')
-                else:json.dump(updated[0][1],f,ensure_ascii=False)
+                    for _,doc in read_rows(p):f.write(json.dumps(transform(doc,buffer,cut,index,rule),ensure_ascii=False)+'\n')
+                else:json.dump(transform(next(read_rows(p))[1],buffer,cut,index,rule),f,ensure_ascii=False)
                 f.flush();os.fsync(f.fileno())
-        m['files'].append(dict(path=str(rel),before=hashlib.sha256(p.read_bytes()).hexdigest(),
-                              after=hashlib.sha256(stage.read_bytes()).hexdigest(),
-                              economic_sha256=fingerprint([r for _,r in updated])))
+        original_hash=rows_fingerprint(read_rows(p),excluded)
+        if rows_fingerprint(read_rows(stage),excluded)!=original_hash:raise ValueError('Staged economic invariance failed')
+        m['files'].append(dict(path=str(rel),before=file_digest(p),
+                              after=file_digest(stage),
+                              economic_sha256=original_hash))
         if p.suffix=='.sqlite':m['files'][-1]['sqlite_identity_sha256']=fingerprint(identity)
     # Persist every newly created parent directory before touching operational files.
     for folder in sorted([p for p in backup.rglob('*') if p.is_dir()],key=lambda p:len(p.parts),reverse=True):
@@ -208,10 +235,10 @@ def migrate(root,candles,backup,*,since=DEFAULT_SINCE, fail_after=None):
     try:
         for i,x in enumerate(m['files']):
             p=root/x['path']
-            if hashlib.sha256(p.read_bytes()).hexdigest()!=x['before']:raise ValueError('Input changed; process may be running')
+            if file_digest(p)!=x['before']:raise ValueError('Input changed; process may be running')
             tmp=p.with_name(p.name+'.trend-migration-tmp')
             durable_copy(backup/'staged'/x['path'],tmp)
-            if hashlib.sha256(tmp.read_bytes()).hexdigest()!=x['after']:raise ValueError('Staged file checksum mismatch')
+            if file_digest(tmp)!=x['after']:raise ValueError('Staged file checksum mismatch')
             os.replace(tmp,p)
             sync_directory(p.parent)
             if fail_after is not None and i+1>=fail_after:raise RuntimeError('Injected failure')
@@ -224,27 +251,29 @@ def migrate(root,candles,backup,*,since=DEFAULT_SINCE, fail_after=None):
 
 def verify(root,backup):
     m=json.loads((backup/'manifest.json').read_text())
+    excluded=set(m.get('allowed_fields',KEYS))
     if m['root']!=str(root.resolve()) or m['status']!='APPLIED':raise ValueError('Migration not applied to this root')
     for item in m['files']:
         p=root/item['path']
-        if hashlib.sha256(p.read_bytes()).hexdigest()!=item['after']:raise ValueError(f'Post-migration file changed: {p}')
-        if fingerprint([r for _,r in read_rows(p)])!=item['economic_sha256']:raise ValueError('Economic check failed')
+        if file_digest(p)!=item['after']:raise ValueError(f'Post-migration file changed: {p}')
+        if rows_fingerprint(read_rows(p),excluded)!=item['economic_sha256']:raise ValueError('Economic check failed')
         if item.get('sqlite_identity_sha256') and fingerprint(sqlite_identity(p))!=item['sqlite_identity_sha256']:
             raise ValueError('SQLite keys/metadata check failed')
-    return dict(status='VERIFIED',files=len(m['files']),rule_version=VERSION,economic_invariance=True)
+    return dict(status='VERIFIED',files=len(m['files']),rule_version=m['rule_version'],economic_invariance=True)
 
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root',type=Path,required=True);p.add_argument('--backup',type=Path,required=True)
     p.add_argument('--candles',type=Path);p.add_argument('--since',default=DEFAULT_SINCE)
+    p.add_argument('--layer',choices=('trend','wave'),default='trend')
     p.add_argument('--offline-confirmed',action='store_true',required=True)
     mode=p.add_mutually_exclusive_group()
     mode.add_argument('--rollback',action='store_true');mode.add_argument('--verify',action='store_true');args=p.parse_args()
     if args.rollback:rollback(args.root,args.backup);print('ROLLED_BACK');return
     if args.verify:print(json.dumps(verify(args.root,args.backup),indent=2));return
     if not args.candles:p.error('--candles required for apply')
-    print(json.dumps(migrate(args.root,args.candles,args.backup,since=args.since),indent=2))
+    print(json.dumps(migrate(args.root,args.candles,args.backup,since=args.since,rule=WAVE if args.layer=='wave' else TIDE),indent=2))
 
 
 if __name__=='__main__':main()

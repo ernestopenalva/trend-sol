@@ -83,6 +83,7 @@ class ForwardExperimentReportTests(unittest.TestCase):
             row=accepted_trade_rows([event],[record],[])[0]
             self.assertEqual((row['ema'],row['macd'],row['exit_ema'],row['exit_macd']),
                              ('LON','BU+','BEA','BE-'))
+            shadow.close()
 
     def test_fast_drop_outcomes_exact_source_closed_open_and_missing(self):
         arm = report.EXPERIMENTS['fast_drop']
@@ -152,10 +153,10 @@ class ForwardExperimentReportTests(unittest.TestCase):
         self.assertEqual(lines[1][5], '-0.80%')
         self.assertEqual(lines[2][5], 'OPEN')
         self.assertEqual(lines[2][9:12], ['OPEN', 'OPEN', 'OPEN'])
-        self.assertEqual(lines[0][12:14], ['trend_open', 'trend_close'])
-        self.assertEqual(lines[1][12:14], ['BULL', 'BEAR'])
-        self.assertEqual(lines[2][12:14], ['COMP', 'OPEN'])
-        self.assertTrue(all(len(line)==14 for line in lines))
+        self.assertEqual(lines[0][12:16], ['trend_open','wave_open','trend_close','wave_close'])
+        self.assertEqual(lines[1][12:16], ['BULL','UNAVAILABLE','BEAR','UNAVAILABLE'])
+        self.assertEqual(lines[2][12:16], ['COMP','UNAVAILABLE','OPEN','OPEN'])
+        self.assertTrue(all(len(line)==16 for line in lines))
 
     def test_since_recalculates_admitted_trade_window_in_all_modes(self):
         cutoff = '30/09/2026 22:03:09'

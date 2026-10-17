@@ -90,7 +90,7 @@ class StructureTelemetryTests(unittest.TestCase):
                 p.on_tick(price,'1970-01-04T01:00:00+00:00')
                 events.append((p.status,p.exit_price,p.exit_reason,p.effective_stop,p.highest_price,p.reserved_qty))
             state=p.to_state()
-            return events,{k:v for k,v in state.items() if not k.startswith('trend_')}
+            return events,{k:v for k,v in state.items() if not k.startswith(('trend_','wave_'))}
         self.assertEqual(run(False),run(True))
 
     def test_backfill_carryover_and_only_causal_data(self):

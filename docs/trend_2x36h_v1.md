@@ -33,6 +33,12 @@ Checkpoint/restart preservam campos válidos; versão antiga não é exposta com
 
 ## Reconstrução e integridade
 
+O migrador lê JSONL e payloads SQLite incrementalmente, com índice compacto de
+identidades/timestamps, sem reter todos os históricos em memória. Pré-validação,
+staging e verificação usam hashes canônicos equivalentes aos anteriores; hashes
+de arquivos também são calculados em streaming. JSONs de estado são lidos um por
+vez. Nenhuma alteração na persistência ou nas decisões do runtime.
+
 Marco08/10/2026 23:52 BRT: admitidos desde o marco, carry-overs vivos nele,
 fechados depois e posições ainda abertas. Open/close usam timestamps reais
 persistidos, não source_candle. Source=BACKFILL. OPEN histórico nunca recebe

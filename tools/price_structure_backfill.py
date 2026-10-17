@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from src.monitor.price_structure import Hour, StructureBuffer, fields, timestamp_ms, VERSION
+from src.monitor.price_structure import Hour, StructureBuffer, fields, timestamp_ms, VERSION, TIDE
 
 DEFAULT_SINCE = "2026-10-08T23:52:00-03:00"
 
@@ -17,24 +17,24 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def load_buffer(path):
+def load_buffer(path,rule=TIDE):
     rows = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
     hours = []
     for r in rows:
         at = int(r['open_time_ms'])
-        if at % 3600000 or int(r['close_time_ms']) != at + 3599999:
+        if at % rule.interval_ms or int(r['close_time_ms']) != at + rule.interval_ms-1:
             raise ValueError('Invalid hourly candle')
         hours.append(Hour(at, float(r['high']), float(r['low'])))
     if len({h.open_ms for h in hours}) != len(hours):
         raise ValueError('Duplicate hourly candles')
-    return StructureBuffer(hours)
+    return StructureBuffer(hours,rule=rule)
 
 
 def verify_parity(buffer, study=None):
     """New-rule source parity, never equality to the deprecated classifier."""
     checked=0
-    for at in sorted(buffer.hours)[71:]:
-        snapshots=[buffer.snapshot(at+3600000,s) for s in ('LIVE','BACKFILL','REPLAY')]
+    for at in sorted(buffer.hours)[buffer.rule.count-1:]:
+        snapshots=[buffer.snapshot(at+buffer.rule.interval_ms,s) for s in ('LIVE','BACKFILL','REPLAY')]
         stripped=[{k:v for k,v in s.items() if k!='source'} for s in snapshots]
         if not stripped[0]==stripped[1]==stripped[2]:
             raise ValueError('New rule source parity failed')

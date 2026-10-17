@@ -451,7 +451,7 @@ def print_summary(since: datetime) -> None:
 
 
 def print_trend_coverage(arms, since):
-    from src.monitor.price_structure import STATES, VERSION
+    from src.monitor.price_structure import STATES, VERSION, WAVE_VERSION
     from tools.price_structure_report import aggregate
     print('\nTREND COVERAGE | '+VERSION+' | descriptive only')
     names=(*STATES,'UNDEFINED','UNAVAILABLE','OPEN')
@@ -460,6 +460,13 @@ def print_trend_coverage(arms, since):
         rows=[*_records(arm,since),*_open_positions(_state(arm),since)]
         coverage=aggregate(rows)
         for phase in ('trend_open','trend_close'):
+            print(phase+' | '+arm.name+' | '+' | '.join(str(coverage[phase][k]) for k in names))
+    print('\nWAVE COVERAGE | '+WAVE_VERSION+' | descriptive only')
+    print('phase | arm | '+' | '.join(names))
+    for arm in arms:
+        rows=[*_records(arm,since),*_open_positions(_state(arm),since)]
+        coverage=aggregate(rows,'wave')
+        for phase in ('wave_open','wave_close'):
             print(phase+' | '+arm.name+' | '+' | '.join(str(coverage[phase][k]) for k in names))
 
 
@@ -629,7 +636,7 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime, *, trail_details
                              'ts': row.get('opened_at') or row.get('open_ts')})
     rows = accepted_trade_rows(accepted, closed, opened)
     print("\nACCEPTED TRADES")
-    header = "source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason | trend_open | trend_close"
+    header = "source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason | trend_open | wave_open | trend_close | wave_close"
     print(header + (' | trail activated | activation BRT | first trail dominance BRT | effective_stop_owner at exit' if trail_details else ''))
     trail_records = {_source(row): row for row in [*opened, *closed]}
     for item in rows:
@@ -640,16 +647,18 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime, *, trail_details
               f"{hs_pct} | "
               f"{'OPEN' if is_open else _fmt_net(item['net'])} | {item['ema']} | {item['macd']} | "
               f"{'OPEN' if is_open else item['exit_ema']} | {'OPEN' if is_open else item['exit_macd']} | "
-              f"{'OPEN' if is_open else item['exit_reason']} | {item['trend_open']} | {'OPEN' if is_open else item['trend_close']}" +
+              f"{'OPEN' if is_open else item['exit_reason']} | {item['trend_open']} | {item['wave_open']} | {'OPEN' if is_open else item['trend_close']} | {'OPEN' if is_open else item['wave_close']}" +
               (_trail_trade_suffix(trail_records.get(item['source'], {}), is_open) if trail_details else ''))
     if not rows:
-        print(' | '.join(['N/A']*(18 if trail_details else 14)))
+        print(' | '.join(['N/A']*(20 if trail_details else 16)))
     if TREND_AUDIT.get():
         print('\nTREND EVIDENCE | timestamps denote candle opens; descriptive, never admission inputs')
         for record in [*opened,*closed]:
             print(json.dumps({'pair_id':record.get('pair_id'),'source_candle':_source(record),
                 'open':record.get('trend_open_details',{'label':'UNAVAILABLE'}),
-                'close':record.get('trend_close_details',{'label':'OPEN' if not record.get('closed_at') else 'UNAVAILABLE'})},ensure_ascii=False))
+                'close':record.get('trend_close_details',{'label':'OPEN' if not record.get('closed_at') else 'UNAVAILABLE'}),
+                'wave_open':record.get('wave_open_details',{'label':'UNAVAILABLE'}),
+                'wave_close':record.get('wave_close_details',{'label':'OPEN' if not record.get('closed_at') else 'UNAVAILABLE'})},ensure_ascii=False))
 
 
 def accepted_trade_rows(
@@ -678,6 +687,8 @@ def accepted_trade_rows(
             "source": source,
             "trend_open": row.get('trend_open', 'UNAVAILABLE'),
             "trend_close": row.get('trend_close', 'UNAVAILABLE'),
+            "wave_open": row.get('wave_open', 'UNAVAILABLE'),
+            "wave_close": row.get('wave_close', 'UNAVAILABLE'),
             "ema": str(event.get("ema_context") or "N/A"),
             "macd": str(event.get("macd_context") or "N/A"),
             "exit_ema": str(exit_context.get('ema_context') or 'UNAVAILABLE'),
