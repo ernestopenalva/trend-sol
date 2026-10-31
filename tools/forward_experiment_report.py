@@ -447,27 +447,6 @@ def print_summary(since: datetime) -> None:
         if arm not in (CONTROL, REAL_A):
             _validate_experiment_cohort(arm, since)
         print(summary_line(arm, since))
-    print_trend_coverage((REAL_A, CONTROL, ACT20_GAP5, ACT10_GAP13, *ordered_experiments, DMI15_CONTEXT),since)
-
-
-def print_trend_coverage(arms, since):
-    from src.monitor.price_structure import STATES, VERSION, WAVE_VERSION
-    from tools.price_structure_report import aggregate
-    print('\nTREND COVERAGE | '+VERSION+' | descriptive only')
-    names=(*STATES,'UNDEFINED','UNAVAILABLE','OPEN')
-    print('phase | arm | '+' | '.join(names))
-    for arm in arms:
-        rows=[*_records(arm,since),*_open_positions(_state(arm),since)]
-        coverage=aggregate(rows)
-        for phase in ('trend_open','trend_close'):
-            print(phase+' | '+arm.name+' | '+' | '.join(str(coverage[phase][k]) for k in names))
-    print('\nWAVE COVERAGE | '+WAVE_VERSION+' | descriptive only')
-    print('phase | arm | '+' | '.join(names))
-    for arm in arms:
-        rows=[*_records(arm,since),*_open_positions(_state(arm),since)]
-        coverage=aggregate(rows,'wave')
-        for phase in ('wave_open','wave_close'):
-            print(phase+' | '+arm.name+' | '+' | '.join(str(coverage[phase][k]) for k in names))
 
 
 def summary_line(arm: Arm, since: datetime) -> str:
@@ -610,8 +589,6 @@ def _comparison(control: Arm, experiment: Arm, since: datetime) -> None:
         print(summary_line(hist_arm, since))
     else:
         print(summary_line(experiment, since))
-    arms=(control,EXPERIMENTS['ema_macd'],EXPERIMENTS['ema_macd_hist_1m']) if experiment.name in (EXPERIMENTS['ema_macd'].name,EXPERIMENTS['ema_macd_hist_1m'].name) else (control,experiment)
-    print_trend_coverage(arms,since)
 
 
 def _print_overlap(control: Arm, experiment: Arm, since: datetime) -> None:
@@ -752,7 +729,6 @@ def print_trail_activation_gap(since, until):
         if arm != CONTROL:
             _validate_experiment_cohort(arm, since)
         print(summary_line(arm, since))
-    print_trend_coverage((CONTROL,ACT20_GAP5,ACT10_GAP13),since)
     print('\nTRAIL_ACTIVATION_GAP | historical selection; this forward cohort is first OOS validation')
     for arm, activation in ((ACT20_GAP5,20),(ACT10_GAP13,10)):
         print('\n'+arm.name)

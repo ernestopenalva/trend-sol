@@ -107,7 +107,7 @@ class WaveTests(unittest.TestCase):
             install_live(live if enabled else None);p=position()
             for i,price in enumerate((100.3,100.7,101.2,101.8,101.0,98.4)):
                 p.on_tick(price,iso(73*HOUR+i*60_000))
-            return {k:v for k,v in p.to_state().items() if not k.startswith(('trend_','wave_'))}
+            return {k:v for k,v in p.to_state().items() if not k.startswith(('trend_','wave_','marola_'))}
         self.assertEqual(run(False),run(True))
 
     def test_streams_reuse_15m_without_duplication(self):

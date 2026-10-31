@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from threading import RLock
 from math import isfinite
@@ -24,6 +24,24 @@ class StructureRule:
 TIDE = StructureRule(VERSION, HOUR, 72, 4*HOUR)
 WAVE_VERSION = 'TREND_12H_2X6H_15M_V1'
 WAVE = StructureRule(WAVE_VERSION, 900_000, 48, 45*60_000, 'wave')
+MAROLA_60 = replace(WAVE, version='TREND_60M_2X30M_5M_V1',
+                    interval_ms=300_000, count=12, prefix='marola_60')
+MAROLA_90 = replace(WAVE, version='TREND_90M_2X45M_5M_V1',
+                    interval_ms=300_000, count=18, prefix='marola_90')
+MAROLAS = (MAROLA_60, MAROLA_90)
+MAROLA_KEYS = {rule.prefix + suffix for rule in MAROLAS for suffix in
+               ('_open', '_open_at', '_open_details', '_open_source', '_rule_version')}
+
+
+def marola_fields(snapshot, rule):
+    """Entry-only telemetry; the classifier is the existing WAVE implementation."""
+    if not snapshot:
+        return {}
+    return {rule.prefix+'_open': snapshot['label'],
+            rule.prefix+'_open_at': snapshot['at'],
+            rule.prefix+'_open_details': snapshot,
+            rule.prefix+'_open_source': snapshot['source'],
+            rule.prefix+'_rule_version': rule.version}
 
 
 def timestamp_ms(value):
@@ -197,6 +215,7 @@ class LiveStructure:
         self.symbol, self.started_ms = symbol, started_ms
         self.buffer = StructureBuffer(retain=168)
         self.wave_buffer = StructureBuffer(retain=192,rule=WAVE)
+        self.marola_buffers = {r.prefix: StructureBuffer(retain=96, rule=r) for r in MAROLAS}
 
     def capture(self, symbol, at, phase='open'):
         # Old positions must not acquire fabricated LIVE entry telemetry at restart.
@@ -207,6 +226,19 @@ class LiveStructure:
     def capture_wave(self,symbol,at,phase='open'):
         if symbol!=self.symbol or (phase=='open' and timestamp_ms(at)<self.started_ms):return {}
         return self.wave_buffer.snapshot(at,'LIVE')
+
+    def add_marola_kline(self, candle, received_ms):
+        for buffer in self.marola_buffers.values():
+            buffer.add_kline(candle, received_ms)
+
+    def capture_marola(self, symbol, at, rule):
+        if timestamp_ms(at) < self.started_ms:
+            return {}  # Never fabricate LIVE entry telemetry for restored positions.
+        if symbol != self.symbol:
+            return dict(label='UNAVAILABLE', at=iso(timestamp_ms(at)), version=rule.version,
+                        source='ao_vivo', status='SYMBOL_NOT_CONFIGURED',
+                        undefined_reason='SYMBOL_NOT_CONFIGURED')
+        return self.marola_buffers[rule.prefix].snapshot(at, 'ao_vivo')
 
 
 def install_live(provider):
@@ -241,6 +273,15 @@ def capture_live(symbol,at,phase):
         result.update(fields(dict(label='UNAVAILABLE',at=str(at),version=WAVE_VERSION,
             rule_version=WAVE_VERSION,source='LIVE',status='TELEMETRY_ERROR',
             undefined_reason='TELEMETRY_ERROR',error=type(exc).__name__),phase,WAVE))
+    if phase == 'open' and hasattr(_live, 'capture_marola'):
+        for rule in MAROLAS:
+            try:
+                snapshot = _live.capture_marola(symbol, at, rule)
+            except Exception as exc:
+                snapshot = dict(label='UNAVAILABLE', at=str(at), version=rule.version,
+                    source='ao_vivo', status='TELEMETRY_ERROR',
+                    undefined_reason='TELEMETRY_ERROR', error=type(exc).__name__)
+            result.update(marola_fields(snapshot, rule))
     return result
 
 
@@ -256,4 +297,8 @@ def restore_fields(state):
             result.update({k:deepcopy(state[k]) for k in
                 (f'wave_{phase}',f'wave_{phase}_at',f'wave_{phase}_details') if k in state})
             result['wave_rule_version']=WAVE_VERSION
+    for rule in MAROLAS:
+        if (state.get(rule.prefix+'_open_details') or {}).get('version') == rule.version:
+            result.update({key:deepcopy(state[key]) for key in MAROLA_KEYS
+                           if key.startswith(rule.prefix+'_') and key in state})
     return result

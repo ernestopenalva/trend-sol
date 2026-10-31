@@ -195,6 +195,8 @@ class ForwardExperimentReportTests(unittest.TestCase):
                     self.assertIn('BE_OFF_CB_SHADOW | 2 | 1 | $+1.0000 | $+0.5000 | 2.000 | $1.0000 | 1 | 50.0% | 1 | 50.0% | 0 | 0.0%',value)
                     self.assertIn(' | 15.0m | 3',value)
                     self.assertNotIn('$-50.0000',value)
+                    self.assertNotIn('TREND COVERAGE', value)
+                    self.assertNotIn('WAVE COVERAGE', value)
                     if experiment:
                         self.assertNotIn('30/09/2026 22:03:08 BRT',value)
                     if experiment=='hs_bull':
@@ -253,6 +255,9 @@ class ForwardExperimentReportTests(unittest.TestCase):
             self.assertIn('BE_OFF_CB_FAST_DROP_EMA_SHADOW |', output.getvalue())
             self.assertIn(' | net | net $/trade |', output.getvalue())
             self.assertNotIn(' | FAST |', output.getvalue())
+            self.assertNotIn('TREND COVERAGE', output.getvalue())
+            self.assertNotIn('WAVE COVERAGE', output.getvalue())
+            self.assertEqual(len(output.getvalue().strip().splitlines()), 14)
 
     def test_default_brt_cohort_timestamp_is_exact(self) -> None:
         self.assertEqual(parse_time("27/09/2026 20:07:29"), COHORT)

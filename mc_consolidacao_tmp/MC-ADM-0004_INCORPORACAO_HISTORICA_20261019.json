@@ -1,0 +1,33 @@
+{
+  "id": "MC-ADM-0004",
+  "tipo": "MANIFESTO_ADMINISTRATIVO_DE_INCORPORACAO",
+  "versao": 1,
+  "data_incorporacao": "2026-10-19",
+  "autorizacao": "Incorporação documental aprovada pelo responsável do projeto; não homologa resultados, hipóteses, conclusões ou mudanças operacionais.",
+  "protocolo": "PROTOCOLO.md v0.3.1",
+  "preservacao_de_versoes": [
+    {"arquivo": "linhas/versoes/MC-LIN-0001_FAST_DROP_SELETORES_v2.md", "id": "12byUhk7mwCLxTYq-mkou7j9IsJblUimv"},
+    {"arquivo": "metodologia/versoes/README_v1_ESTRUTURA_INICIAL.md", "id": "1skckwJizFRgmFG4ixs5KhQYfANJOdcJe"}
+  ],
+  "novos_registros": [
+    {"id": "MC-MET-0003", "versao": 1, "arquivo": "metodologia/MC-MET-0003_EXECUCAO_COMPARABILIDADE_E_VALIDADE.md", "drive_id": "1spw2l38i-ywr0fY5o6vRIYzFosuB3ONM"},
+    {"id": "MC-LIN-0002", "versao": 1, "arquivo": "linhas/MC-LIN-0002_GESTAO_POSICOES_E_SAIDAS.md", "drive_id": "13E8u6QGeJlU7dWO_oj35T1Qeny-0ukUS"},
+    {"id": "MC-LIN-0003", "versao": 1, "arquivo": "linhas/MC-LIN-0003_FILTROS_ENTRADA_E_ADMISSAO.md", "drive_id": "1LOoka-gV2YfvEI0cTlnAzjnsb7TSnyiz"},
+    {"id": "MC-LIN-0004", "versao": 1, "arquivo": "linhas/MC-LIN-0004_EXPOSICAO_E_PROTECAO_CARTEIRA.md", "drive_id": "1xwLkTh4hST7FX7d6GQR4pslykY7Eo3K7"},
+    {"id": "MC-LIN-0005", "versao": 1, "arquivo": "linhas/MC-LIN-0005_CONTEXTO_REGIMES_E_CONFIABILIDADE.md", "drive_id": "1hSweFBM48my3U5CvmcPm4bjawIf1bfpo"}
+  ],
+  "registros_atualizados": [
+    {"id": "MC-LIN-0001", "versao_anterior": 2, "versao_nova": 3, "drive_id": "1YR1_z80cray0xMHPnFcNnXpr68TVDr-i"},
+    {"id": "MC-ADM-INDICE", "versao_anterior": 1, "versao_nova": 2, "arquivo": "README.md", "drive_id": "1rRN-Jmvz9noty9_9sBz-YnJvG6kR0a_N"}
+  ],
+  "variantes_com_evidencia_incompleta": [
+    "BE_OFF_CB_ACT20_GAP5_SHADOW",
+    "BE_OFF_CB_ACT10_GAP13_SHADOW",
+    "HS_BULL_ELASTIC_SHADOW",
+    "HS_BEAR_CLUSTER_EXIT_SHADOW",
+    "CB_EXIT_ALL_SHADOW"
+  ],
+  "nao_alterado": ["PROTOCOLO.md", "PAINEL.html", "PAINEL.md", "bot", "runtime", "configuração", "experimentos", "deploy", "git"],
+  "validacao_documental": "Presença e vínculos dos novos arquivos verificados via Drive; nenhuma validação científica ou de artefato de mercado é declarada por este manifesto.",
+  "pendencia": "Hashes congelados do conteúdo incorporado e recuperação de artefatos legados podem ser adicionados em revisão documental posterior; ausência deles não deve ser interpretada como validade ou invalidade científica."
+}

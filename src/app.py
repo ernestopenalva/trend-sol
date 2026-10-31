@@ -35,7 +35,7 @@ from src.monitor.ladder_shadow import RealALadderShadow
 from src.monitor.forward_experiment_shadows import ExperimentalRiskShadow, PolicyShadow, FastDropEmaShadow, EmaMacdHist1mShadow
 from src.monitor.gcr_shadow import GcrShadowRegistry
 from src.monitor.market_context import MarketContextEngine
-from src.monitor.price_structure import LiveStructure, install_live
+from src.monitor.price_structure import LiveStructure, install_live, MAROLAS, iso
 from src.monitor.human_console_reporter import HumanConsoleReporter
 from src.monitor.multi_market_shadow import MultiMarketShadow
 from src.monitor.position_registry import PositionRegistry
@@ -378,11 +378,36 @@ class Monitor:
             )
             if timeframe == '15m':
                 self._load_wave_candles(klines)
+            if timeframe == '5m':
+                self._load_marola_candles(klines)
         if '15m' not in self.entry_engine.required_timeframes():
             try:
                 self._load_wave_candles(self.market_data_client.klines(symbol=symbol,interval='15m',limit=192))
             except Exception as exc:
                 self.logger.system('wave_structure_warmup_failed',error=str(exc))
+        if '5m' not in self.entry_engine.required_timeframes():
+            try:
+                self._load_marola_candles(self.market_data_client.klines(symbol=symbol,interval='5m',limit=96))
+            except Exception as exc:
+                self.logger.system('marola_structure_warmup_failed',error=str(exc))
+        import hashlib
+        try:
+            classifier_hash=hashlib.sha256((PROJECT_ROOT/'src/monitor/price_structure.py').read_bytes()).hexdigest()
+        except OSError:
+            classifier_hash=None
+        self.logger.system('marola_live_enabled', enabled_at=iso(self._server_now_ms()),
+            run_id=self.config.get('run_id'), source='ao_vivo',
+            versions={r.prefix:r.version for r in MAROLAS}, classification_code_sha256=classifier_hash,
+            warmup_candles={k:len(b.hours) for k,b in self.price_structure.marola_buffers.items()},
+            observational_only=True)
+
+    def _load_marola_candles(self, candles):
+        now = self._server_now_ms()
+        try:
+            for candle in candles:
+                self.price_structure.add_marola_kline(candle, now)
+        except Exception as exc:
+            self.logger.system('marola_structure_warmup_failed', error=str(exc))
 
     def _load_wave_candles(self, candles):
         now=self._server_now_ms()
@@ -397,6 +422,16 @@ class Monitor:
         return int(time.time() * 1000)
 
     def _on_ws_event(self, stream: str, payload: Dict[str, Any]) -> None:
+        if stream == f"{str(self.config['symbol']).lower()}@kline_5m":
+            k = payload.get('k') or {}
+            if k.get('x'):
+                try:
+                    self.price_structure.add_marola_kline(
+                        [k['t'],k['o'],k['h'],k['l'],k['c'],k['v'],k['T']], self._server_now_ms())
+                except Exception as exc:
+                    self.logger.system('marola_structure_candle_failed', error=str(exc))
+            if getattr(self, '_marola_only_stream', False):
+                return
         if stream == f"{str(self.config['symbol']).lower()}@kline_15m":
             k=payload.get('k') or {}
             if k.get('x'):
@@ -614,7 +649,9 @@ class Monitor:
         self._structure_only_stream = structural_stream not in streams
         wave_stream=f"{str(self.config['symbol']).lower()}@kline_15m"
         self._wave_only_stream=wave_stream not in streams
-        return list(dict.fromkeys([*(str(stream) for stream in streams), structural_stream,wave_stream]))
+        marola_stream=f"{str(self.config['symbol']).lower()}@kline_5m"
+        self._marola_only_stream=marola_stream not in streams
+        return list(dict.fromkeys([*(str(stream) for stream in streams), structural_stream,wave_stream,marola_stream]))
 
     def _refresh_market_streams(self) -> None:
         if self.ws_manager:
