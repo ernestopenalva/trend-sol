@@ -138,7 +138,7 @@ class ForwardExperimentReportTests(unittest.TestCase):
         closed = [{'source_candle_open_time':1, 'opened_at':'2026-09-28T05:00:00Z',
                    'closed_at':'2026-09-28T05:10:00Z', 'entry_price':100., 'exit_price':99.2,
                    'exit_reason':'FAST_DROP', 'net_pnl_pct':-1., 'position_notional_usdt':20.,
-                   'trend_open':'BULL', 'trend_close':'BEAR',
+                   'trend_open':'BULL', 'trend_close':'BEAR', 'wave_open':'EXPA', 'marola_90_open':'BULL',
                    'trend_open_details':{'version':'TREND_72H_2X36H_V1'},
                    'trend_close_details':{'version':'TREND_72H_2X36H_V1'}}]
         opened = [{'source_candle_open_time':2, 'open_ts':'2026-09-28T05:00:00Z',
@@ -148,15 +148,25 @@ class ForwardExperimentReportTests(unittest.TestCase):
         with patch.object(report,'_events_between',return_value=events), patch.object(report,'_records',return_value=closed), patch.object(report,'_state',return_value={'positions':opened}), redirect_stdout(output):
             report._print_accepted(arm, COHORT, parse_time('29/09/2026 00:00'))
         lines = [line.split(' | ') for line in output.getvalue().splitlines() if ' | ' in line]
-        self.assertEqual(lines[0][5], 'PnL %')
-        self.assertEqual(lines[0][9:12], ['exit EMA', 'exit MACD', 'exit reason'])
-        self.assertEqual(lines[1][5], '-0.80%')
-        self.assertEqual(lines[2][5], 'OPEN')
-        self.assertEqual(lines[2][9:12], ['OPEN', 'OPEN', 'OPEN'])
-        self.assertEqual(lines[0][12:16], ['trend_open','wave_open','trend_close','wave_close'])
-        self.assertEqual(lines[1][12:16], ['BULL','UNAVAILABLE','BEAR','UNAVAILABLE'])
-        self.assertEqual(lines[2][12:16], ['COMP','UNAVAILABLE','OPEN','OPEN'])
-        self.assertTrue(all(len(line)==16 for line in lines))
+        self.assertEqual(lines[0], 'entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason | wave_open | marola90_open'.split(' | '))
+        self.assertEqual(lines[1][4], '-0.80%')
+        self.assertEqual(lines[2][4], 'OPEN')
+        self.assertEqual(lines[2][8:11], ['OPEN', 'OPEN', 'OPEN'])
+        self.assertEqual(lines[1][11:], ['EXPA','BULL'])
+        self.assertEqual(lines[2][11:], ['UNAVAILABLE','UNAVAILABLE'])
+        self.assertTrue(all(len(line)==13 for line in lines))
+
+    def test_empty_trade_list_has_exact_columns_even_for_trail_details(self):
+        for trail in (False,True):
+            output=StringIO()
+            with patch.object(report,'_events_between',return_value=[]), patch.object(report,'_records',return_value=[]), patch.object(report,'_state',return_value={'positions':[]}), redirect_stdout(output):
+                report._print_accepted(report.EXPERIMENTS['fast_drop'],COHORT,parse_time('29/09/2026 00:00'),trail_details=trail)
+            lines=[line.split(' | ') for line in output.getvalue().splitlines() if ' | ' in line]
+            self.assertEqual(len(lines),2)
+            self.assertTrue(all(len(line)==13 for line in lines))
+            self.assertNotIn('source_candle',lines[0])
+            self.assertNotIn('wave_close',lines[0])
+            self.assertNotIn('trend_open',lines[0])
 
     def test_since_recalculates_admitted_trade_window_in_all_modes(self):
         cutoff = '30/09/2026 22:03:09'
@@ -240,7 +250,7 @@ class ForwardExperimentReportTests(unittest.TestCase):
                 self.assertNotIn('REAL_A |', value)
                 self.assertNotIn('DMI15_TRAJECTORY_CONTEXT_SHADOW |', value)
                 self.assertNotIn('WARM-UP / NON-COMPARABLE', value)
-                self.assertIn('source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason', value)
+                self.assertIn('entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason', value)
                 self.assertNotIn(' | FAST |', value)
                 if name == 'fast_drop':
                     self.assertIn('FAST_DROP exits | 0', value)
@@ -417,7 +427,7 @@ class ForwardExperimentReportTests(unittest.TestCase):
                                 "--list-accepted"]), redirect_stdout(output):
             main()
         self.assertIn("ACCEPTED TRADES", output.getvalue())
-        self.assertIn("source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason", output.getvalue())
+        self.assertIn("entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason", output.getvalue())
         self.assertNotIn("WARM-UP / NON-COMPARABLE", output.getvalue())
 
     def test_warmup_is_hidden_and_switch_removed(self) -> None:

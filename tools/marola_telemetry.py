@@ -6,7 +6,7 @@ Only entry MAROLA fields change in ledgers and CB ledger-history projections.
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from contextlib import closing
 import hashlib
 import json
@@ -329,6 +329,66 @@ def state_snapshot(root):
     return dict(states=states,note='Full checkpoints for audit; no writes to operational state')
 
 
+def live_status(root):
+    """Bounded-memory inspection, without loading whole logs or trade history."""
+    from datetime import datetime, timezone
+    from src.console_utils import BRASILIA_TZ
+    marks=deque(maxlen=50);warnings=[];marker_count=0;first=None
+
+    def rows(path):
+        # Bound individual lines too; corrupt/oversized input is disclosed.
+        with path.open('rb') as stream:
+            while True:
+                line=stream.readline(1024*1024+1)
+                if not line:break
+                if len(line)>1024*1024:
+                    while line and not line.endswith(b'\n'):
+                        line=stream.readline(1024*1024+1)
+                    if str(path) not in warnings:warnings.append(str(path))
+                    continue
+                try:value=json.loads(line)
+                except (ValueError,UnicodeError):continue
+                if isinstance(value,dict):yield value
+
+    def observe(row):
+        nonlocal first
+        if row.get('marola_90_open_source')=='ao_vivo':
+            key=entry(row)
+            if key:first=key[1] if first is None else min(first,key[1])
+
+    log=root/'logs/system.log'
+    if log.exists():
+        for row in rows(log):
+            if row.get('event')=='marola_live_enabled':
+                marker_count+=1
+                stamp=row.get('enabled_at') or row.get('ts')
+                row['enabled_at_brt']=datetime.fromtimestamp(timestamp_ms(stamp)/1000,timezone.utc).astimezone(BRASILIA_TZ).isoformat(timespec='milliseconds')
+                marks.append(row)
+    for path in (root/'data/trades').glob('*.jsonl'):
+        for row in rows(path):observe(row)
+    # Current lean checkpoints are small. Never deserialize legacy huge files.
+    for path in (root/'data/state').glob('*.json'):
+        with path.open('rb') as stream:data=stream.read(1024*1024+1)
+        if len(data)>1024*1024:
+            warnings.append(str(path));continue
+        value=json.loads(data)
+        def visit(value):
+            if isinstance(value,dict):
+                observe(value)
+                for key,item in value.items():
+                    if key not in MAROLA_KEYS:visit(item)
+            elif isinstance(value,list):
+                for item in value:visit(item)
+        visit(value)
+        del value,data
+    return dict(live_markers=list(marks),live_markers_total=marker_count,
+        live_markers_truncated=marker_count>len(marks),
+        rules={r.prefix:r.version for r in MAROLAS},
+        first_persisted_live_entry_brt=datetime.fromtimestamp(first/1000,timezone.utc).astimezone(BRASILIA_TZ).isoformat(timespec='milliseconds') if first is not None else None,
+        oversized_files_or_lines_skipped=warnings,complete=not warnings,
+        note='Read-only streaming; last 50 startup markers. A startup marker does not prove the process survived.')
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=['prepare','migrate','verify','rollback','compare','status','study-parity','snapshot'])
@@ -361,23 +421,7 @@ def main():
     elif args.action=='snapshot':
         result=state_snapshot(args.root)
     else:
-        marks=[]
-        log=args.root/'logs/system.log'
-        for line in log.read_text(encoding='utf-8').splitlines() if log.exists() else ():
-            try:r=json.loads(line)
-            except ValueError:continue
-            if r.get('event')=='marola_live_enabled':marks.append(r)
-        live=[row for path in targets(args.root) if path.suffix!='.sqlite' for _,row in trade_rows(path)
-              if row.get('marola_90_open_source')=='ao_vivo']
-        live.extend(row for _,row in state_rows(args.root) if row.get('marola_90_open_source')=='ao_vivo')
-        first=min((entry(row)[1] for row in live),default=None)
-        from datetime import datetime,timezone
-        from src.console_utils import BRASILIA_TZ
-        for row in marks:
-            stamp=row.get('enabled_at') or row.get('ts')
-            row['enabled_at_brt']=datetime.fromtimestamp(timestamp_ms(stamp)/1000,timezone.utc).astimezone(BRASILIA_TZ).isoformat(timespec='milliseconds')
-        result={'live_markers':marks,'rules':{r.prefix:r.version for r in MAROLAS},
-            'first_persisted_live_entry_brt':datetime.fromtimestamp(first/1000,timezone.utc).astimezone(BRASILIA_TZ).isoformat(timespec='milliseconds') if first is not None else None}
+        result=live_status(args.root)
     if args.output:
         args.output.parent.mkdir(parents=True,exist_ok=True)
         with args.output.open('x',encoding='utf-8') as f:json.dump(result,f,ensure_ascii=False,indent=2)

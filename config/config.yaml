@@ -262,7 +262,7 @@ instrumentation:
     relative_volume_baseline: "mean_previous_closed_candles"
   dmi15_trajectory_context_shadow:
     enabled: true
-    accept_new_entries: true
+    accept_new_entries: false # Drain existing positions; keep exits/state active.
     max_open_positions: 5
     state_file: "data/state/dmi15_trajectory_context_shadow.json"
     ledger_file: "data/trades/trades_dmi15_trajectory_context_shadow.jsonl"
@@ -331,7 +331,7 @@ instrumentation:
     events_file: "data/telemetry/be_off_cb_act10_gap13_shadow_events.jsonl"
   hs_bull_elastic_shadow:
     enabled: true
-    accept_new_entries: true
+    accept_new_entries: false # Drain existing positions; keep exits/state active.
     initial_capital_usdt: 100
     max_open_positions: 5
     state_file: "data/state/hs_bull_elastic_shadow.json"

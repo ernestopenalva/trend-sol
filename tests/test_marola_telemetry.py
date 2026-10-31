@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from src.monitor.price_structure import (MAROLAS, MAROLA_60, MAROLA_90, MAROLA_KEYS,
     Hour, StructureBuffer, LiveStructure, WAVE, classify, capture_live, install_live,
     marola_fields, iso, restore_fields, HOUR)
-from tools.marola_telemetry import annotate, migrate, prepare, compare, verify_migration
+from tools.marola_telemetry import annotate, migrate, prepare, compare, verify_migration, live_status
 from tools.trend_structure_migrate import rollback, verify, economic
 
 Q=300_000
@@ -28,6 +28,42 @@ def provider():
 
 class MarolaTests(unittest.TestCase):
     def tearDown(self):install_live(None)
+
+    def test_status_streams_large_log_and_history_with_bounded_memory(self):
+        import tracemalloc
+        with tempfile.TemporaryDirectory() as tmp:
+            root,ledger,state,cache,row=self.fixture(tmp)
+            (root/'logs').mkdir()
+            marker=dict(event='marola_live_enabled',enabled_at=iso(18*Q),run_id='live')
+            with (root/'logs/system.log').open('w') as f:
+                for _ in range(12000):f.write(json.dumps({'message':'x'*2048})+'\n')
+                for _ in range(55):f.write(json.dumps(marker)+'\n')
+            row['marola_90_open_source']='ao_vivo'
+            with ledger.open('w') as f:
+                for _ in range(12000):f.write(json.dumps({**row,'padding':'x'*2048})+'\n')
+            state.write_text(json.dumps({'positions':[{**row,'opened_at':iso(17*Q)}]}))
+            tracemalloc.start()
+            try:
+                with patch.object(Path,'read_text',side_effect=AssertionError('whole-file read')):
+                    result=live_status(root)
+                peak=tracemalloc.get_traced_memory()[1]
+            finally:tracemalloc.stop()
+            self.assertLess(peak,8*1024*1024)
+            self.assertEqual(result['live_markers_total'],55)
+            self.assertEqual(len(result['live_markers']),50)
+            self.assertTrue(result['live_markers_truncated'])
+            self.assertTrue(result['complete'])
+            self.assertEqual(result['first_persisted_live_entry_brt'],'1969-12-31T22:25:00.000-03:00')
+
+    def test_status_discloses_oversized_inputs_without_loading_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root,ledger,state,cache,row=self.fixture(tmp)
+            state.write_bytes(b' '* (2*1024*1024))
+            ledger.write_bytes(b'x'*(2*1024*1024)+b'\n'+json.dumps({**row,'marola_90_open_source':'ao_vivo'}).encode()+b'\n')
+            result=live_status(root)
+            self.assertFalse(result['complete'])
+            self.assertEqual(set(result['oversized_files_or_lines_skipped']),{str(state),str(ledger)})
+            self.assertIsNotNone(result['first_persisted_live_entry_brt'])
 
     def test_same_geometry_as_frozen_study_and_causal_window(self):
         cs=candles()

@@ -613,21 +613,19 @@ def _print_accepted(arm: Arm, since: datetime, until: datetime, *, trail_details
                              'ts': row.get('opened_at') or row.get('open_ts')})
     rows = accepted_trade_rows(accepted, closed, opened)
     print("\nACCEPTED TRADES")
-    header = "source_candle | entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason | trend_open | wave_open | trend_close | wave_close"
-    print(header + (' | trail activated | activation BRT | first trail dominance BRT | effective_stop_owner at exit' if trail_details else ''))
-    trail_records = {_source(row): row for row in [*opened, *closed]}
+    header = "entry BRT | entry price | exit BRT | exit price | PnL % | net | entry EMA | entry MACD | exit EMA | exit MACD | exit reason | wave_open | marola90_open"
+    print(header)
     for item in rows:
         is_open = item['status'] == 'OPEN'
         hs_pct = 'OPEN' if is_open else (f"{item['hs_pct']:+.2f}%" if item['hs_pct'] is not None else 'N/A')
-        print(f"{_fmt_ms(item['source'])} | {_fmt(item['opened_at'])} | {_fmt_price(item['entry'])} | "
+        print(f"{_fmt(item['opened_at'])} | {_fmt_price(item['entry'])} | "
               f"{'OPEN' if is_open else _fmt(item['closed_at'])} | {'OPEN' if is_open else _fmt_price(item['exit'])} | "
               f"{hs_pct} | "
               f"{'OPEN' if is_open else _fmt_net(item['net'])} | {item['ema']} | {item['macd']} | "
               f"{'OPEN' if is_open else item['exit_ema']} | {'OPEN' if is_open else item['exit_macd']} | "
-              f"{'OPEN' if is_open else item['exit_reason']} | {item['trend_open']} | {item['wave_open']} | {'OPEN' if is_open else item['trend_close']} | {'OPEN' if is_open else item['wave_close']}" +
-              (_trail_trade_suffix(trail_records.get(item['source'], {}), is_open) if trail_details else ''))
+              f"{'OPEN' if is_open else item['exit_reason']} | {item['wave_open']} | {item['marola90_open']}")
     if not rows:
-        print(' | '.join(['N/A']*(20 if trail_details else 16)))
+        print(' | '.join(['N/A']*13))
     if TREND_AUDIT.get():
         print('\nTREND EVIDENCE | timestamps denote candle opens; descriptive, never admission inputs')
         for record in [*opened,*closed]:
@@ -665,6 +663,7 @@ def accepted_trade_rows(
             "trend_open": row.get('trend_open', 'UNAVAILABLE'),
             "trend_close": row.get('trend_close', 'UNAVAILABLE'),
             "wave_open": row.get('wave_open', 'UNAVAILABLE'),
+            "marola90_open": row.get('marola_90_open', 'UNAVAILABLE'),
             "wave_close": row.get('wave_close', 'UNAVAILABLE'),
             "ema": str(event.get("ema_context") or "N/A"),
             "macd": str(event.get("macd_context") or "N/A"),

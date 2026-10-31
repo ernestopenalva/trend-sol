@@ -151,3 +151,25 @@ Versão/origem diferem deliberadamente do estudo; geometria, labels, extremos e
 demais campos têm que ser idênticos. A conferência LIVE futura continua pendente
 até existirem trades após o deploy. Nada desta tarefa cria validação científica
 ou altera decisões de trading.
+
+## Incidente informado em 31/10 e correção do status
+
+Marco LIVE informado pelo responsável: `2026-10-31T00:20:49.955-03:00`,
+run `20261031_0020_b_atr_v1_4`. A tentativa `20261031_0014`, às 00:14:26,
+foi interrompida por OOM e não é o marco válido. Migração informada:
+APPLIED, 17.670 linhas/36 arquivos; VERIFIED, economic_invariance=true,
+checkpoints/pending intactos. São informações do responsável; não substituem
+os logs e manifestos originais para conferência independente.
+
+O status anterior lia o log inteiro e acumulava trades em memória. **Não
+executar essa versão antiga junto do bot** na VPS de 961 MB sem swap.
+A correção local lê logs e ledgers linha a linha, guarda somente os últimos
+50 marcadores e o menor timestamp de entrada. Não consulta SQLite nem
+carrega candles. Linhas e checkpoints acima de 1 MiB são ignorados com
+aviso explícito e `complete=false`; o resultado pode ser parcial.
+Um evento de habilitação, sozinho, não comprova sobrevivência do processo.
+
+Os testes locais verificam memória limitada em arquivos sintéticos grandes.
+Isso não comprova consumo RSS ou segurança concorrente na VPS. A versão
+corrigida ainda depende de atualização pelo responsável; não houve novo
+deploy/restart nesta correção. A comparação LIVE continua pendente de dados.

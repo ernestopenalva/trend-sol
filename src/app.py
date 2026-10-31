@@ -204,6 +204,7 @@ class Monitor:
             predicate=lambda engine, _snapshot: passes_slow_ge45(engine._candles_for("15m")),
         )
         no_progress = self.config.get("risk", {}).get("no_progress", {})
+        self._log_shadow_admission_holds()
         context_settings = self.config.get("instrumentation", {}).get("market_context", {})
         ge_sync = self.config.get("trend_gate", {}).get("sync", {})
         self.logger.system(
@@ -415,6 +416,18 @@ class Monitor:
             for candle in candles:self.price_structure.wave_buffer.add_kline(candle,now)
         except Exception as exc:
             self.logger.system('wave_structure_warmup_failed',error=str(exc))
+
+    def _log_shadow_admission_holds(self) -> None:
+        targets = [self.dmi15_trajectory_context_shadow, *(
+            shadow for shadow in self.forward_experiment_shadows
+            if shadow.strategy == 'HS_BULL_ELASTIC_SHADOW')]
+        for shadow in targets:
+            if shadow.enabled and not shadow.accept_new_entries:
+                self.logger.system('shadow_admissions_stopped',
+                    arm=shadow.strategy, stopped_at=iso(self._server_now_ms()),
+                    run_id=self.config.get('run_id'),
+                    open_positions=len(shadow.open_positions),
+                    existing_positions_continue=True)
 
     def _server_now_ms(self) -> int:
         import time
