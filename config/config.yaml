@@ -202,6 +202,124 @@ logging:
   system_log: "logs/system.log"
 
 instrumentation:
+  structure_repair:
+    poll_seconds: 5
+    close_grace_ms: 2000
+    health_log_seconds: 60
+  keyed_validation:
+    minimum_available_mib: 192
+    minimum_uptime_seconds: 1800
+    observation_seconds: 300
+    sample_interval_seconds: 10
+    continuous_swap_intervals: 3
+  keyed_policy:
+    green_cells:
+    - BULL/EXPA
+    - BEAR/BEAR
+    - BEAR/COMP
+    - COMP/BULL
+    - COMP/BEAR
+    map:
+      BULL/BULL: ACT10
+      BULL/BEAR: ACT10
+      BULL/EXPA: C09+ACT20
+      BULL/COMP: C07+ACT10
+      BEAR/BULL: C03+ACT20
+      BEAR/BEAR: C04+ACT20
+      BEAR/EXPA: C03
+      BEAR/COMP: C06
+      EXPA/BULL: C07
+      EXPA/BEAR: C05+ACT10
+      EXPA/EXPA: C04+ACT20
+      EXPA/COMP: ACT20
+      COMP/BULL: C07+ACT10
+      COMP/BEAR: C04+ACT20
+      COMP/EXPA: C07+ACT10
+      COMP/COMP: C03+ACT20
+    arms:
+      ACT10:
+        filter: null
+        reducer: null
+        activation_atr: 10
+        gap_atr: 13
+      ACT20:
+        filter: null
+        reducer: null
+        activation_atr: 20
+        gap_atr: 5
+      BE_OFF_CB:
+        filter: null
+        reducer: null
+        activation_atr: 10
+        gap_atr: 5
+      C03:
+        filter: BU
+        reducer: FAST
+        activation_atr: 10
+        gap_atr: 5
+      C03+ACT20:
+        filter: BU
+        reducer: FAST
+        activation_atr: 20
+        gap_atr: 5
+      C04+ACT20:
+        filter: EMA
+        reducer: CLUSTER
+        activation_atr: 20
+        gap_atr: 5
+      C05+ACT10:
+        filter: EMA
+        reducer: CB
+        activation_atr: 10
+        gap_atr: 13
+      C06:
+        filter: EMA
+        reducer: FAST
+        activation_atr: 10
+        gap_atr: 5
+      C07:
+        filter: HIST
+        reducer: CLUSTER
+        activation_atr: 10
+        gap_atr: 5
+      C07+ACT10:
+        filter: HIST
+        reducer: CLUSTER
+        activation_atr: 10
+        gap_atr: 13
+      C09+ACT20:
+        filter: HIST
+        reducer: FAST
+        activation_atr: 20
+        gap_atr: 5
+  be_off_cb_ema_macd_cluster_act10_shadow:
+    enabled: true # Approved parity; activation only at operator deploy/restart
+    accept_new_entries: true
+    initial_capital_usdt: 100
+    max_open_positions: 5
+    state_file: data/state/be_off_cb_ema_macd_cluster_act10_shadow.json
+    ledger_file: data/trades/trades_be_off_cb_ema_macd_cluster_act10_shadow.jsonl
+    events_file: data/telemetry/be_off_cb_ema_macd_cluster_act10_shadow_events.jsonl
+    trail_activation_atr: 10
+    trail_gap_atr: 13
+  chaveado_vivo_shadow:
+    enabled: true # Approved parity; activation only at operator deploy/restart
+    accept_new_entries: true
+    initial_capital_usdt: 100
+    max_open_positions: 5
+    state_file: data/state/chaveado_vivo_shadow.json
+    ledger_file: data/trades/trades_chaveado_vivo_shadow.jsonl
+    events_file: data/telemetry/chaveado_vivo_shadow_events.jsonl
+    green_only: false
+  chaveado_vivo_verde_shadow:
+    enabled: true # Approved parity; activation only at operator deploy/restart
+    accept_new_entries: true
+    initial_capital_usdt: 100
+    max_open_positions: 5
+    state_file: data/state/chaveado_vivo_verde_shadow.json
+    ledger_file: data/trades/trades_chaveado_vivo_verde_shadow.jsonl
+    events_file: data/telemetry/chaveado_vivo_verde_shadow_events.jsonl
+    green_only: true
   enabled: true
   context_forward_cohort_id: "REAL_A_CONTEXT_PHASE_2026"
   queue_max_size: 10000

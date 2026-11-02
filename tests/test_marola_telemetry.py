@@ -142,7 +142,7 @@ class MarolaTests(unittest.TestCase):
         marker=next(c.kwargs for c in m.logger.system.call_args_list if c.args[0]=='marola_live_enabled')
         self.assertEqual(marker['enabled_at'],iso(18*Q+123))
         self.assertEqual(marker['source'],'ao_vivo')
-        self.assertEqual(marker['versions'],{r.prefix:r.version for r in MAROLAS})
+        self.assertEqual(marker['versions'],{k:b.rule.version for k,b in m.price_structure.marola_buffers.items()})
         self.assertEqual(marker['warmup_candles'],{'marola_60':18,'marola_90':18})
         self.assertEqual(len(marker['classification_code_sha256']),64)
 

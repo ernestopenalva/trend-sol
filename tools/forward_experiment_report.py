@@ -23,7 +23,7 @@ COHORT_STARTED_TEXT = "27/09/2026 20:07:29"
 COMPARABILITY_FLOOR_TEXT = "28/09/2026 01:47:00"
 # Kept as a compatibility alias for imports made by earlier versions/tests.
 DEFAULT_SINCE_TEXT = COHORT_STARTED_TEXT
-SUMMARY_HEADER = "arm | closed | open | net | net $/trade | PF | DD $ | HS | HS% | PL | PL% | TRAIL | TRAIL% | median age | max simultaneous"
+SUMMARY_HEADER = "arm | closed | open | net | net $/trade | PF | DD $ | HS | HS% | PL | PL% | TRAIL | TRAIL% | median age | max simultaneous | trades/day | USDT*h | wave UNAVAILABLE open/close"
 ADMISSION_CUTOFF = ContextVar('admission_cutoff', default=None)
 TREND_AUDIT = ContextVar('trend_audit', default=False)
 
@@ -71,6 +71,14 @@ EXPERIMENTS = {
     "ema_macd": Arm("BE_OFF_CB_EMA_MACD_SHADOW", "data/trades/trades_be_off_cb_ema_macd_shadow.jsonl",
                     "data/state/be_off_cb_ema_macd_shadow.json", "data/telemetry/be_off_cb_ema_macd_shadow_events.jsonl"),
 }
+EXPERIMENTS.pop('hs_bull')
+for _key in ('be_off_cb_ema_macd_cluster_act10_shadow', 'chaveado_vivo_shadow', 'chaveado_vivo_verde_shadow'):
+    EXPERIMENTS[_key] = Arm(_key.upper(), f'data/trades/trades_{_key}.jsonl',
+                           f'data/state/{_key}.json', f'data/telemetry/{_key}_events.jsonl')
+_ordered = [arm for key, arm in EXPERIMENTS.items()
+            if key not in ('trail_activation_gap', 'ema_macd_hist_1m')]
+_ordered.insert(_ordered.index(EXPERIMENTS['ema_macd']) + 1, EXPERIMENTS['ema_macd_hist_1m'])
+ACTIVE_ARMS = (CONTROL, ACT20_GAP5, ACT10_GAP13, *_ordered)
 
 
 def main() -> None:
@@ -217,7 +225,7 @@ def determine_comparable_window(
     keeps the comparable window pending.
     """
     observed_at = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    selected = tuple(arms or (CONTROL, *EXPERIMENTS.values(), ACT10_GAP13))
+    selected = tuple(arms or ACTIVE_ARMS)
     if observed_at < floor:
         carryovers = _unresolved_before(selected, floor)
         suffix = f"; {carryovers} pre-floor position(s) still open" if carryovers else ""
@@ -440,10 +448,7 @@ def _print_ema_macd_warmup(events: list[dict[str, Any]]) -> None:
 def print_summary(since: datetime) -> None:
     print(f"\nCOMPARABLE SUMMARY | since {_fmt(since)}")
     print(SUMMARY_HEADER)
-    ordered_experiments = [arm for key, arm in EXPERIMENTS.items() if key not in ('ema_macd_hist_1m','trail_activation_gap')]
-    ordered_experiments.insert(ordered_experiments.index(EXPERIMENTS['ema_macd']) + 1,
-                               EXPERIMENTS['ema_macd_hist_1m'])
-    for arm in (REAL_A, CONTROL, ACT20_GAP5, ACT10_GAP13, *ordered_experiments, DMI15_CONTEXT):
+    for arm in ACTIVE_ARMS:
         if arm not in (CONTROL, REAL_A):
             _validate_experiment_cohort(arm, since)
         print(summary_line(arm, since))
@@ -470,7 +475,23 @@ def summary_line(arm: Arm, since: datetime) -> str:
         return f"{100 * count / len(rows):.1f}%" if rows else "N/A"
     opened = len(_open_positions(state, since))
     maximum = max_simultaneous(arm, since)
-    return f"{arm.name} | {len(rows)} | {opened} | {_sum_net(rows)} | {net_trade} | {pf} | {dd} | {hs} | {exit_share(hs)} | {pl} | {exit_share(pl)} | {trail} | {exit_share(trail)} | {med_age} | {maximum}"
+    now = datetime.now(timezone.utc)
+    positions = rows + _open_positions(state, since)
+    hours = 0.0
+    for row in positions:
+        start = parse_time(row.get('opened_at') or row.get('open_ts'))
+        end = parse_time(row.get('closed_at') or row.get('close_ts')) or now
+        notional = _number(row.get('position_notional_usdt'))
+        if start and notional is not None:
+            hours += notional * max(0, (min(end, now)-max(start, since)).total_seconds())/3600
+    days = max(0, (now-since).total_seconds())/86400
+    frequency = f'{len(positions)/days:.3f}' if days else 'N/A'
+    def unavailable(phase):
+        selected = positions if phase == 'open' else rows
+        labeled = [p for p in selected if p.get('wave_'+phase) is not None]
+        return (f"{sum(p.get('wave_'+phase)=='UNAVAILABLE' for p in labeled)}/{len(labeled)}"
+                if labeled else 'N/A')
+    return f"{arm.name} | {len(rows)} | {opened} | {_sum_net(rows)} | {net_trade} | {pf} | {dd} | {hs} | {exit_share(hs)} | {pl} | {exit_share(pl)} | {trail} | {exit_share(trail)} | {med_age} | {maximum} | {frequency} | {hours:.4f} | {unavailable('open')}/{unavailable('close')}"
 
 
 def print_macd_bu_minus(arm: Arm, since: datetime) -> None:

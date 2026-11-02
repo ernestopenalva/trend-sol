@@ -36,6 +36,8 @@ from src.monitor.forward_experiment_shadows import ExperimentalRiskShadow, Polic
 from src.monitor.gcr_shadow import GcrShadowRegistry
 from src.monitor.market_context import MarketContextEngine
 from src.monitor.price_structure import LiveStructure, install_live, MAROLAS, iso
+from src.monitor.keyed_shadow import KeyedShadow, EmaMacdClusterAct10Shadow
+from src.monitor.structure_repair import StructureRepair
 from src.monitor.human_console_reporter import HumanConsoleReporter
 from src.monitor.multi_market_shadow import MultiMarketShadow
 from src.monitor.position_registry import PositionRegistry
@@ -157,6 +159,13 @@ class Monitor:
                 pair_prefix="emamacd", policy="EMA_MACD",
                 cohort_started_at=self.ladder_shadow_cohort_started_at),
         ]
+        self.forward_experiment_shadows.extend([
+            EmaMacdClusterAct10Shadow(self.project_root, self.config, self.logger,
+                self.telemetry_writer, cohort_started_at=self.ladder_shadow_cohort_started_at),
+            *(KeyedShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
+                settings_key=key, cohort_started_at=self.ladder_shadow_cohort_started_at)
+              for key in ('chaveado_vivo_shadow', 'chaveado_vivo_verde_shadow')),
+        ])
         self.entry_engine = EntryEngine(str(self.config["symbol"]), self.config, self.logger)
         self.gcr_shadow = GcrShadowRegistry(
             self.project_root, self.config, self.logger, self.telemetry_writer
@@ -179,6 +188,11 @@ class Monitor:
         self.market_context = MarketContextEngine(self.entry_engine, self.config)
         self.price_structure = LiveStructure(str(self.config['symbol']), self._server_now_ms())
         install_live(self.price_structure)
+        self.structure_repair = StructureRepair(self.price_structure, self.market_data_client,
+            self.logger, self._server_now_ms, self.config['instrumentation']['structure_repair'])
+        for shadow in self.forward_experiment_shadows:
+            if isinstance(shadow, KeyedShadow):
+                shadow.structure_ready = lambda: self.structure_repair.ready
         self.dmi15_trajectory_context_shadow = RealAContextShadow(
             self.project_root,
             self.config,
@@ -290,6 +304,16 @@ class Monitor:
             self.logger.system("validating_startup")
             self._validate_startup()
             self._load_historical_candles()
+            self.structure_repair.start()
+            self.logger.system('structure_v2_enabled', enabled_at=iso(self._server_now_ms()),
+                run_id=self.config.get('run_id'), wave_version=self.price_structure.wave_buffer.rule.version,
+                marola90_version=self.price_structure.marola_buffers['marola_90'].rule.version,
+                keyed_warmup_ready=self.structure_repair.ready,
+                new_shadows={s.settings_key: {'enabled': s.enabled,
+                    'accept_new_entries': s.accept_new_entries} for s in self.forward_experiment_shadows
+                    if isinstance(s, (KeyedShadow, EmaMacdClusterAct10Shadow))},
+                resource_fallback_shadows={key: self.config['instrumentation'][key]['enabled']
+                    for key in ('dmi15_trajectory_context_shadow', 'hs_bull_elastic_shadow')})
             initial_context = self._safe_refresh_market_context()
             for shadow in self.forward_experiment_shadows:
                 if isinstance(shadow, TrailActivationGapShadow):
@@ -329,6 +353,7 @@ class Monitor:
             self.logger.system("monitor_starting", symbol=self.config["symbol"], streams=streams)
             self.ws_manager.run_forever()
         finally:
+            self.structure_repair.stop()
             if self.status_reporter:
                 self.status_reporter.stop()
             self.market_shadow.stop()
@@ -371,12 +396,9 @@ class Monitor:
                 limit=int(limits.get(timeframe, 120)),
             )
             self.entry_engine.load_history(timeframe, klines, now_ms=self._server_now_ms())
-            self.dmi15_trajectory_context_shadow.engine.load_history(
-                timeframe, klines, now_ms=self._server_now_ms()
-            )
-            self.slow_ge_context_shadow.engine.load_history(
-                timeframe, klines, now_ms=self._server_now_ms()
-            )
+            for shadow in (self.dmi15_trajectory_context_shadow, self.slow_ge_context_shadow):
+                if shadow.enabled:
+                    shadow.engine.load_history(timeframe, klines, now_ms=self._server_now_ms())
             if timeframe == '15m':
                 self._load_wave_candles(klines)
             if timeframe == '5m':
@@ -398,9 +420,11 @@ class Monitor:
             classifier_hash=None
         self.logger.system('marola_live_enabled', enabled_at=iso(self._server_now_ms()),
             run_id=self.config.get('run_id'), source='ao_vivo',
-            versions={r.prefix:r.version for r in MAROLAS}, classification_code_sha256=classifier_hash,
+            versions={k:b.rule.version for k,b in self.price_structure.marola_buffers.items()},
+            classification_code_sha256=classifier_hash,
             warmup_candles={k:len(b.hours) for k,b in self.price_structure.marola_buffers.items()},
-            observational_only=True)
+            observational_only=not any(isinstance(s, KeyedShadow) and s.enabled
+                                       for s in getattr(self, 'forward_experiment_shadows', [])))
 
     def _load_marola_candles(self, candles):
         now = self._server_now_ms()

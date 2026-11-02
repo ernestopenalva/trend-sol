@@ -255,13 +255,18 @@ class ForwardExperimentReportTests(unittest.TestCase):
                 if name == 'fast_drop':
                     self.assertIn('FAST_DROP exits | 0', value)
 
-    def test_general_summary_includes_operational_benchmark_and_fast(self):
+    def test_general_summary_has_only_twelve_approved_shadows(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = StringIO()
             with patch.object(report, 'ROOT', Path(tmp)), redirect_stdout(output):
                 report.print_summary(COHORT)
-            self.assertIn('REAL_A |', output.getvalue())
-            self.assertIn('DMI15_TRAJECTORY_CONTEXT_SHADOW |', output.getvalue())
+            self.assertNotIn('REAL_A |', output.getvalue())
+            self.assertNotIn('DMI15_TRAJECTORY_CONTEXT_SHADOW |', output.getvalue())
+            self.assertNotIn('HS_BULL_ELASTIC_SHADOW |', output.getvalue())
+            for name in ('CHAVEADO_VIVO_SHADOW', 'CHAVEADO_VIVO_VERDE_SHADOW',
+                         'BE_OFF_CB_EMA_MACD_CLUSTER_ACT10_SHADOW'):
+                self.assertIn(name+' |', output.getvalue())
+            self.assertEqual(len(report.ACTIVE_ARMS),12)
             self.assertIn('BE_OFF_CB_FAST_DROP_EMA_SHADOW |', output.getvalue())
             self.assertIn(' | net | net $/trade |', output.getvalue())
             self.assertNotIn(' | FAST |', output.getvalue())

@@ -1,4 +1,4 @@
-"""Price-only, causal telemetry. Never consulted by trading decisions."""
+"""Causal price structure; V2 also supplies the keyed shadow decisions."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -24,11 +24,13 @@ class StructureRule:
 TIDE = StructureRule(VERSION, HOUR, 72, 4*HOUR)
 WAVE_VERSION = 'TREND_12H_2X6H_15M_V1'
 WAVE = StructureRule(WAVE_VERSION, 900_000, 48, 45*60_000, 'wave')
+WAVE_V2 = replace(WAVE, version='TREND_12H_2X6H_15M_V2')
 MAROLA_60 = replace(WAVE, version='TREND_60M_2X30M_5M_V1',
                     interval_ms=300_000, count=12, prefix='marola_60')
 MAROLA_90 = replace(WAVE, version='TREND_90M_2X45M_5M_V1',
                     interval_ms=300_000, count=18, prefix='marola_90')
 MAROLAS = (MAROLA_60, MAROLA_90)
+MAROLA_90_V2 = replace(MAROLA_90, version='TREND_90M_2X45M_5M_V2')
 MAROLA_KEYS = {rule.prefix + suffix for rule in MAROLAS for suffix in
                ('_open', '_open_at', '_open_details', '_open_source', '_rule_version')}
 
@@ -75,6 +77,11 @@ def classify_window(window, rule=TIDE):
     lo = [min(range(start, start+half), key=lambda i: window[i].low) for start in (0,half)]
     dh = window[hi[1]].high - window[hi[0]].high
     dl = window[lo[1]].low - window[lo[0]].low
+    if rule.version.endswith('_V2'):
+        name = ('LATE' if dh == dl == 0 else
+                'BULL' if dh > 0 and dl > 0 else 'BEAR' if dh < 0 and dl < 0 else
+                'EXPA' if dh >= 0 and dl <= 0 else 'COMP')
+        return name, hi, lo
     return ("UNDEFINED" if dh == 0 or dl == 0 else
             "BULL" if dh > 0 and dl > 0 else "BEAR" if dh < 0 and dl < 0 else
             "EXPA" if dh > 0 and dl < 0 else "COMP"), hi, lo
@@ -135,8 +142,8 @@ def classify(candles, at, source, rule=TIDE):
         lows_class='HL' if dl>0 else 'LL' if dl<0 else 'EQUAL',
         top_distance_hours=top_distance, bottom_distance_hours=bottom_distance,
         top_boundary_conflict_4h=top_distance<4, bottom_boundary_conflict_4h=bottom_distance<4,
-        status='OK' if name!='UNDEFINED' else 'EQUAL_EXTREME',
-        undefined_reason='EQUAL_EXTREME' if name=='UNDEFINED' else None)
+        status='OK' if name not in ('UNDEFINED','LATE') else 'EQUAL_EXTREME',
+        undefined_reason='EQUAL_EXTREME' if name in ('UNDEFINED','LATE') else None)
     if rule!=TIDE:
         result.pop('top_boundary_conflict_4h');result.pop('bottom_boundary_conflict_4h')
         result.update(top_distance_minutes=top_distance*60,bottom_distance_minutes=bottom_distance*60,
@@ -197,13 +204,14 @@ def fields(snapshot, phase, rule=TIDE):
     if not snapshot:
         return {}
     prefix=rule.prefix
+    version=snapshot.get('rule_version') or snapshot.get('version') or rule.version
     result = {f"{prefix}_{phase}": snapshot["label"], f"{prefix}_{phase}_at": snapshot["at"],
               f"{prefix}_{phase}_details": snapshot}
     if phase == 'open':
         result.update({f'{prefix}_close':'OPEN',f'{prefix}_close_at':None,
-                      f'{prefix}_close_details':dict(label='OPEN',at=None,version=rule.version,
-                                               rule_version=rule.version,source=snapshot['source'])})
-    if rule!=TIDE:result[f'{prefix}_rule_version']=rule.version
+                      f'{prefix}_close_details':dict(label='OPEN',at=None,version=version,
+                                               rule_version=version,source=snapshot['source'])})
+    if rule!=TIDE:result[f'{prefix}_rule_version']=version
     return result
 
 
@@ -214,8 +222,9 @@ class LiveStructure:
     def __init__(self, symbol, started_ms):
         self.symbol, self.started_ms = symbol, started_ms
         self.buffer = StructureBuffer(retain=168)
-        self.wave_buffer = StructureBuffer(retain=192,rule=WAVE)
-        self.marola_buffers = {r.prefix: StructureBuffer(retain=96, rule=r) for r in MAROLAS}
+        self.wave_buffer = StructureBuffer(retain=192,rule=WAVE_V2)
+        self.marola_buffers = {r.prefix: StructureBuffer(retain=96, rule=r)
+                               for r in (MAROLA_60, MAROLA_90_V2)}
 
     def capture(self, symbol, at, phase='open'):
         # Old positions must not acquire fabricated LIVE entry telemetry at restart.
@@ -231,8 +240,8 @@ class LiveStructure:
         for buffer in self.marola_buffers.values():
             buffer.add_kline(candle, received_ms)
 
-    def capture_marola(self, symbol, at, rule):
-        if timestamp_ms(at) < self.started_ms:
+    def capture_marola(self, symbol, at, rule, phase='open'):
+        if phase == 'open' and timestamp_ms(at) < self.started_ms:
             return {}  # Never fabricate LIVE entry telemetry for restored positions.
         if symbol != self.symbol:
             return dict(label='UNAVAILABLE', at=iso(timestamp_ms(at)), version=rule.version,
@@ -268,20 +277,23 @@ def capture_live(symbol,at,phase):
     result=_capture_tide(symbol,at,phase)
     if _live is None or not at:return result
     try:
-        result.update(fields(_live.capture_wave(symbol,at,phase),phase,WAVE))
+        result.update(fields(_live.capture_wave(symbol,at,phase),phase,WAVE_V2))
     except Exception as exc:
-        result.update(fields(dict(label='UNAVAILABLE',at=str(at),version=WAVE_VERSION,
-            rule_version=WAVE_VERSION,source='LIVE',status='TELEMETRY_ERROR',
-            undefined_reason='TELEMETRY_ERROR',error=type(exc).__name__),phase,WAVE))
-    if phase == 'open' and hasattr(_live, 'capture_marola'):
-        for rule in MAROLAS:
+        result.update(fields(dict(label='UNAVAILABLE',at=str(at),version=WAVE_V2.version,
+            rule_version=WAVE_V2.version,source='LIVE',status='TELEMETRY_ERROR',
+            undefined_reason='TELEMETRY_ERROR',error=type(exc).__name__),phase,WAVE_V2))
+    if hasattr(_live, 'capture_marola'):
+        for rule in ((MAROLA_60, MAROLA_90_V2) if phase == 'open' else (MAROLA_90_V2,)):
             try:
-                snapshot = _live.capture_marola(symbol, at, rule)
+                snapshot = _live.capture_marola(symbol, at, rule, phase)
             except Exception as exc:
                 snapshot = dict(label='UNAVAILABLE', at=str(at), version=rule.version,
                     source='ao_vivo', status='TELEMETRY_ERROR',
                     undefined_reason='TELEMETRY_ERROR', error=type(exc).__name__)
-            result.update(marola_fields(snapshot, rule))
+            result.update(fields(snapshot, phase, rule) if rule == MAROLA_90_V2
+                          else marola_fields(snapshot, rule))
+            if snapshot and rule == MAROLA_90_V2:
+                result[f'{rule.prefix}_{phase}_source'] = snapshot['source']
     return result
 
 
@@ -293,12 +305,18 @@ def restore_fields(state):
             result.update({k:deepcopy(state[k]) for k in
                 (f'trend_{phase}',f'trend_{phase}_at',f'trend_{phase}_details') if k in state})
         wave=state.get(f'wave_{phase}_details') or {}
-        if wave.get('version')==WAVE_VERSION:
+        if wave.get('version') in (WAVE_VERSION, WAVE_V2.version):
             result.update({k:deepcopy(state[k]) for k in
                 (f'wave_{phase}',f'wave_{phase}_at',f'wave_{phase}_details') if k in state})
-            result['wave_rule_version']=WAVE_VERSION
+            result['wave_rule_version']=wave['version']
     for rule in MAROLAS:
         if (state.get(rule.prefix+'_open_details') or {}).get('version') == rule.version:
             result.update({key:deepcopy(state[key]) for key in MAROLA_KEYS
                            if key.startswith(rule.prefix+'_') and key in state})
+    for phase in ('open', 'close'):
+        details = state.get(f'marola_90_{phase}_details') or {}
+        if details.get('version') in (MAROLA_90.version, MAROLA_90_V2.version):
+            result.update({key: deepcopy(value) for key, value in state.items()
+                           if key.startswith(f'marola_90_{phase}')})
+            result['marola_90_rule_version'] = details['version']
     return result
