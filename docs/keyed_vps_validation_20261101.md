@@ -61,7 +61,7 @@ As pastas de saída devem ser novas. As ferramentas recusam sobrescrita.
 
 Exigir preflight e probe `passed=true`. O preflight compara hashes e recusa
 diferenças operacionais não autorizadas no YAML do VPS (sem imprimir valores).
-O probe faz somente três consultas públicas de klines, remove um slot **de um
+O probe usa consultas públicas de klines, remove um slot **de um
 buffer isolado**, recupera por REST e exige que o passado continue UNAVAILABLE.
 Ele nunca instala esse provider no bot e nunca injeta falha no feed real.
 Não lê `.env`, não usa cliente de execução e não envia ordens.
@@ -168,3 +168,41 @@ KEYED_PID=PID_DO_FALLBACK_CONFIRMADO
 Exigir a mesma folga e estabilidade. Se falhar, **reportar e não fazer outra
 mudança**. O preparador recusa usar uma falha de fase fallback para propor novas
 alterações. Nenhum fallback foi aplicado pelo agente.
+
+
+## Maré V2 no próximo deploy
+
+A maré LIVE passa a `TREND_72H_2X36H_V2`, com a mesma janela de 72 candles
+1h e as mesmas metades de 36 horas. Um empate em apenas um extremo resolve
+como EXPA ou COMP. Empate nos dois extremos resulta em LATE. A maré continua
+sendo apenas registro e conserva `MISSING_CANDLES` e `missing_hours` para
+lacunas. A versão de cada fase fica nos detalhes, inclusive quando uma
+posição aberta sob V1 fecha sob V2. Os estudos históricos continuam em V1
+por padrão.
+
+O worker existente recupera slots fechados de 1h via REST público, após a
+mesma tolerância configurada para chegada pelo WebSocket. O candle recuperado
+só fica disponível a partir do recebimento. A maré não altera a prontidão dos
+chaveados. Após o próximo restart, conferir `tide_version` no evento
+`structure_v2_enabled`, a camada `tide` de `structure_health` e, caso haja
+lacuna, `structure_gap_repair` com `interval=1h`. A entrega já publicada de
+01/11 permanece como evidência daquele deploy.
+
+## Marola 90 V2 no próximo deploy
+
+O relatório forward inclui, ao lado da onda, a contagem de UNAVAILABLE
+na abertura e no fechamento da marola_90. Cada fase usa como denominador
+os registros com rótulo. Sem rótulos na fase, o relatório mostra N/A.
+
+Para verificar o REST e a causalidade de 5m no VPS, usar o comando
+public-probe deste roteiro com --interval 5m e uma pasta de saída nova.
+Para investigar os trades de 03/11 às 07:25 e 12:40 BRT e de 02/11 às
+04:00 BRT, cruzar marola_90_open_details.missing_candles (e
+wave_open_details no último caso) com structure_gap_repair no log.
+Comparar received_ms com o horário exato da abertura. Um candle recebido
+depois pode reparar a janela seguinte, mantendo o registro original.
+
+As três ocorrências estão em bordas de 5m. A tolerância de 2 segundos
+e a sondagem a cada 5 segundos permitem que uma abertura ocorra antes
+da recuperação. Isso é uma hipótese para os três casos até consultar
+o ledger e os eventos do VPS.

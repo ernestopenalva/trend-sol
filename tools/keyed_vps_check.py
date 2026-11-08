@@ -18,9 +18,11 @@ SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE))
 NEW = ('be_off_cb_ema_macd_cluster_act10_shadow', 'chaveado_vivo_shadow',
        'chaveado_vivo_verde_shadow')
+K1_ARM = 'ema_macd_cluster_act10_k1_shadow'
 ACTIVE = ('be_off_cb_shadow', 'be_off_cb_act20_gap5_shadow', 'be_off_cb_act10_gap13_shadow',
           'be_off_cb_fast_drop_ema_shadow', 'hs_bear_cluster_exit_shadow', 'cb_exit_all_shadow',
-          'be_off_cb_macd_bu_minus_shadow', 'be_off_cb_ema_macd_shadow', 'ema_macd_hist_1m_shadow', *NEW)
+          'be_off_cb_macd_bu_minus_shadow', 'be_off_cb_ema_macd_shadow', 'ema_macd_hist_1m_shadow', *NEW,
+          K1_ARM)
 
 
 def stamp(value):
@@ -193,6 +195,7 @@ def observe(args, config):
     arms={}
     for key in ACTIVE:
         settings=config['instrumentation'][key];counts={'open':Counter(),'close':Counter()}
+        marola_counts={'open':Counter(),'close':Counter()}
         versions=Counter();seen=set();checkpoint_open=None
         def include(row, phases):
             for phase in phases:
@@ -208,6 +211,7 @@ def observe(args, config):
                 if in_window and identity not in seen:
                     seen.add(identity)
                     counts[phase][row.get(f'wave_{phase}') or 'MISSING_FIELD'] += 1
+                    marola_counts[phase][row.get(f'marola_90_{phase}') or 'MISSING_FIELD'] += 1
                     details=row.get(f'wave_{phase}_details') or {}
                     versions[details.get('rule_version') or details.get('version') or 'MISSING_VERSION'] += 1
         for row in rows(args.root/settings['ledger_file'], errors):
@@ -221,6 +225,7 @@ def observe(args, config):
         except FileNotFoundError:
             errors['missing_state_files'] += 1
         arms[key]={phase:coverage(counts[phase]) for phase in counts}
+        arms[key]['marola_90']={phase:coverage(marola_counts[phase]) for phase in marola_counts}
         arms[key]['versions']=dict(versions)
         arms[key]['open_positions_in_checkpoint']=checkpoint_open
     configured = (boot or {}).get('new_shadows') or {}
@@ -230,6 +235,8 @@ def observe(args, config):
         'repairs':repairs,'errors':dict(events),'read_quality':dict(errors),
         'new_shadows_confirmed_enabled':all(configured.get(k,{}).get('enabled') is True and
             configured.get(k,{}).get('accept_new_entries') is True for k in NEW),
+        'k1_shadow_confirmed_enabled':configured.get(K1_ARM,{}).get('enabled') is True and
+            configured.get(K1_ARM,{}).get('accept_new_entries') is True,
         'boot_marker':boot,'latest_health':latest_health,
         'latest_health_age_seconds':(until-latest_health['sampled_at_ms'])/1000
             if latest_health and latest_health.get('sampled_at_ms') else None,
@@ -259,23 +266,26 @@ def public_probe(args, config):
             for row in candles:
                 if tf=='15m':buffer.add_kline(row,received)
                 else:provider.add_marola_kline(row,received)
-        before=provider.wave_buffer.snapshot(now(),'PROBE')
+        interval = getattr(args, 'interval', '15m')
+        target = provider.wave_buffer if interval == '15m' else provider.marola_buffers['marola_90']
+        before=target.snapshot(now(),'PROBE')
         if before['label']=='UNAVAILABLE':
-            raise ValueError('Public 15m warmup incomplete')
-        missing_slot=before['window_start_ms']+provider.wave_buffer.rule.interval_ms
-        del provider.wave_buffer.hours[missing_slot];provider.wave_buffer._cache.clear()
-        gap_at=now();gap=provider.wave_buffer.snapshot(gap_at,'PROBE')
+            raise ValueError(f'Public {interval} warmup incomplete')
+        missing_slot=before['window_start_ms']+target.rule.interval_ms
+        del target.hours[missing_slot];target._cache.clear()
+        gap_at=now();gap=target.snapshot(gap_at,'PROBE')
         # Respect configured close grace if invocation happens on a boundary.
         wait=max(0,(gap['window_end_ms']+config['instrumentation']['structure_repair']['close_grace_ms']-now())/1000)
         if wait:time.sleep(wait+.01)
         repair=StructureRepair(provider,client,Logger(),now,config['instrumentation']['structure_repair'])
         repair.repair_once();recovered_at=now()
-        after=provider.wave_buffer.snapshot(recovered_at,'PROBE')
-        historical=provider.wave_buffer.snapshot(gap_at,'PROBE')
+        after=target.snapshot(recovered_at,'PROBE')
+        historical=target.snapshot(gap_at,'PROBE')
         passed=(gap['label']=='UNAVAILABLE' and after['label']!='UNAVAILABLE'
-                and historical['label']=='UNAVAILABLE' and repair.ready)
+                and missing_slot in historical['missing_candles']
+                and missing_slot not in after['missing_candles'] and repair.ready)
         return {'mode':'public-probe','passed':passed,'public_endpoint':base,
-                'symbol':config['symbol'],'missing_slot_ms':missing_slot,
+                'symbol':config['symbol'],'interval':interval,'missing_slot_ms':missing_slot,
                 'before':before,'gap':gap,'after':after,
                 'past_snapshot_after_repair':historical,'repair_events':log,
                 'production_buffers_modified':False,'orders_sent':0}
@@ -294,6 +304,7 @@ def main():
     p.add_argument('--duration',type=float)
     p.add_argument('--since',help='Actual restart timestamp with timezone')
     p.add_argument('--until')
+    p.add_argument('--interval', choices=['15m', '5m'], default='15m', help='Gap to simulate in public-probe')
     a=p.parse_args();a.root=a.root.resolve();a.output=a.output.resolve()
     if a.output==a.root or any(a.output.is_relative_to(a.root/name) for name in ('src','config','logs','data')):
         p.error('Evidence must be outside production sources, config, logs and data (use backups/)')

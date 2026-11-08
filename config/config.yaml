@@ -302,6 +302,17 @@ instrumentation:
     events_file: data/telemetry/be_off_cb_ema_macd_cluster_act10_shadow_events.jsonl
     trail_activation_atr: 10
     trail_gap_atr: 13
+  ema_macd_cluster_act10_k1_shadow:
+    enabled: true # Approved shadow; activation only at operator deploy/restart
+    accept_new_entries: true
+    initial_capital_usdt: 100
+    max_open_positions: 5
+    state_file: data/state/ema_macd_cluster_act10_k1_shadow.json
+    ledger_file: data/trades/trades_ema_macd_cluster_act10_k1_shadow.jsonl
+    events_file: data/telemetry/ema_macd_cluster_act10_k1_shadow_events.jsonl
+    trail_activation_atr: 10
+    trail_gap_atr: 13
+    spacing_queda_atr: 1
   chaveado_vivo_shadow:
     enabled: true # Approved parity; activation only at operator deploy/restart
     accept_new_entries: true
@@ -379,8 +390,8 @@ instrumentation:
     relative_volume_period: 20
     relative_volume_baseline: "mean_previous_closed_candles"
   dmi15_trajectory_context_shadow:
-    enabled: true
-    accept_new_entries: false # Drain existing positions; keep exits/state active.
+    enabled: false # Discontinued by approved K1 deployment; files and history preserved.
+    accept_new_entries: false # enabled=false suspends this shadow; existing ledger/checkpoint are retained.
     max_open_positions: 5
     state_file: "data/state/dmi15_trajectory_context_shadow.json"
     ledger_file: "data/trades/trades_dmi15_trajectory_context_shadow.jsonl"
@@ -448,8 +459,8 @@ instrumentation:
     ledger_file: "data/trades/trades_be_off_cb_act10_gap13_shadow.jsonl"
     events_file: "data/telemetry/be_off_cb_act10_gap13_shadow_events.jsonl"
   hs_bull_elastic_shadow:
-    enabled: true
-    accept_new_entries: false # Drain existing positions; keep exits/state active.
+    enabled: false # Discontinued by approved K1 deployment; files and history preserved.
+    accept_new_entries: false # enabled=false suspends this shadow; existing ledger/checkpoint are retained.
     initial_capital_usdt: 100
     max_open_positions: 5
     state_file: "data/state/hs_bull_elastic_shadow.json"

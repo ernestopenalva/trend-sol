@@ -22,6 +22,7 @@ class StructureRule:
 
 
 TIDE = StructureRule(VERSION, HOUR, 72, 4*HOUR)
+TIDE_V2 = replace(TIDE, version="TREND_72H_2X36H_V2")
 WAVE_VERSION = 'TREND_12H_2X6H_15M_V1'
 WAVE = StructureRule(WAVE_VERSION, 900_000, 48, 45*60_000, 'wave')
 WAVE_V2 = replace(WAVE, version='TREND_12H_2X6H_15M_V2')
@@ -112,7 +113,7 @@ def classify(candles, at, source, rule=TIDE):
         top_distance_hours=None, bottom_distance_hours=None,
         top_boundary_conflict_4h=None, bottom_boundary_conflict_4h=None,
         undefined_reason=None)
-    if rule!=TIDE:
+    if rule.prefix != 'trend':
         result.pop('missing_hours');result['missing_candles']=missing
         result.pop('top_boundary_conflict_4h');result.pop('bottom_boundary_conflict_4h')
         result.update(interval_ms=interval,candle_count=rule.count,conflict_threshold_ms=rule.conflict_ms,
@@ -121,11 +122,11 @@ def classify(candles, at, source, rule=TIDE):
     if missing:
         result.update(status='MISSING_CANDLES', undefined_reason=
             'INSUFFICIENT_HISTORY' if not by or min(by)>opens[0] else 'MISSING_CANDLES')
-        if rule!=TIDE:result['label']='UNAVAILABLE'
+        if rule.prefix != 'trend':result['label']='UNAVAILABLE'
         return result
     if any(not isfinite(c.high) or not isfinite(c.low) or c.low > c.high for c in window):
         result.update(status='INVALID_CANDLES', undefined_reason='INVALID_OHLC')
-        if rule!=TIDE:result['label']='UNAVAILABLE'
+        if rule.prefix != 'trend':result['label']='UNAVAILABLE'
         return result
     name, hi, lo = classify_window(window,rule)
     def extremes(indices, kind):
@@ -144,7 +145,7 @@ def classify(candles, at, source, rule=TIDE):
         top_boundary_conflict_4h=top_distance<4, bottom_boundary_conflict_4h=bottom_distance<4,
         status='OK' if name not in ('UNDEFINED','LATE') else 'EQUAL_EXTREME',
         undefined_reason='EQUAL_EXTREME' if name in ('UNDEFINED','LATE') else None)
-    if rule!=TIDE:
+    if rule.prefix != 'trend':
         result.pop('top_boundary_conflict_4h');result.pop('bottom_boundary_conflict_4h')
         result.update(top_distance_minutes=top_distance*60,bottom_distance_minutes=bottom_distance*60,
                       top_boundary_conflict_45m=top_distance*HOUR<rule.conflict_ms,
@@ -211,7 +212,7 @@ def fields(snapshot, phase, rule=TIDE):
         result.update({f'{prefix}_close':'OPEN',f'{prefix}_close_at':None,
                       f'{prefix}_close_details':dict(label='OPEN',at=None,version=version,
                                                rule_version=version,source=snapshot['source'])})
-    if rule!=TIDE:result[f'{prefix}_rule_version']=version
+    if rule.prefix != 'trend':result[f'{prefix}_rule_version']=version
     return result
 
 
@@ -221,7 +222,7 @@ _live = None
 class LiveStructure:
     def __init__(self, symbol, started_ms):
         self.symbol, self.started_ms = symbol, started_ms
-        self.buffer = StructureBuffer(retain=168)
+        self.buffer = StructureBuffer(retain=168, rule=TIDE_V2)
         self.wave_buffer = StructureBuffer(retain=192,rule=WAVE_V2)
         self.marola_buffers = {r.prefix: StructureBuffer(retain=96, rule=r)
                                for r in (MAROLA_60, MAROLA_90_V2)}
@@ -263,7 +264,7 @@ def _capture_tide(symbol, at, phase):
     except Exception as exc:
         # Telemetry must never interrupt an economic transition or recovery.
         snapshot=dict(label='UNDEFINED', at=str(at),
-                    version=VERSION, rule_version=VERSION, source='LIVE', status='TELEMETRY_ERROR',
+                    version=TIDE_V2.version, rule_version=TIDE_V2.version, source='LIVE', status='TELEMETRY_ERROR',
                     undefined_reason='TELEMETRY_ERROR',
                     error=type(exc).__name__, highs=[], lows=[],
                     highs_class='UNDEFINED', lows_class='UNDEFINED',
@@ -301,7 +302,7 @@ def restore_fields(state):
     result = {}
     for phase in ('open','close'):
         details = state.get(f'trend_{phase}_details') or {}
-        if details.get('version') == VERSION:
+        if details.get('version') in (VERSION, TIDE_V2.version):
             result.update({k:deepcopy(state[k]) for k in
                 (f'trend_{phase}',f'trend_{phase}_at',f'trend_{phase}_details') if k in state})
         wave=state.get(f'wave_{phase}_details') or {}

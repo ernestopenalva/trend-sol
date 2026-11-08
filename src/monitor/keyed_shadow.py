@@ -197,3 +197,55 @@ class EmaMacdClusterAct10Shadow(PolicyShadow, ExperimentalRiskShadow):
         cfg['trailing'].update(activation_atr=self.settings['trail_activation_atr'],
                                gap_atr=self.settings['trail_gap_atr'])
         return cfg
+
+
+class EmaMacdClusterAct10K1Shadow(EmaMacdClusterAct10Shadow):
+    """EMA_MACD+ACT10 cluster arm with the post-filter K1 spacing-in-decline gate."""
+
+    def __init__(self, project_root, config, logger, telemetry, *, cohort_started_at):
+        self.k1_block_count = 0
+        self.policy = 'EMA_MACD'
+        self.experiment = 'HS_BEAR_CLUSTER_EXIT'
+        CircuitBreakerShadow.__init__(self, project_root, config, logger, telemetry,
+            settings_key='ema_macd_cluster_act10_k1_shadow',
+            strategy='EMA_MACD_CLUSTER_ACT10_K1_SHADOW',
+            pair_prefix='emamacdclusteract10k1',
+            shadow_kind='EMA_MACD_CLUSTER_ACT10_K1_SHADOW', be_off=True,
+            cohort_started_at=cohort_started_at)
+
+    def _exit_config(self):
+        # Keep the base arm's independent CB, BE-off, ACT10/GAP13 and HS cluster.
+        return EmaMacdClusterAct10Shadow._exit_config(self)
+
+    def _load_cb_state(self):
+        super()._load_cb_state()
+        if self.state_path.exists():
+            data = json.loads(self.state_path.read_text(encoding='utf-8'))
+            self.k1_block_count = int(data.get('k1_block_count', 0))
+
+    def _extra_state(self):
+        return {'k1_block_count': self.k1_block_count}
+
+    def _k1_block_details(self, signal):
+        opened = list(self.open_positions)
+        negative = [position for position in opened if float(signal.price) < float(position.entry_price)]
+        if negative:
+            lowest_entry = min(float(position.entry_price) for position in opened)
+            required_price = lowest_entry - float(self.settings.get('spacing_queda_atr', 1.0)) * float(signal.entry_atr)
+            if float(signal.price) > required_price:
+                return {'signal_price': float(signal.price),
+                    'open_positions_count': len(opened),
+                    'negative_positions_count': len(negative),
+                    'lowest_open_entry_price': lowest_entry,
+                    'required_signal_price': required_price,
+                    'entry_atr': float(signal.entry_atr)}
+        return None
+
+    def _open(self, signal, bucket):
+        details = self._k1_block_details(signal)
+        if details is not None:
+            self.k1_block_count += 1
+            self._block('ENTRY_BLOCKED_SPACING_QUEDA', signal, bucket, **details)
+            return False
+        EmaMacdClusterAct10Shadow._open(self, signal, bucket)
+        return True

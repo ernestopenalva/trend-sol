@@ -38,10 +38,10 @@ def aggregate(rows,prefix='trend'):
     def label(row,phase):
         if phase=='close' and not (row.get('closed_at') or row.get('close_ts')) and row.get('status')!='CLOSED':return 'OPEN'
         value=row.get(prefix+'_'+phase)
-        return value if value in (*STATES,'UNDEFINED') else 'UNAVAILABLE'
+        return value if value in (*STATES,'UNDEFINED','LATE') else 'UNAVAILABLE'
     result = {prefix+"_open": dict(Counter(label(r,'open') for r in rows)),
               prefix+"_close": dict(Counter(label(r,'close') for r in rows)),
               "transitions": dict(Counter(f"{label(r,'open')} -> {label(r,'close')}" for r in rows))}
     for phase in (prefix+'_open',prefix+'_close'):
-        result[phase]={name:result[phase].get(name,0) for name in (*STATES,'UNDEFINED','UNAVAILABLE','OPEN')}
+        result[phase]={name:result[phase].get(name,0) for name in (*STATES,'UNDEFINED','LATE','UNAVAILABLE','OPEN')}
     return result

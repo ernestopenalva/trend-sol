@@ -17,10 +17,12 @@ class StructureRepair:
 
     def repair_once(self):
         for interval, buffer in [('15m', self.provider.wave_buffer),
-                                 ('5m', self.provider.marola_buffers['marola_90'])]:
+                                 ('5m', self.provider.marola_buffers['marola_90']),
+                                 ('1h', self.provider.buffer)]:
             now = self.now_ms()
             snapshot = buffer.snapshot(now, 'LIVE')
-            missing = snapshot.get('missing_candles', [])
+            missing_key = 'missing_hours' if interval == '1h' else 'missing_candles'
+            missing = snapshot.get(missing_key, [])
             # Allow the closing WebSocket message to arrive before polling REST.
             if not missing or now < snapshot['window_end_ms'] + self.grace:
                 continue
@@ -29,14 +31,14 @@ class StructureRepair:
                                           limit=buffer.rule.count + 2)
                 received = self.now_ms()
                 for row in rows:
-                    if interval == '15m':
+                    if interval != '5m':
                         buffer.add_kline(row, received)
                     else:
                         self.provider.add_marola_kline(row, received)
                 after = buffer.snapshot(received, 'LIVE')
                 self.logger.system('structure_gap_repair', interval=interval,
                     received_ms=received, missing_before=missing,
-                    missing_after=after.get('missing_candles', []), status=after['status'])
+                    missing_after=after.get(missing_key, []), status=after['status'])
             except Exception as exc:
                 self.logger.system('structure_gap_repair_failed', interval=interval,
                                    error=type(exc).__name__)
@@ -47,11 +49,12 @@ class StructureRepair:
         if self.last_health_ms is None or now - self.last_health_ms >= self.health_interval_ms:
             # Sparse read-only evidence: never feeds back into an economic decision.
             layers = {}
-            for name, buffer in [('wave', self.provider.wave_buffer),
+            for name, buffer in [('tide', self.provider.buffer),
+                                 ('wave', self.provider.wave_buffer),
                                  ('marola_90', self.provider.marola_buffers['marola_90'])]:
                 snapshot = buffer.snapshot(now, 'LIVE')
                 layers[name] = {key: snapshot.get(key) for key in
-                    ('label', 'status', 'rule_version', 'undefined_reason', 'missing_candles',
+                    ('label', 'status', 'rule_version', 'undefined_reason', 'missing_candles', 'missing_hours',
                      'window_start_ms', 'window_end_ms', 'latest_closed_ms')}
             self.logger.system('structure_health', sampled_at_ms=now,
                                initial_warmup_complete=self.ready, **layers)

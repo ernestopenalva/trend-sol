@@ -36,7 +36,8 @@ from src.monitor.forward_experiment_shadows import ExperimentalRiskShadow, Polic
 from src.monitor.gcr_shadow import GcrShadowRegistry
 from src.monitor.market_context import MarketContextEngine
 from src.monitor.price_structure import LiveStructure, install_live, MAROLAS, iso
-from src.monitor.keyed_shadow import KeyedShadow, EmaMacdClusterAct10Shadow
+from src.monitor.keyed_shadow import (KeyedShadow, EmaMacdClusterAct10Shadow,
+                                      EmaMacdClusterAct10K1Shadow)
 from src.monitor.structure_repair import StructureRepair
 from src.monitor.human_console_reporter import HumanConsoleReporter
 from src.monitor.multi_market_shadow import MultiMarketShadow
@@ -161,6 +162,8 @@ class Monitor:
         ]
         self.forward_experiment_shadows.extend([
             EmaMacdClusterAct10Shadow(self.project_root, self.config, self.logger,
+                self.telemetry_writer, cohort_started_at=self.ladder_shadow_cohort_started_at),
+            EmaMacdClusterAct10K1Shadow(self.project_root, self.config, self.logger,
                 self.telemetry_writer, cohort_started_at=self.ladder_shadow_cohort_started_at),
             *(KeyedShadow(self.project_root, self.config, self.logger, self.telemetry_writer,
                 settings_key=key, cohort_started_at=self.ladder_shadow_cohort_started_at)
@@ -306,7 +309,8 @@ class Monitor:
             self._load_historical_candles()
             self.structure_repair.start()
             self.logger.system('structure_v2_enabled', enabled_at=iso(self._server_now_ms()),
-                run_id=self.config.get('run_id'), wave_version=self.price_structure.wave_buffer.rule.version,
+                run_id=self.config.get('run_id'), tide_version=self.price_structure.buffer.rule.version,
+                wave_version=self.price_structure.wave_buffer.rule.version,
                 marola90_version=self.price_structure.marola_buffers['marola_90'].rule.version,
                 keyed_warmup_ready=self.structure_repair.ready,
                 new_shadows={s.settings_key: {'enabled': s.enabled,
@@ -484,7 +488,7 @@ class Monitor:
                 try:
                     self.price_structure.buffer.add_kline(
                         [k['t'], k['o'], k['h'], k['l'], k['c'], k['v'], k['T']],
-                        max(int(payload.get('E', 0)), int(k['T']) + 1))
+                        self._server_now_ms())
                 except Exception as exc:
                     self.logger.system('price_structure_candle_failed', error=str(exc))
             if getattr(self, '_structure_only_stream', True):

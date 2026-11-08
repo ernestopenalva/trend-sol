@@ -33,9 +33,12 @@ class ForwardExperimentReportTests(unittest.TestCase):
     def test_summary_exit_shares_use_all_closed_trades(self):
         rows=[{'exit_reason': reason} for reason in
               ('HARD_STOP','PROFIT_LOCK','TRAILING','FAST_DROP')]
+        rows[0].update(wave_open='UNAVAILABLE', wave_close='BULL',
+                       marola_90_open='BEAR', marola_90_close='UNAVAILABLE')
         with patch.object(report, '_records', return_value=rows), patch.object(report, '_state', return_value={}), patch.object(report, 'max_simultaneous', return_value=0):
             cells=report.summary_line(report.CONTROL, COHORT).split(' | ')
             self.assertEqual(cells[7:13], ['1','25.0%','1','25.0%','1','25.0%'])
+            self.assertEqual(cells[-2:], ['1/1/0/1', '0/1/1/1'])
         with patch.object(report, '_records', return_value=[]), patch.object(report, '_state', return_value={}), patch.object(report, 'max_simultaneous', return_value=0):
             cells=report.summary_line(report.CONTROL, COHORT).split(' | ')
             self.assertEqual(cells[7:13], ['0','N/A','0','N/A','0','N/A'])
@@ -255,7 +258,7 @@ class ForwardExperimentReportTests(unittest.TestCase):
                 if name == 'fast_drop':
                     self.assertIn('FAST_DROP exits | 0', value)
 
-    def test_general_summary_has_only_twelve_approved_shadows(self):
+    def test_general_summary_has_only_thirteen_approved_shadows(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = StringIO()
             with patch.object(report, 'ROOT', Path(tmp)), redirect_stdout(output):
@@ -264,15 +267,47 @@ class ForwardExperimentReportTests(unittest.TestCase):
             self.assertNotIn('DMI15_TRAJECTORY_CONTEXT_SHADOW |', output.getvalue())
             self.assertNotIn('HS_BULL_ELASTIC_SHADOW |', output.getvalue())
             for name in ('CHAVEADO_VIVO_SHADOW', 'CHAVEADO_VIVO_VERDE_SHADOW',
-                         'BE_OFF_CB_EMA_MACD_CLUSTER_ACT10_SHADOW'):
+                         'BE_OFF_CB_EMA_MACD_CLUSTER_ACT10_SHADOW',
+                         'EMA_MACD_CLUSTER_ACT10_K1_SHADOW'):
                 self.assertIn(name+' |', output.getvalue())
-            self.assertEqual(len(report.ACTIVE_ARMS),12)
+            self.assertEqual(len(report.ACTIVE_ARMS),13)
             self.assertIn('BE_OFF_CB_FAST_DROP_EMA_SHADOW |', output.getvalue())
             self.assertIn(' | net | net $/trade |', output.getvalue())
             self.assertNotIn(' | FAST |', output.getvalue())
             self.assertNotIn('TREND COVERAGE', output.getvalue())
             self.assertNotIn('WAVE COVERAGE', output.getvalue())
-            self.assertEqual(len(output.getvalue().strip().splitlines()), 14)
+            self.assertIn('defensive loss and spacing comparison', output.getvalue())
+
+    def test_k1_comparison_reports_defensive_sums_episodes_hs_blocks_and_blocks(self):
+        start=datetime(2026,10,1,tzinfo=timezone.utc)
+        def trade(pair, hours, reason, net):
+            opened=start+timedelta(hours=hours)
+            closed=opened+timedelta(minutes=30)
+            return {'pair_id':pair,'opened_at':opened.isoformat(),'closed_at':closed.isoformat(),
+                    'position_notional_usdt':20,'net_pnl_pct':net/20*100,'exit_reason':reason}
+        base_rows=[trade('b1',1,'HARD_STOP',-1),trade('b2',3,'HARD_STOP',-1),
+                   trade('b3',5,'HARD_STOP',-1),trade('b4',10,'HS_BEAR_CLUSTER_EXIT',-2)]
+        k1_rows=[trade('k1',1,'HARD_STOP',-1),trade('k2',7,'HS_BEAR_CLUSTER_EXIT',-1),
+                 trade('k3',13,'HARD_STOP',-1)]
+        base=report.EXPERIMENTS['be_off_cb_ema_macd_cluster_act10_shadow']
+        k1=report.EXPERIMENTS['ema_macd_cluster_act10_k1_shadow']
+        events=[{'ts':start.isoformat(),'event':'ENTRY_BLOCKED_SPACING_QUEDA'},
+                {'ts':start.isoformat(),'event':'ENTRY_BLOCKED_SPACING_QUEDA'}]
+        output=StringIO()
+        with patch.dict(report.EXPERIMENTS, {'be_off_cb_ema_macd_cluster_act10_shadow':base,
+                                             'ema_macd_cluster_act10_k1_shadow':k1}), \
+             patch.object(report,'_records',side_effect=lambda arm,_since: base_rows if arm==base else k1_rows), \
+             patch.object(report,'_state',return_value={}), \
+             patch.object(report,'_open_positions',return_value=[]), \
+             patch.object(report,'_events',side_effect=lambda arm,_since: events if arm==k1 else []), \
+             redirect_stdout(output):
+            report.print_k1_comparison(start)
+        value=output.getvalue()
+        self.assertIn('HS blocks 3+ | defensive loss episodes 3+ / 5+ | K1 blocks',value)
+        self.assertIn('BE_OFF_CB_EMA_MACD_CLUSTER_ACT10_SHADOW | 4 |',value)
+        self.assertIn('EMA_MACD_CLUSTER_ACT10_K1_SHADOW | 3 | $-3.0000',value)
+        self.assertIn('3 / $-3.0000',value)
+        self.assertIn('1 / 0 | 2',value)
 
     def test_default_brt_cohort_timestamp_is_exact(self) -> None:
         self.assertEqual(parse_time("27/09/2026 20:07:29"), COHORT)

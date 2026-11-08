@@ -23,7 +23,7 @@ COHORT_STARTED_TEXT = "27/09/2026 20:07:29"
 COMPARABILITY_FLOOR_TEXT = "28/09/2026 01:47:00"
 # Kept as a compatibility alias for imports made by earlier versions/tests.
 DEFAULT_SINCE_TEXT = COHORT_STARTED_TEXT
-SUMMARY_HEADER = "arm | closed | open | net | net $/trade | PF | DD $ | HS | HS% | PL | PL% | TRAIL | TRAIL% | median age | max simultaneous | trades/day | USDT*h | wave UNAVAILABLE open/close"
+SUMMARY_HEADER = "arm | closed | open | net | net $/trade | PF | DD $ | HS | HS% | PL | PL% | TRAIL | TRAIL% | median age | max simultaneous | trades/day | USDT*h | wave UNAVAILABLE open/close | marola_90 UNAVAILABLE open/close"
 ADMISSION_CUTOFF = ContextVar('admission_cutoff', default=None)
 TREND_AUDIT = ContextVar('trend_audit', default=False)
 
@@ -72,7 +72,8 @@ EXPERIMENTS = {
                     "data/state/be_off_cb_ema_macd_shadow.json", "data/telemetry/be_off_cb_ema_macd_shadow_events.jsonl"),
 }
 EXPERIMENTS.pop('hs_bull')
-for _key in ('be_off_cb_ema_macd_cluster_act10_shadow', 'chaveado_vivo_shadow', 'chaveado_vivo_verde_shadow'):
+for _key in ('be_off_cb_ema_macd_cluster_act10_shadow', 'ema_macd_cluster_act10_k1_shadow',
+             'chaveado_vivo_shadow', 'chaveado_vivo_verde_shadow'):
     EXPERIMENTS[_key] = Arm(_key.upper(), f'data/trades/trades_{_key}.jsonl',
                            f'data/state/{_key}.json', f'data/telemetry/{_key}_events.jsonl')
 _ordered = [arm for key, arm in EXPERIMENTS.items()
@@ -180,6 +181,8 @@ def _run_report(args, cutoff):
         print(f"bloqueadas adicionalmente por histogram | {sum(row['ema_macd_pass'] and not row['histogram_pass'] for row in events)}")
         print(f"bloqueadas adicionalmente por 1m | {sum(row['ema_macd_pass'] and row['histogram_pass'] and not row['confirmation_1m_pass'] for row in events)}")
         print(f"admitidas finais | {sum(row['final_decision'] == 'admitted' for row in events)}")
+    elif args.experiment == 'ema_macd_cluster_act10_k1_shadow':
+        print_k1_comparison(since)
     _print_accepted(arm, since, window.observed_at)
 
 
@@ -452,6 +455,70 @@ def print_summary(since: datetime) -> None:
         if arm not in (CONTROL, REAL_A):
             _validate_experiment_cohort(arm, since)
         print(summary_line(arm, since))
+    print_k1_comparison(since)
+
+
+def print_k1_comparison(since: datetime) -> None:
+    """Compare the K1 shadow with its unchanged EMA_MACD/ACT10 cluster base."""
+    base = EXPERIMENTS['be_off_cb_ema_macd_cluster_act10_shadow']
+    k1 = EXPERIMENTS['ema_macd_cluster_act10_k1_shadow']
+    print('\nEMA_MACD_CLUSTER_ACT10_K1 | defensive loss and spacing comparison')
+    print('arm | trades | net | net/1,000 USDT*h | HARD_STOP count / PnL | HS_BEAR_CLUSTER_EXIT count / PnL | defensive exits PnL | HS blocks 3+ | defensive loss episodes 3+ / 5+ | K1 blocks')
+    for arm in (base, k1):
+        rows = _records(arm, since)
+        state = _state(arm)
+        open_rows = _open_positions(state, since)
+        exposure = _exposure_notional_hours(rows, open_rows, since)
+        net_values = [value for row in rows if (value := _net_dollars(row)) is not None]
+        net_per_1000 = (sum(net_values) / exposure * 1000) if exposure > 0 and len(net_values) == len(rows) else None
+        hard = [row for row in rows if row.get('exit_reason') == 'HARD_STOP']
+        cluster = [row for row in rows if row.get('exit_reason') == 'HS_BEAR_CLUSTER_EXIT']
+        defensive = hard + cluster
+        hs_blocks = _time_blocks(hard)
+        loss_episodes = _time_blocks([row for row in defensive
+                                      if (_net_dollars(row) is not None and _net_dollars(row) < 0)])
+        k1_blocks = (sum(row.get('event') == 'ENTRY_BLOCKED_SPACING_QUEDA'
+                         for row in _events(arm, since)) if arm == k1 else None)
+        fmt = lambda value: f'${value:+.4f}' if value is not None else 'N/A'
+        rate = f'${net_per_1000:+.4f}' if net_per_1000 is not None else 'N/A'
+        print(f"{arm.name} | {len(rows)} | {_sum_net(rows)} | {rate} | {len(hard)} / {fmt(sum((_net_dollars(row) or 0) for row in hard))} | "
+              f"{len(cluster)} / {fmt(sum((_net_dollars(row) or 0) for row in cluster))} | "
+              f"{fmt(sum((_net_dollars(row) or 0) for row in defensive))} | "
+              f"{sum(len(group) >= 3 for group in hs_blocks)} | "
+              f"{sum(len(group) >= 3 for group in loss_episodes)} / {sum(len(group) >= 5 for group in loss_episodes)} | "
+              f"{k1_blocks if k1_blocks is not None else 'N/A'}")
+
+
+def _exposure_notional_hours(rows: Iterable[dict[str, Any]], open_rows: Iterable[dict[str, Any]],
+                             since: datetime) -> float:
+    now = datetime.now(timezone.utc)
+    total = 0.0
+    for row in [*rows, *open_rows]:
+        start = parse_time(row.get('opened_at') or row.get('open_ts'))
+        end = parse_time(row.get('closed_at') or row.get('close_ts')) or now
+        notional = _number(row.get('position_notional_usdt'))
+        if start and notional is not None:
+            total += notional * max(0.0, (min(end, now) - max(start, since)).total_seconds()) / 3600
+    return total
+
+
+def _time_blocks(rows: Iterable[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    ordered = sorted(rows, key=lambda row: parse_time(row.get('closed_at') or row.get('close_ts'))
+                     or datetime.min.replace(tzinfo=timezone.utc))
+    groups: list[list[dict[str, Any]]] = []
+    for row in ordered:
+        stamp = parse_time(row.get('closed_at') or row.get('close_ts'))
+        if stamp is None:
+            continue
+        if not groups:
+            groups.append([row])
+            continue
+        previous = parse_time(groups[-1][-1].get('closed_at') or groups[-1][-1].get('close_ts'))
+        if previous is not None and (stamp - previous).total_seconds() <= 6 * 3600:
+            groups[-1].append(row)
+        else:
+            groups.append([row])
+    return groups
 
 
 def summary_line(arm: Arm, since: datetime) -> str:
@@ -486,12 +553,12 @@ def summary_line(arm: Arm, since: datetime) -> str:
             hours += notional * max(0, (min(end, now)-max(start, since)).total_seconds())/3600
     days = max(0, (now-since).total_seconds())/86400
     frequency = f'{len(positions)/days:.3f}' if days else 'N/A'
-    def unavailable(phase):
+    def unavailable(layer, phase):
         selected = positions if phase == 'open' else rows
-        labeled = [p for p in selected if p.get('wave_'+phase) is not None]
-        return (f"{sum(p.get('wave_'+phase)=='UNAVAILABLE' for p in labeled)}/{len(labeled)}"
+        labeled = [p for p in selected if p.get(f'{layer}_{phase}') is not None]
+        return (f"{sum(p.get(f'{layer}_{phase}')=='UNAVAILABLE' for p in labeled)}/{len(labeled)}"
                 if labeled else 'N/A')
-    return f"{arm.name} | {len(rows)} | {opened} | {_sum_net(rows)} | {net_trade} | {pf} | {dd} | {hs} | {exit_share(hs)} | {pl} | {exit_share(pl)} | {trail} | {exit_share(trail)} | {med_age} | {maximum} | {frequency} | {hours:.4f} | {unavailable('open')}/{unavailable('close')}"
+    return f"{arm.name} | {len(rows)} | {opened} | {_sum_net(rows)} | {net_trade} | {pf} | {dd} | {hs} | {exit_share(hs)} | {pl} | {exit_share(pl)} | {trail} | {exit_share(trail)} | {med_age} | {maximum} | {frequency} | {hours:.4f} | {unavailable('wave', 'open')}/{unavailable('wave', 'close')} | {unavailable('marola_90', 'open')}/{unavailable('marola_90', 'close')}"
 
 
 def print_macd_bu_minus(arm: Arm, since: datetime) -> None:

@@ -51,7 +51,8 @@ class VpsCheckTests(unittest.TestCase):
             root=Path(tmp);(root/'logs').mkdir()
             since='2026-11-02T00:00:00+00:00'
             events=[{'ts':since,'event':'structure_v2_enabled','new_shadows':
-                     {k:{'enabled':True,'accept_new_entries':True} for k in NEW}},
+                     {**{k:{'enabled':True,'accept_new_entries':True} for k in NEW},
+                      'ema_macd_cluster_act10_k1_shadow':{'enabled':True,'accept_new_entries':True}}},
                     {'ts':since,'event':'structure_health','wave':{'label':'UNAVAILABLE','undefined_reason':'MISSING_CANDLES'}}]
             (root/'logs/system.log').write_text(''.join(json.dumps(x)+'\n' for x in events),encoding='utf8')
             for key in ACTIVE:
@@ -69,13 +70,14 @@ class VpsCheckTests(unittest.TestCase):
             self.assertEqual(arm['close']['counts'],{'MISSING_FIELD':1})
             self.assertIsNone(result['arms'][ACTIVE[1]]['open']['unavailable_pct_of_labeled'])
             self.assertTrue(result['new_shadows_confirmed_enabled'])
+            self.assertTrue(result['k1_shadow_confirmed_enabled'])
             self.assertEqual(before,{str(p):p.read_bytes() for p in root.rglob('*') if p.is_file()})
 
     def test_sparse_health_keeps_gap_visible_and_repair_recovers_it(self):
-        now=[900000*60+3000];provider=LiveStructure('SOLUSDT',0);logger=Mock()
+        now=[3600000*80+3000];provider=LiveStructure('SOLUSDT',0);logger=Mock()
         client=Mock()
         def rows(symbol,interval,limit):
-            step={'15m':900000,'5m':300000}[interval];end=now[0]//step*step
+            step={'1h':3600000,'15m':900000,'5m':300000}[interval];end=now[0]//step*step
             return [[t,0,100,90,0,0,t+step-1] for t in range(end-(limit-1)*step,end+step,step)]
         client.klines.side_effect=rows
         repair=StructureRepair(provider,client,logger,lambda:now[0],
@@ -99,14 +101,16 @@ class VpsCheckTests(unittest.TestCase):
         values=self.samples();values[2]['memory_available_kib']=191*1024
         evidence={'mode':'resources','phase':'after','settings':self.settings,
                   **resource_verdict(values,self.settings,5)}
-        result=fallback(self.config,evidence)
-        expected=deepcopy(self.config)
+        active_config=deepcopy(self.config)
+        for key in KEYS:active_config['instrumentation'][key]['enabled']=True
+        result=fallback(active_config,evidence)
+        expected=deepcopy(active_config)
         for key in KEYS:expected['instrumentation'][key]['enabled']=False
         self.assertEqual(result,expected)
-        self.assertTrue(all(self.config['instrumentation'][k]['enabled'] for k in KEYS))
-        self.assertEqual(fallback(self.config,{**evidence,'phase':'before'}),expected)
-        with self.assertRaises(ValueError):fallback(self.config,{**evidence,'phase':'fallback'})
-        with self.assertRaises(ValueError):fallback(self.config,{**evidence,'warmed_up':False})
+        self.assertTrue(all(active_config['instrumentation'][k]['enabled'] for k in KEYS))
+        self.assertEqual(fallback(active_config,{**evidence,'phase':'before'}),expected)
+        with self.assertRaises(ValueError):fallback(active_config,{**evidence,'phase':'fallback'})
+        with self.assertRaises(ValueError):fallback(active_config,{**evidence,'warmed_up':False})
 
     def test_isolated_public_probe_recovers_gap_without_retroactive_availability(self):
         clock=[900000*2000000+3000]
@@ -116,16 +120,19 @@ class VpsCheckTests(unittest.TestCase):
         client=Mock()
         def candles(symbol,interval,limit):
             clock[0]+=100
-            step={'15m':900000,'5m':300000}[interval];end=clock[0]//step*step
+            step={'1h':3600000,'15m':900000,'5m':300000}[interval];end=clock[0]//step*step
             return [[t,0,100,90,0,0,t+step-1] for t in range(end-(limit-1)*step,end+step,step)]
         client.klines.side_effect=candles
         with patch('src.exchange.binance_market_data.BinanceMarketDataClient',return_value=client), \
              patch('tools.keyed_vps_check.time.time',side_effect=now):
-            result=public_probe(SimpleNamespace(),self.config)
+            result=public_probe(SimpleNamespace(interval='5m'),self.config)
         self.assertTrue(result['passed'])
+        self.assertEqual(result['interval'],'5m')
+        self.assertTrue(any(e['event']=='structure_gap_repair' and e['interval']=='5m'
+                            for e in result['repair_events']))
         self.assertFalse(result['production_buffers_modified'])
         self.assertEqual(result['past_snapshot_after_repair']['label'],'UNAVAILABLE')
-        self.assertEqual(client.klines.call_count,3)
+        self.assertEqual(client.klines.call_count,4)
         client.session.close.assert_called_once()
 
 

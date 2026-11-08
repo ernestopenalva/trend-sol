@@ -119,8 +119,10 @@ class RealAContextShadow(ExitContextTelemetry):
         if minimum > 0 and any(abs(signal.price - item.entry_price) < minimum for item in self.open_positions):
             self.blocked_spacing += 1
             return self._block("ENTRY_BLOCKED_SPACING", signal, bucket, required_distance=minimum)
-        self._open(signal, bucket)
-        return True
+        opened = self._open(signal, bucket)
+        # Existing arms return None after opening. A specialized final admission
+        # gate may return False without consuming the already-checked bucket.
+        return True if opened is None else bool(opened)
 
     def on_tick(self, price: float, observed_at: str) -> None:
         if not self.enabled:
