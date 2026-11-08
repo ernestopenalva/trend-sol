@@ -24,6 +24,9 @@ COMPARABILITY_FLOOR_TEXT = "28/09/2026 01:47:00"
 # Kept as a compatibility alias for imports made by earlier versions/tests.
 DEFAULT_SINCE_TEXT = COHORT_STARTED_TEXT
 SUMMARY_HEADER = "arm | closed | open | net | net $/trade | PF | DD $ | HS | HS% | PL | PL% | TRAIL | TRAIL% | median age | max simultaneous | trades/day | USDT*h | wave UNAVAILABLE open/close | marola_90 UNAVAILABLE open/close"
+COMPARABLE_HEADER = " | ".join(SUMMARY_HEADER.split(" | ")[:-3])
+DIAGNOSTIC_HEADER = SUMMARY_HEADER
+K1_STARTED_TEXT = "08/11/2026 00:31"
 ADMISSION_CUTOFF = ContextVar('admission_cutoff', default=None)
 TREND_AUDIT = ContextVar('trend_audit', default=False)
 
@@ -86,6 +89,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--experiment", choices=tuple(EXPERIMENTS))
     parser.add_argument('--since', help='Admission cutoff in BRT: DD/MM/YYYY HH:MM[:SS]')
+    parser.add_argument('--diagnostico', action='store_true', help='Include diagnostic exposure and UNAVAILABLE columns in the summary')
+    parser.add_argument('--k1', action='store_true', help='Show the registered K1 vs control forward comparison')
     parser.add_argument("--list-accepted", action="store_true",
                         help="List accepted trades for ema_macd or macd_bu_minus")
     parser.add_argument('--matrix-audit', action='store_true', help='Diagnostic EMA_MACD matrix audit; never changes policy')
@@ -99,6 +104,10 @@ def main() -> None:
         parser.error('--pair/--top-n require --matrix-audit')
     if args.top_n is not None and args.top_n < 1:
         parser.error('--top-n must be positive')
+    if args.k1 and (args.experiment or args.matrix_audit or args.list_accepted or args.diagnostico or args.trend_audit):
+        parser.error('--k1 cannot be combined with another report mode')
+    if args.diagnostico and (args.experiment or args.matrix_audit or args.list_accepted or args.trend_audit):
+        parser.error('--diagnostico applies only to the general summary')
     if args.matrix_audit:
         from tools.forward_matrix_audit import parse_pair
         if args.pair is not None:
@@ -124,6 +133,12 @@ def main() -> None:
 
 
 def _run_report(args, cutoff):
+    if getattr(args, 'k1', False):
+        since = cutoff or parse_time(K1_STARTED_TEXT)
+        if since is None:  # pragma: no cover
+            raise SystemExit('invalid K1 start constant')
+        print_k1_comparison(since)
+        return
     cohort_started = parse_time(COHORT_STARTED_TEXT)
     floor = parse_time(COMPARABILITY_FLOOR_TEXT)
     if cohort_started is None or floor is None:  # pragma: no cover - constants are tested
@@ -137,9 +152,9 @@ def _run_report(args, cutoff):
               else determine_comparable_window(cohort_started, floor))
     if args.list_accepted and args.experiment not in {"ema_macd", "macd_bu_minus"}:
         raise SystemExit("--list-accepted is only valid with --experiment ema_macd or macd_bu_minus")
-    if cutoff is None:
+    if cutoff is None and (args.experiment is not None or args.diagnostico):
         _print_window(window)
-    else:
+    elif cutoff is not None:
         print(f'FORWARD EXPERIMENT REPORT | since {_fmt(cutoff)}')
     if window.comparable_since is None:
         print("\nCOMPARABLE WINDOW | PENDING")
@@ -150,7 +165,7 @@ def _run_report(args, cutoff):
         return
     since = window.comparable_since
     if args.experiment is None:
-        print_summary(since)
+        print_summary(since, diagnostico=getattr(args, 'diagnostico', False))
         return
     if args.experiment == 'trail_activation_gap':
         print_trail_activation_gap(since, window.observed_at)
@@ -182,7 +197,7 @@ def _run_report(args, cutoff):
         print(f"bloqueadas adicionalmente por 1m | {sum(row['ema_macd_pass'] and row['histogram_pass'] and not row['confirmation_1m_pass'] for row in events)}")
         print(f"admitidas finais | {sum(row['final_decision'] == 'admitted' for row in events)}")
     elif args.experiment == 'ema_macd_cluster_act10_k1_shadow':
-        print_k1_comparison(since)
+        print_k1_comparison(since, include_ruler=False)
     _print_accepted(arm, since, window.observed_at)
 
 
@@ -448,29 +463,31 @@ def _print_ema_macd_warmup(events: list[dict[str, Any]]) -> None:
         print(f"  UNAVAILABLE/OTHER | {unavailable}")
 
 
-def print_summary(since: datetime) -> None:
+def print_summary(since: datetime, diagnostico: bool = False) -> None:
     print(f"\nCOMPARABLE SUMMARY | since {_fmt(since)}")
-    print(SUMMARY_HEADER)
+    print(DIAGNOSTIC_HEADER if diagnostico else COMPARABLE_HEADER)
     for arm in ACTIVE_ARMS:
         if arm not in (CONTROL, REAL_A):
             _validate_experiment_cohort(arm, since)
-        print(summary_line(arm, since))
-    print_k1_comparison(since)
+        print(summary_line(arm, since, diagnostico=diagnostico))
 
 
-def print_k1_comparison(since: datetime) -> None:
+def print_k1_comparison(since: datetime, include_ruler: bool = True) -> None:
     """Compare the K1 shadow with its unchanged EMA_MACD/ACT10 cluster base."""
     base = EXPERIMENTS['be_off_cb_ema_macd_cluster_act10_shadow']
     k1 = EXPERIMENTS['ema_macd_cluster_act10_k1_shadow']
     print('\nEMA_MACD_CLUSTER_ACT10_K1 | defensive loss and spacing comparison')
     print('arm | trades | net | net/1,000 USDT*h | HARD_STOP count / PnL | HS_BEAR_CLUSTER_EXIT count / PnL | defensive exits PnL | HS blocks 3+ | defensive loss episodes 3+ / 5+ | K1 blocks')
+    arm_data = {}
     for arm in (base, k1):
         rows = _records(arm, since)
         state = _state(arm)
         open_rows = _open_positions(state, since)
         exposure = _exposure_notional_hours(rows, open_rows, since)
-        net_values = [value for row in rows if (value := _net_dollars(row)) is not None]
-        net_per_1000 = (sum(net_values) / exposure * 1000) if exposure > 0 and len(net_values) == len(rows) else None
+        metric_rows = _k1_all_trades({'rows': rows, 'open_rows': open_rows})
+        net_values = [_k1_net_dollars(row) for row in metric_rows]
+        net_per_1000 = (sum(value for value in net_values if value is not None) / exposure * 1000
+                        if exposure > 0 and all(value is not None for value in net_values) else None)
         hard = [row for row in rows if row.get('exit_reason') == 'HARD_STOP']
         cluster = [row for row in rows if row.get('exit_reason') == 'HS_BEAR_CLUSTER_EXIT']
         defensive = hard + cluster
@@ -479,14 +496,164 @@ def print_k1_comparison(since: datetime) -> None:
                                       if (_net_dollars(row) is not None and _net_dollars(row) < 0)])
         k1_blocks = (sum(row.get('event') == 'ENTRY_BLOCKED_SPACING_QUEDA'
                          for row in _events(arm, since)) if arm == k1 else None)
+        arm_data[arm] = {'rows': rows, 'open_rows': open_rows, 'metric_rows': metric_rows, 'net_values': net_values,
+                         'hard': hard, 'cluster': cluster, 'defensive': defensive,
+                         'loss_episodes': loss_episodes, 'k1_blocks': k1_blocks,
+                         'exposure': exposure}
         fmt = lambda value: f'${value:+.4f}' if value is not None else 'N/A'
         rate = f'${net_per_1000:+.4f}' if net_per_1000 is not None else 'N/A'
-        print(f"{arm.name} | {len(rows)} | {_sum_net(rows)} | {rate} | {len(hard)} / {fmt(sum((_net_dollars(row) or 0) for row in hard))} | "
+        net_total = sum(value for value in net_values if value is not None) if all(value is not None for value in net_values) else None
+        print(f"{arm.name} | {len(metric_rows)} | {_fmt_net(net_total)} | {rate} | {len(hard)} / {fmt(sum((_net_dollars(row) or 0) for row in hard))} | "
               f"{len(cluster)} / {fmt(sum((_net_dollars(row) or 0) for row in cluster))} | "
               f"{fmt(sum((_net_dollars(row) or 0) for row in defensive))} | "
               f"{sum(len(group) >= 3 for group in hs_blocks)} | "
               f"{sum(len(group) >= 3 for group in loss_episodes)} / {sum(len(group) >= 5 for group in loss_episodes)} | "
               f"{k1_blocks if k1_blocks is not None else 'N/A'}")
+    if include_ruler:
+        _print_k1_ruler(since, base, k1, arm_data)
+
+
+def _print_k1_ruler(since: datetime, control: Arm, candidate: Arm, data: dict[Arm, dict[str, Any]]) -> None:
+    now = datetime.now(timezone.utc)
+    control_rows = _k1_all_trades(data[control])
+    candidate_rows = _k1_all_trades(data[candidate])
+    control_by_source = {_source(row): row for row in control_rows if _source(row) is not None}
+    candidate_by_source = {_source(row): row for row in candidate_rows if _source(row) is not None}
+    control_sources, candidate_sources = set(control_by_source), set(candidate_by_source)
+    common_sources = control_sources & candidate_sources
+    control_only, candidate_only = control_sources - candidate_sources, candidate_sources - control_sources
+    different_count = len(control_only) + len(candidate_only)
+    days = max(0.0, (now - since).total_seconds() / 86400)
+
+    def net(row):
+        return _k1_net_dollars(row)
+
+    def rate(rows):
+        values = [net(row) for row in rows]
+        return sum(v for v in values if v is not None) / len(rows) if rows and all(v is not None for v in values) else None
+
+    control_rate, candidate_rate = rate(control_rows), rate(candidate_rows)
+    total_delta = candidate_rate - control_rate if candidate_rate is not None and control_rate is not None else None
+    midpoint = since + (now - since) / 2
+    half_deltas = []
+    for start, end in ((since, midpoint), (midpoint, now)):
+        crows = [r for r in control_rows if _opened_at(r) and start <= _opened_at(r) < end]
+        krows = [r for r in candidate_rows if _opened_at(r) and start <= _opened_at(r) < end]
+        cr, kr = rate(crows), rate(krows)
+        half_deltas.append(kr - cr if kr is not None and cr is not None else None)
+
+    daily_delta: dict[str, float] = {}
+    for source in control_sources | candidate_sources:
+        left, right = control_by_source.get(source), candidate_by_source.get(source)
+        stamp = _opened_at(right or left)
+        if stamp is None:
+            continue
+        right_net = net(right) if right is not None else 0.0
+        left_net = net(left) if left is not None else 0.0
+        contribution = (right_net or 0.0) - (left_net or 0.0)
+        day = stamp.astimezone(BRASILIA_TZ).date().isoformat()
+        daily_delta[day] = daily_delta.get(day, 0.0) + contribution
+    best_days = [day for day, value in sorted(daily_delta.items(), key=lambda item: (-item[1], item[0])) if value > 0][:3]
+    excluded = set(best_days)
+    c_excluded = [r for r in control_rows if _opened_at(r) and _opened_at(r).astimezone(BRASILIA_TZ).date().isoformat() not in excluded]
+    k_excluded = [r for r in candidate_rows if _opened_at(r) and _opened_at(r).astimezone(BRASILIA_TZ).date().isoformat() not in excluded]
+    cr, kr = rate(c_excluded), rate(k_excluded)
+    without_best = kr - cr if kr is not None and cr is not None else None
+
+    control_defensive = [r for r in control_rows if r.get('exit_reason') in ('HARD_STOP', 'HS_BEAR_CLUSTER_EXIT')]
+    candidate_defensive = [r for r in candidate_rows if r.get('exit_reason') in ('HARD_STOP', 'HS_BEAR_CLUSTER_EXIT')]
+    def defensive_per_trade(rows, defensive):
+        values = [net(row) for row in defensive]
+        if not rows or any(value is None for value in values):
+            return None
+        return sum(values) / len(rows)
+
+    control_def_rate = defensive_per_trade(control_rows, control_defensive)
+    candidate_def_rate = defensive_per_trade(candidate_rows, candidate_defensive)
+    control_episodes = _time_blocks([r for r in control_defensive if net(r) is not None and net(r) < 0])
+    candidate_episodes = _time_blocks([r for r in candidate_defensive if net(r) is not None and net(r) < 0])
+    k1_only_rows = [candidate_by_source[s] for s in candidate_only]
+    k1_only_rate = rate(k1_only_rows)
+    divergences = []
+    fields = ('opened_at', 'entry_price', 'closed_at', 'exit_price', 'exit_reason', 'net_pnl_pct',
+              'net_pnl_usdt', 'unrealized_net_pnl_usdt', 'mtm_net_usdt', 'mark_price',
+              'current_price', 'position_notional_usdt', 'quantity')
+    for source in sorted(common_sources):
+        left, right = control_by_source[source], candidate_by_source[source]
+        mismatches = [field for field in fields if not _same_trade_value(left.get(field), right.get(field))]
+        if mismatches:
+            divergences.append((source, mismatches))
+
+    print('\nK1 RÉGUA | seção 3')
+    print(f"Δ net/trade total (K1 − controle) | {_fmt_net(total_delta)}")
+    print(f"Δ net/trade metade 1 | {_fmt_net(half_deltas[0])} | metade 2 | {_fmt_net(half_deltas[1])} | corte BRT | {_fmt(midpoint)}")
+    print(f"3 melhores dias BRT excluídos | {', '.join(best_days) if best_days else 'nenhum'} | Δ net/trade restante | {_fmt_net(without_best)}")
+    print(f"perdas defensivas/trade | controle {_fmt_net(control_def_rate)} ({len(control_defensive)} saídas / {len(control_rows)} trades) | K1 {_fmt_net(candidate_def_rate)} ({len(candidate_defensive)} saídas / {len(candidate_rows)} trades)")
+    print(f"trades por source | só K1 {len(candidate_only)} | só controle {len(control_only)} | comuns {len(common_sources)} | diferentes {different_count}")
+    print(f"só K1: net/trade vs média controle | {_fmt_net(k1_only_rate)} vs {_fmt_net(control_rate)}")
+    print(f"trades comuns idênticos | {'sim' if not divergences else 'não'}")
+    for source, fields_changed in divergences:
+        print(f"divergência source {source} | {', '.join(fields_changed)}")
+    print(f"amostra mínima | {days:.1f}/42 dias | {different_count}/30 trades diferentes")
+    sample_met = days >= 42 and different_count >= 30
+    if not sample_met:
+        print('em acompanhamento — amostra mínima não atingida')
+    else:
+        criteria = (
+            total_delta is not None and total_delta >= 0 and all(value is not None and value >= -0.005 for value in half_deltas) and without_best is not None and without_best >= -0.005,
+            candidate_def_rate is not None and control_def_rate is not None and candidate_def_rate >= control_def_rate and len(candidate_episodes) <= len(control_episodes),
+            k1_only_rate is not None and control_rate is not None and k1_only_rate >= control_rate,
+        )
+        values = (
+            f"total {_fmt_net(total_delta)}; metades {_fmt_net(half_deltas[0])}/{_fmt_net(half_deltas[1])}; sem top 3 {_fmt_net(without_best)}",
+            f"perdas/trade K1 {_fmt_net(candidate_def_rate)} vs controle {_fmt_net(control_def_rate)}; episódios 3+ K1 {sum(len(g)>=3 for g in candidate_episodes)} vs controle {sum(len(g)>=3 for g in control_episodes)}",
+            f"só K1 {_fmt_net(k1_only_rate)} vs controle {_fmt_net(control_rate)}",
+        )
+        for idx, (ok, value) in enumerate(zip(criteria, values), 1):
+            print(f"critério {idx} | {'cumpre' if ok else 'não cumpre'} | {value}")
+    if days >= 21 and total_delta is not None and total_delta < -0.02:
+        print('revisão antecipada (régua §5)')
+    print(f"trades comuns divergentes | {len(divergences)}")
+
+
+def _k1_all_trades(data: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = list(data['rows'])
+    known = {_source(row) for row in rows if _source(row) is not None}
+    for row in data['open_rows']:
+        if _source(row) not in known:
+            rows.append(row)
+    return rows
+
+
+def _k1_net_dollars(row: dict[str, Any]) -> float | None:
+    value = _net_dollars(row)
+    if value is not None:
+        return value
+    for key in ('unrealized_net_pnl_usdt', 'mtm_net_usdt', 'net_pnl_usdt'):
+        value = _number(row.get(key))
+        if value is not None:
+            return value
+    for key in ('unrealized_net_pnl_pct', 'mtm_net_pnl_pct'):
+        pct, notional = _number(row.get(key)), _number(row.get('position_notional_usdt'))
+        if pct is not None and notional is not None:
+            return pct * notional / 100
+    return None
+
+
+def _opened_at(row: dict[str, Any]) -> datetime | None:
+    return parse_time(row.get('opened_at') or row.get('open_ts'))
+
+
+def _same_trade_value(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return left is right
+    a, b = _number(left), _number(right)
+    if a is not None and b is not None:
+        return abs(a-b) <= 1e-9
+    if left in ('Z',) or right in ('Z',):
+        return left == right
+    left_time, right_time = parse_time(left), parse_time(right)
+    return left_time == right_time if left_time or right_time else left == right
 
 
 def _exposure_notional_hours(rows: Iterable[dict[str, Any]], open_rows: Iterable[dict[str, Any]],
@@ -521,7 +688,7 @@ def _time_blocks(rows: Iterable[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     return groups
 
 
-def summary_line(arm: Arm, since: datetime) -> str:
+def summary_line(arm: Arm, since: datetime, diagnostico: bool = True) -> str:
     rows, state = _records(arm, since), _state(arm)
     values = [_net_dollars(row) for row in rows]
     net = [value for value in values if value is not None]
@@ -558,7 +725,10 @@ def summary_line(arm: Arm, since: datetime) -> str:
         labeled = [p for p in selected if p.get(f'{layer}_{phase}') is not None]
         return (f"{sum(p.get(f'{layer}_{phase}')=='UNAVAILABLE' for p in labeled)}/{len(labeled)}"
                 if labeled else 'N/A')
-    return f"{arm.name} | {len(rows)} | {opened} | {_sum_net(rows)} | {net_trade} | {pf} | {dd} | {hs} | {exit_share(hs)} | {pl} | {exit_share(pl)} | {trail} | {exit_share(trail)} | {med_age} | {maximum} | {frequency} | {hours:.4f} | {unavailable('wave', 'open')}/{unavailable('wave', 'close')} | {unavailable('marola_90', 'open')}/{unavailable('marola_90', 'close')}"
+    line = f"{arm.name} | {len(rows)} | {opened} | {_sum_net(rows)} | {net_trade} | {pf} | {dd} | {hs} | {exit_share(hs)} | {pl} | {exit_share(pl)} | {trail} | {exit_share(trail)} | {med_age} | {maximum} | {frequency}"
+    if diagnostico:
+        line += f" | {hours:.4f} | {unavailable('wave', 'open')}/{unavailable('wave', 'close')} | {unavailable('marola_90', 'open')}/{unavailable('marola_90', 'close')}"
+    return line
 
 
 def print_macd_bu_minus(arm: Arm, since: datetime) -> None:

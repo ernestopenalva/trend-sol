@@ -36,11 +36,11 @@ class ForwardExperimentReportTests(unittest.TestCase):
         rows[0].update(wave_open='UNAVAILABLE', wave_close='BULL',
                        marola_90_open='BEAR', marola_90_close='UNAVAILABLE')
         with patch.object(report, '_records', return_value=rows), patch.object(report, '_state', return_value={}), patch.object(report, 'max_simultaneous', return_value=0):
-            cells=report.summary_line(report.CONTROL, COHORT).split(' | ')
+            cells=report.summary_line(report.CONTROL, COHORT, diagnostico=True).split(' | ')
             self.assertEqual(cells[7:13], ['1','25.0%','1','25.0%','1','25.0%'])
             self.assertEqual(cells[-2:], ['1/1/0/1', '0/1/1/1'])
         with patch.object(report, '_records', return_value=[]), patch.object(report, '_state', return_value={}), patch.object(report, 'max_simultaneous', return_value=0):
-            cells=report.summary_line(report.CONTROL, COHORT).split(' | ')
+            cells=report.summary_line(report.CONTROL, COHORT, diagnostico=True).split(' | ')
             self.assertEqual(cells[7:13], ['0','N/A','0','N/A','0','N/A'])
 
     def test_entry_and_exit_contexts_are_separate_and_closed_at_exit(self):
@@ -276,7 +276,38 @@ class ForwardExperimentReportTests(unittest.TestCase):
             self.assertNotIn(' | FAST |', output.getvalue())
             self.assertNotIn('TREND COVERAGE', output.getvalue())
             self.assertNotIn('WAVE COVERAGE', output.getvalue())
-            self.assertIn('defensive loss and spacing comparison', output.getvalue())
+            self.assertNotIn('defensive loss and spacing comparison', output.getvalue())
+            self.assertNotIn('USDT*h', output.getvalue())
+            self.assertNotIn('UNAVAILABLE open/close', output.getvalue())
+
+    def test_diagnostico_adds_only_the_diagnostic_columns(self):
+        window = report.ComparableWindow(COHORT, COHORT, COHORT + timedelta(days=1))
+        with tempfile.TemporaryDirectory() as tmp:
+            output = StringIO()
+            with patch.object(report, 'ROOT', Path(tmp)), patch.object(report, 'determine_comparable_window', return_value=window), patch('sys.argv', ['report', '--diagnostico']), redirect_stdout(output):
+                main()
+        value = output.getvalue()
+        self.assertIn(report.DIAGNOSTIC_HEADER, value)
+        self.assertIn('USDT*h | wave UNAVAILABLE open/close | marola_90 UNAVAILABLE open/close', value)
+        self.assertNotIn('defensive loss and spacing comparison', value)
+
+    def test_default_cli_prints_only_comparable_summary_table(self):
+        window = report.ComparableWindow(COHORT, COHORT, COHORT + timedelta(days=1))
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(report, 'ROOT', Path(tmp)), patch.object(report, 'determine_comparable_window', return_value=window), patch('sys.argv', ['report']), redirect_stdout(output):
+            main()
+        value = output.getvalue()
+        self.assertIn('COMPARABLE SUMMARY', value)
+        self.assertNotIn('FORWARD EXPERIMENT REPORT', value)
+        self.assertNotIn('FORWARD EXPERIMENT COHORT', value)
+        self.assertNotIn('USDT*h', value)
+
+
+    def test_k1_cli_uses_registered_default_start_and_prints_ruler(self):
+        output = StringIO()
+        with patch.object(report, 'print_k1_comparison') as printer, patch('sys.argv', ['report', '--k1']), redirect_stdout(output):
+            main()
+        printer.assert_called_once_with(parse_time('08/11/2026 00:31'))
 
     def test_k1_comparison_reports_defensive_sums_episodes_hs_blocks_and_blocks(self):
         start=datetime(2026,10,1,tzinfo=timezone.utc)
@@ -308,6 +339,61 @@ class ForwardExperimentReportTests(unittest.TestCase):
         self.assertIn('EMA_MACD_CLUSTER_ACT10_K1_SHADOW | 3 | $-3.0000',value)
         self.assertIn('3 / $-3.0000',value)
         self.assertIn('1 / 0 | 2',value)
+
+    def test_k1_ruler_tracks_source_pairs_halves_top_days_and_criteria(self):
+        start = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        def trade(source, hours, net, reason='TRAILING'):
+            opened = start + timedelta(hours=hours)
+            closed = opened + timedelta(minutes=30)
+            return {'source_candle_open_time':source, 'opened_at':opened.isoformat(),
+                    'closed_at':closed.isoformat(), 'position_notional_usdt':100.,
+                    'net_pnl_pct':net, 'exit_reason':reason}
+        base = report.EXPERIMENTS['be_off_cb_ema_macd_cluster_act10_shadow']
+        k1 = report.EXPERIMENTS['ema_macd_cluster_act10_k1_shadow']
+        control_rows = [trade(1, 1, .1), trade(2, 48, .2), trade(3, 96, -.1, 'HARD_STOP')]
+        k1_rows = [trade(1, 1, .1), trade(2, 48, .2), trade(4, 120, .4)]
+        def values(arm):
+            rows = control_rows if arm == base else k1_rows
+            defensive = [row for row in rows if row['exit_reason'] in ('HARD_STOP','HS_BEAR_CLUSTER_EXIT')]
+            return {'rows':rows, 'open_rows':[], 'net_values':[], 'hard':[], 'cluster':defensive,
+                    'defensive':defensive, 'loss_episodes':[], 'k1_blocks':0, 'exposure':0}
+        output = StringIO()
+        with redirect_stdout(output):
+            report._print_k1_ruler(start, base, k1, {base:values(base), k1:values(k1)})
+        value = output.getvalue()
+        self.assertIn('só K1 1 | só controle 1 | comuns 2 | diferentes 2', value)
+        self.assertIn('trades comuns idênticos | sim', value)
+        self.assertIn('/42 dias | 2/30 trades diferentes', value)
+        self.assertIn('em acompanhamento — amostra mínima não atingida', value)
+        self.assertNotIn('critério 1 |', value)
+
+    def test_k1_ruler_reports_three_individual_criteria_after_sample_minimum(self):
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        base = report.EXPERIMENTS['be_off_cb_ema_macd_cluster_act10_shadow']
+        k1 = report.EXPERIMENTS['ema_macd_cluster_act10_k1_shadow']
+        def rows(prefix, offset, n=32):
+            result=[]
+            for idx in range(n):
+                opened=start+timedelta(days=idx*8)
+                hard_stop = idx == 0
+                result.append({'source_candle_open_time':idx+offset,'opened_at':opened.isoformat(),
+                    'closed_at':(opened+timedelta(minutes=20)).isoformat(), 'position_notional_usdt':100.,
+                    'net_pnl_pct':-.1 if hard_stop else (.1 if prefix=='k' else 0.),
+                    'exit_reason':'HARD_STOP' if hard_stop else 'TRAILING'})
+            return result
+        def data(trades):
+            return {'rows':trades, 'open_rows':[], 'net_values':[], 'hard':[], 'cluster':[],
+                    'defensive':[], 'loss_episodes':[], 'k1_blocks':0, 'exposure':0}
+        output=StringIO()
+        with redirect_stdout(output):
+            report._print_k1_ruler(start, base, k1, {base:data(rows('c',1000)), k1:data(rows('k',2000))})
+        value=output.getvalue()
+        self.assertIn('critério 1 | cumpre',value)
+        self.assertIn('critério 2 | cumpre',value)
+        self.assertIn('critério 3 | cumpre',value)
+        self.assertNotIn('critério 4 |',value)
+        self.assertNotIn('aprovado',value.lower())
+        self.assertNotIn('reprovado',value.lower())
 
     def test_default_brt_cohort_timestamp_is_exact(self) -> None:
         self.assertEqual(parse_time("27/09/2026 20:07:29"), COHORT)
